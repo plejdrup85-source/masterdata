@@ -4,7 +4,7 @@ python-multipart==0.0.20
 openpyxl==3.1.5
 httpx==0.28.1
 beautifulsoup4==4.12.3
-lxml==5.3.0
+# lxml==5.3.0  # Requires C compilation, use html.parser instead on Render
 pydantic==2.10.4
 aiofiles==24.1.0
 # playwright==1.49.1  # Optional: install locally for dynamic content support

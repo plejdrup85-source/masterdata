@@ -48,7 +48,7 @@ def _build_search_queries(product: ProductData) -> list[str]:
 
 def _extract_product_info_from_page(html: str, url: str) -> dict:
     """Extract product information from a manufacturer page."""
-    soup = BeautifulSoup(html, "lxml")
+    soup = BeautifulSoup(html, "html.parser")
     info = {}
 
     # Try to get product name from h1
