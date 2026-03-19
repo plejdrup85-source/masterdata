@@ -109,7 +109,7 @@ def _extract_product_from_json_ld(json_ld_list: list[dict]) -> dict:
 
 def _parse_product_page(html: str, article_number: str) -> ProductData:
     """Parse a product page HTML into ProductData."""
-    soup = BeautifulSoup(html, "html.parser")
+    soup = BeautifulSoup(html, "lxml")
 
     # Extract JSON-LD data
     json_ld = _extract_json_ld(soup)
@@ -211,7 +211,7 @@ def _parse_product_page(html: str, article_number: str) -> ProductData:
 
 def _find_product_links_in_search(html: str, article_number: str) -> list[dict]:
     """Extract product links from search results page."""
-    soup = BeautifulSoup(html, "html.parser")
+    soup = BeautifulSoup(html, "lxml")
     links = []
 
     # Look for product links in search results
