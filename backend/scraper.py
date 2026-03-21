@@ -213,6 +213,15 @@ def _parse_product_page(html: str, article_number: str) -> ProductData:
     # Description
     product.description = ld_info.get("description")
     if not product.description:
+        # Fallback 1: OneMed accordion section for description
+        desc_accordion = soup.find(id="accordionItem_descriptionAndDocuments")
+        if desc_accordion:
+            desc_text = desc_accordion.get_text(strip=True)
+            if desc_text and len(desc_text) > 10:
+                product.description = desc_text
+                logger.debug(f"[{article_number}] Description from accordion ({len(desc_text)} chars)")
+    if not product.description:
+        # Fallback 2: generic description class
         desc_el = soup.find("div", class_=re.compile(r"description|product-desc", re.I))
         if desc_el:
             product.description = desc_el.get_text(strip=True)
@@ -224,8 +233,20 @@ def _parse_product_page(html: str, article_number: str) -> ProductData:
 
     # Category breadcrumbs
     breadcrumbs = ld_info.get("breadcrumbs", [])
+    if not breadcrumbs:
+        # Fallback: extract breadcrumb from HTML nav/ol element
+        bc_nav = soup.find(class_=re.compile(r"breadcrumb", re.I))
+        if bc_nav:
+            bc_links = bc_nav.find_all("a")
+            breadcrumbs = [a.get_text(strip=True) for a in bc_links if a.get_text(strip=True)]
+            # Also grab the last non-link text (current page)
+            bc_full = bc_nav.get_text(" ", strip=True)
+            # The last segment after the last ">" is the current product — skip it for category
+            if breadcrumbs:
+                logger.debug(f"[{article_number}] Breadcrumb from HTML: {breadcrumbs}")
     if breadcrumbs:
         product.category_breadcrumb = breadcrumbs
+        # Use the last breadcrumb link (not the product name) as category
         product.category = breadcrumbs[-1] if breadcrumbs else None
 
     # Manufacturer / brand
@@ -254,7 +275,7 @@ def _parse_product_page(html: str, article_number: str) -> ProductData:
         dts = dl.find_all("dt")
         dds = dl.find_all("dd")
         for dt, dd in zip(dts, dds):
-            key = dt.get_text(strip=True)
+            key = dt.get_text(strip=True).rstrip(":")
             val = dd.get_text(strip=True)
             if key and val:
                 specs[key] = val
@@ -294,31 +315,52 @@ def _parse_product_page(html: str, article_number: str) -> ProductData:
             if spec_text and len(spec_text) > 10:
                 product.specification = spec_text
 
-    # Extract packaging info from page text
-    page_text = soup.get_text()
+    # Extract packaging info from specs or page text
+    # Priority 1: structured specs already extracted (dl/dt/dd or table)
+    pkg_parts = []
+    if specs:
+        for key, val in specs.items():
+            key_lower = key.lower().rstrip(":")
+            if any(kw in key_lower for kw in ["antall i pakn", "antall per pakn", "pakningsstørrelse", "pack size"]):
+                product.packaging_unit = val
+                pkg_parts.append(f"Antall i pakning: {val}")
+            elif any(kw in key_lower for kw in ["transport", "kolli"]):
+                product.transport_packaging = val
+                pkg_parts.append(f"Antall i transportpakke: {val}")
+            elif "pall" in key_lower:
+                pkg_parts.append(f"Antall på pall: {val}")
 
-    # Look for packaging patterns
-    pkg_patterns = [
-        r"(\d+)\s*(?:stk|st)\s*(?:per|pr|/)\s*(?:forpakning|pakning|frp|pk)",
-        r"(?:forpakning|pakning|frp|pk)[\s:]+(\d+)\s*(?:stk|st)?",
-        r"Antall\s*(?:per|pr|i)\s*(?:forpakning|pakning)[\s:]*(\d+)",
-    ]
-    for pattern in pkg_patterns:
-        match = re.search(pattern, page_text, re.IGNORECASE)
-        if match:
-            product.packaging_info = match.group(0)
-            product.packaging_unit = match.group(1) + " stk"
-            break
+    if pkg_parts:
+        product.packaging_info = "; ".join(pkg_parts)
+        logger.debug(f"[{article_number}] Packaging from specs: {product.packaging_info}")
 
-    # Look for "Antall i transportforpakning"
-    transport_match = re.search(
-        r"(?:transport(?:forpakning|pakning))[\s:]*(\d+)",
-        page_text, re.IGNORECASE
-    )
-    if transport_match:
-        product.transport_packaging = transport_match.group(1) + " stk"
+    # Priority 2: regex on page text (fallback)
+    if not product.packaging_info:
+        page_text = soup.get_text()
+        pkg_patterns = [
+            r"(\d+)\s*(?:stk|st)\s*(?:per|pr|/)\s*(?:forpakning|pakning|frp|pk)",
+            r"(?:forpakning|pakning|frp|pk)[\s:]+(\d+)\s*(?:stk|st)?",
+            r"Antall\s*(?:per|pr|i)\s*(?:forpakning|pakning)[\s:]*(\d+)",
+            r"Antall\s+i\s+pakn\w*[\s:]+(\d+)\s*(?:stk|st)?",
+        ]
+        for pattern in pkg_patterns:
+            match = re.search(pattern, page_text, re.IGNORECASE)
+            if match:
+                product.packaging_info = match.group(0)
+                product.packaging_unit = match.group(1) + " stk"
+                break
+
+        # Look for "Antall i transportforpakning"
+        if not product.transport_packaging:
+            transport_match = re.search(
+                r"(?:transport(?:forpakning|pakning|pakke|-pakke))[\s:]*(\d+)",
+                page_text, re.IGNORECASE
+            )
+            if transport_match:
+                product.transport_packaging = transport_match.group(1) + " stk"
 
     # Check for manufacturer article number patterns
+    page_text = soup.get_text()
     mfr_patterns = [
         r"(?:Produsentens?\s*(?:art\.?|varenr|artikkel)(?:nummer|nr)?|Lev\.?\s*art\.?\s*nr)[\s.:]*([A-Za-z0-9\-/]+)",
         r"(?:Manufacturer|MFR|Supplier)\s*(?:art|item|part)\s*(?:no|nr|number)?[\s.:]*([A-Za-z0-9\-/]+)",
@@ -461,8 +503,8 @@ async def _find_product_url_via_sitemap(
 
     # Scan product pages in batches to find the matching SKU
     # Process in batches of 15 concurrent requests
-    BATCH_SIZE = 15
-    MAX_PAGES_TO_CHECK = 100  # Safety limit per lookup
+    BATCH_SIZE = 20
+    MAX_PAGES_TO_CHECK = 2000  # Must be high enough for 9500+ product sitemap
 
     # Filter out URLs we've already indexed
     indexed_urls = set(_sku_to_url.values())
