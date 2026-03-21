@@ -2,6 +2,7 @@
 
 import json
 import logging
+import os
 import re
 from pathlib import Path
 from typing import Optional
@@ -13,8 +14,9 @@ from backend.models import ProductData
 
 logger = logging.getLogger(__name__)
 
-CACHE_DIR = Path("cache")
-CACHE_DIR.mkdir(exist_ok=True)
+# Cache directory - use /tmp on deployed environments
+CACHE_DIR = Path(os.environ.get("CACHE_DIR", "/tmp/masterdata_cache"))
+CACHE_DIR.mkdir(parents=True, exist_ok=True)
 
 BASE_URL = "https://www.onemed.no"
 SEARCH_URL = f"{BASE_URL}/nb-no/search"
@@ -39,19 +41,31 @@ def _get_cache_path(article_number: str) -> Path:
 
 
 def _load_from_cache(article_number: str) -> Optional[ProductData]:
-    """Load cached product data if available."""
+    """Load cached product data if available. Only returns positive (found) results."""
     cache_path = _get_cache_path(article_number)
     if cache_path.exists():
         try:
             data = json.loads(cache_path.read_text(encoding="utf-8"))
-            return ProductData(**data)
+            product = ProductData(**data)
+            # Only use cache for products that were actually found
+            if product.found_on_onemed:
+                return product
+            else:
+                # Negative results should not be cached - delete stale cache
+                cache_path.unlink(missing_ok=True)
+                logger.info(f"Removed stale negative cache for {article_number}")
+                return None
         except Exception:
             logger.warning(f"Failed to load cache for {article_number}")
     return None
 
 
 def _save_to_cache(product: ProductData) -> None:
-    """Save product data to cache."""
+    """Save product data to cache. Only caches positive (found) results."""
+    # Never cache negative results - the product might be added later
+    if not product.found_on_onemed:
+        return
+
     cache_path = _get_cache_path(product.article_number)
     try:
         cache_path.write_text(
@@ -143,7 +157,6 @@ def _parse_product_page(html: str, article_number: str) -> ProductData:
     breadcrumbs = ld_info.get("breadcrumbs", [])
     if breadcrumbs:
         product.category_breadcrumb = breadcrumbs
-        # Last breadcrumb is the most specific category
         product.category = breadcrumbs[-1] if breadcrumbs else None
 
     # Manufacturer / brand
@@ -203,7 +216,7 @@ def _parse_product_page(html: str, article_number: str) -> ProductData:
             product.manufacturer_article_number = match.group(1).strip()
             break
 
-    # Assess image quality (basic check - image dimensions/existence)
+    # Image accessibility check (basic - just check if URL exists)
     product.image_quality_ok = product.image_url is not None
 
     return product
@@ -214,13 +227,11 @@ def _find_product_links_in_search(html: str, article_number: str) -> list[dict]:
     soup = BeautifulSoup(html, "lxml")
     links = []
 
-    # Look for product links in search results
     for a_tag in soup.find_all("a", href=True):
         href = a_tag.get("href", "")
         if "/products/" in href:
             name = a_tag.get_text(strip=True)
             if not name:
-                # Try to get name from child elements
                 name_el = a_tag.find(class_=re.compile(r"name|title", re.I))
                 if name_el:
                     name = name_el.get_text(strip=True)
@@ -236,7 +247,6 @@ async def _fetch_with_retry(
     max_retries: int = MAX_RETRIES
 ) -> Optional[httpx.Response]:
     """Fetch a URL with retry logic."""
-    import asyncio
     for attempt in range(max_retries):
         try:
             response = await client.get(url, headers=HEADERS, follow_redirects=True, timeout=30)
@@ -245,6 +255,9 @@ async def _fetch_with_retry(
             elif response.status_code == 404:
                 logger.info(f"404 for {url}")
                 return None
+            elif response.status_code == 429:
+                logger.warning(f"Rate limited by {url}, backing off")
+                await asyncio.sleep(RETRY_DELAY_BASE ** (attempt + 2))
             elif response.status_code >= 500:
                 logger.warning(f"Server error {response.status_code} for {url}, retry {attempt + 1}")
             else:
@@ -253,7 +266,8 @@ async def _fetch_with_retry(
         except (httpx.TimeoutException, httpx.ConnectError, httpx.ReadError) as e:
             logger.warning(f"Network error for {url}: {e}, retry {attempt + 1}")
         if attempt < max_retries - 1:
-            await asyncio.sleep(RETRY_DELAY_BASE ** (attempt + 1))
+            import asyncio as _asyncio
+            await _asyncio.sleep(RETRY_DELAY_BASE ** (attempt + 1))
     return None
 
 
@@ -262,14 +276,9 @@ async def scrape_product(
     use_cache: bool = True,
     playwright_browser=None,
 ) -> ProductData:
-    """Scrape product data from onemed.no for a given article number.
+    """Scrape product data from onemed.no for a given article number."""
+    import asyncio
 
-    Strategy:
-    1. Try direct product URL with article number prefix patterns
-    2. If not found, try search
-    3. If search gives results, follow the first matching link
-    4. If Playwright browser is available, use it for dynamic content
-    """
     # Check cache first
     if use_cache:
         cached = _load_from_cache(article_number)
@@ -292,7 +301,6 @@ async def scrape_product(
             response = await _fetch_with_retry(client, url)
             if response and response.status_code == 200:
                 html = response.text
-                # Verify it's actually a product page
                 if "application/ld+json" in html and '"@type":"Product"' in html.replace(" ", "").replace("'", '"'):
                     product = _parse_product_page(html, clean_num)
                     product.product_url = str(response.url)
@@ -307,21 +315,18 @@ async def scrape_product(
         if response and response.status_code == 200:
             html = response.text
 
-            # Check if search page itself is a redirect to a product page
             if '"@type":"Product"' in html.replace(" ", "").replace("'", '"'):
                 product = _parse_product_page(html, clean_num)
                 product.product_url = str(response.url)
                 _save_to_cache(product)
                 return product
 
-            # Look for product links in search results
             product_links = _find_product_links_in_search(html, clean_num)
 
             if len(product_links) > 1:
                 logger.info(f"Multiple hits for {clean_num}: {len(product_links)} results")
 
             if product_links:
-                # Try the first link (most relevant)
                 first_link = product_links[0]["url"]
                 prod_response = await _fetch_with_retry(client, first_link)
                 if prod_response and prod_response.status_code == 200:
@@ -343,13 +348,12 @@ async def scrape_product(
             except Exception as e:
                 logger.error(f"Playwright error for {clean_num}: {e}")
 
-        # Not found
+        # Not found - do NOT cache this result
         product = ProductData(
             article_number=clean_num,
             found_on_onemed=False,
-            error="Produkt ikke funnet på onemed.no"
+            error="Produkt ikke funnet p\u00e5 onemed.no"
         )
-        _save_to_cache(product)
         return product
 
 
@@ -357,12 +361,10 @@ async def _scrape_with_playwright(browser, article_number: str) -> ProductData:
     """Use Playwright to scrape dynamically rendered content."""
     page = await browser.new_page()
     try:
-        # Try search
         search_url = f"{SEARCH_URL}?q={article_number}"
         await page.goto(search_url, wait_until="networkidle", timeout=30000)
-        await page.wait_for_timeout(2000)  # Wait for dynamic content
+        await page.wait_for_timeout(2000)
 
-        # Look for product links
         product_links = await page.query_selector_all('a[href*="/products/"]')
 
         if product_links:
@@ -389,8 +391,12 @@ async def _scrape_with_playwright(browser, article_number: str) -> ProductData:
 
 
 async def check_image_quality(image_url: str) -> dict:
-    """Check if an image URL is accessible and assess basic quality."""
-    result = {"accessible": False, "width": 0, "height": 0, "quality_ok": False}
+    """Check if an image URL is accessible and assess basic availability.
+
+    Note: This is an accessibility check, not a true quality assessment.
+    It verifies the image exists and has reasonable file size.
+    """
+    result = {"accessible": False, "quality_ok": False, "size_bytes": 0}
 
     if not image_url:
         return result
@@ -401,11 +407,10 @@ async def check_image_quality(image_url: str) -> dict:
             if response.status_code == 200:
                 result["accessible"] = True
                 content_length = int(response.headers.get("content-length", 0))
-                # Images > 10KB are likely decent quality
                 result["quality_ok"] = content_length > 10_000
                 result["size_bytes"] = content_length
             else:
-                # Try GET as fallback
+                # Try GET as fallback (some CDNs don't support HEAD)
                 response = await client.get(image_url, headers=HEADERS, timeout=10, follow_redirects=True)
                 if response.status_code == 200:
                     result["accessible"] = True

@@ -15,11 +15,11 @@ logger = logging.getLogger(__name__)
 
 # Color scheme for statuses
 STATUS_COLORS = {
-    QualityStatus.OK: "C6EFCE",          # Green
-    QualityStatus.SHOULD_IMPROVE: "FFEB9C",  # Yellow
-    QualityStatus.MISSING: "FFC7CE",      # Red
-    QualityStatus.PROBABLE_ERROR: "FF6B6B",  # Dark red
-    QualityStatus.REQUIRES_MANUFACTURER: "B4C7E7",  # Blue
+    QualityStatus.OK: "C6EFCE",
+    QualityStatus.SHOULD_IMPROVE: "FFEB9C",
+    QualityStatus.MISSING: "FFC7CE",
+    QualityStatus.PROBABLE_ERROR: "FF6B6B",
+    QualityStatus.REQUIRES_MANUFACTURER: "B4C7E7",
 }
 
 STATUS_FONT_COLORS = {
@@ -31,37 +31,42 @@ STATUS_FONT_COLORS = {
 }
 
 
-def read_article_numbers(file_content: bytes, filename: str) -> list[str]:
+def read_article_numbers(file_content: bytes, filename: str) -> tuple[list[str], str]:
     """Read article numbers from an uploaded Excel file.
 
-    Supports .xlsx and .xls formats.
-    Looks for article numbers in the first column, or a column named
-    'artikkelnummer', 'artikkel', 'varenummer', 'article', etc.
+    Returns a tuple of (article_numbers, detected_column_name).
     """
     wb = load_workbook(BytesIO(file_content), read_only=True, data_only=True)
     ws = wb.active
 
     article_numbers = []
-    article_col = 0  # Default to first column (0-indexed in our logic)
+    article_col = 0
+    detected_column = "Kolonne A (standard)"
 
     # Check header row for article number column
     header_row = next(ws.iter_rows(min_row=1, max_row=1, values_only=True), None)
     if header_row:
         search_terms = {
-            "artikkelnummer", "artikkel", "artikkelnr", "art.nr", "art nr",
-            "varenummer", "varenr", "article", "articlenumber", "article_number",
-            "sku", "item", "itemnumber", "produktnummer", "artnr",
+            "artikkelnummer", "artikkel", "artikkelnr", "artnr", "artnummer",
+            "varenummer", "varenr",
+            "article", "articlenumber", "article_number",
+            "sku", "item", "itemnumber", "produktnummer",
+        }
+        normalized_search = {
+            t.replace(".", "").replace(" ", "").replace("_", "")
+            for t in search_terms
         }
         for idx, cell_value in enumerate(header_row):
-            if cell_value and str(cell_value).strip().lower().replace(".", "").replace(" ", "") in {
-                t.replace(".", "").replace(" ", "") for t in search_terms
-            }:
-                article_col = idx
-                logger.info(f"Found article number column: '{cell_value}' at index {idx}")
-                break
+            if cell_value:
+                normalized = str(cell_value).strip().lower().replace(".", "").replace(" ", "").replace("_", "")
+                if normalized in normalized_search:
+                    article_col = idx
+                    detected_column = str(cell_value).strip()
+                    logger.info(f"Found article number column: '{cell_value}' at index {idx}")
+                    break
 
     # Read article numbers
-    start_row = 2 if header_row else 1  # Skip header if present
+    start_row = 2 if header_row else 1
     for row in ws.iter_rows(min_row=start_row, values_only=True):
         if row and len(row) > article_col:
             value = row[article_col]
@@ -71,52 +76,44 @@ def read_article_numbers(file_content: bytes, filename: str) -> list[str]:
                     article_numbers.append(article_num)
 
     wb.close()
-    logger.info(f"Read {len(article_numbers)} article numbers from {filename}")
-    return article_numbers
+    logger.info(f"Read {len(article_numbers)} article numbers from {filename} (column: {detected_column})")
+    return article_numbers, detected_column
 
 
 def create_output_excel(
     results: list[ProductAnalysis],
-    output_path: Optional[str] = None,
-) -> bytes:
+    output_path: str,
+) -> None:
     """Create a structured Excel output file with analysis results.
 
-    Returns the Excel file as bytes.
+    Writes directly to file to avoid holding entire workbook in memory twice.
     """
     wb = Workbook()
 
-    # ── Sheet 1: Overview ──
+    # Sheet 1: Overview
     ws_overview = wb.active
     ws_overview.title = "Oversikt"
     _create_overview_sheet(ws_overview, results)
 
-    # ── Sheet 2: Field Analysis Detail ──
+    # Sheet 2: Field Analysis Detail
     ws_detail = wb.create_sheet("Feltanalyse")
     _create_detail_sheet(ws_detail, results)
 
-    # ── Sheet 3: Improvement Suggestions ──
+    # Sheet 3: Improvement Suggestions
     ws_improvements = wb.create_sheet("Forbedringsforslag")
     _create_improvements_sheet(ws_improvements, results)
 
-    # ── Sheet 4: Manufacturer Follow-up ──
-    ws_manufacturer = wb.create_sheet("Produsentoppfølging")
+    # Sheet 4: Manufacturer Follow-up
+    ws_manufacturer = wb.create_sheet("Produsentoppf\u00f8lging")
     _create_manufacturer_sheet(ws_manufacturer, results)
 
-    # ── Sheet 5: Summary Statistics ──
+    # Sheet 5: Summary Statistics
     ws_stats = wb.create_sheet("Statistikk")
     _create_stats_sheet(ws_stats, results)
 
-    # Save to bytes
-    output = BytesIO()
-    wb.save(output)
-    output.seek(0)
-    content = output.read()
-
-    if output_path:
-        Path(output_path).write_bytes(content)
-        logger.info(f"Excel output saved to {output_path}")
-
-    return content
+    # Save directly to file
+    wb.save(output_path)
+    logger.info(f"Excel output saved to {output_path}")
 
 
 def _style_header(ws, row: int, num_cols: int) -> None:
@@ -150,7 +147,7 @@ def _create_overview_sheet(ws, results: list[ProductAnalysis]) -> None:
     headers = [
         "Artikkelnummer",
         "Produktnavn",
-        "Funnet på OneMed",
+        "Funnet p\u00e5 OneMed",
         "Total score (%)",
         "Status",
         "Kommentar",
@@ -182,14 +179,10 @@ def _create_overview_sheet(ws, results: list[ProductAnalysis]) -> None:
         ws.cell(row=row_idx, column=11, value="Ja" if result.requires_manufacturer_contact else "Nei")
         ws.cell(row=row_idx, column=12, value=pd.product_url or "")
 
-    # Auto-width
     for col in range(1, len(headers) + 1):
         ws.column_dimensions[get_column_letter(col)].width = max(15, len(headers[col - 1]) + 5)
 
-    # Freeze header
     ws.freeze_panes = "A2"
-
-    # Auto-filter
     ws.auto_filter.ref = f"A1:{get_column_letter(len(headers))}{len(results) + 1}"
 
 
@@ -199,10 +192,10 @@ def _create_detail_sheet(ws, results: list[ProductAnalysis]) -> None:
         "Artikkelnummer",
         "Produktnavn",
         "Felt",
-        "Nåværende verdi",
+        "N\u00e5v\u00e6rende verdi",
         "Status",
         "Kommentar",
-        "Foreslått verdi",
+        "Foresl\u00e5tt verdi",
         "Kilde",
         "Confidence",
     ]
@@ -230,7 +223,8 @@ def _create_detail_sheet(ws, results: list[ProductAnalysis]) -> None:
         ws.column_dimensions[get_column_letter(col)].width = max(15, len(headers[col - 1]) + 5)
 
     ws.freeze_panes = "A2"
-    ws.auto_filter.ref = f"A1:{get_column_letter(len(headers))}{row_idx - 1}"
+    if row_idx > 2:
+        ws.auto_filter.ref = f"A1:{get_column_letter(len(headers))}{row_idx - 1}"
 
 
 def _create_improvements_sheet(ws, results: list[ProductAnalysis]) -> None:
@@ -239,8 +233,8 @@ def _create_improvements_sheet(ws, results: list[ProductAnalysis]) -> None:
         "Artikkelnummer",
         "Produktnavn",
         "Felt",
-        "Nåværende verdi",
-        "Foreslått verdi",
+        "N\u00e5v\u00e6rende verdi",
+        "Foresl\u00e5tt verdi",
         "Kilde",
         "Confidence",
         "Begrunnelse",
@@ -281,7 +275,7 @@ def _create_manufacturer_sheet(ws, results: list[ProductAnalysis]) -> None:
         "Produktnavn",
         "Manglende felt",
         "Status",
-        "Foreslått melding",
+        "Foresl\u00e5tt melding",
     ]
 
     for col, header in enumerate(headers, 1):
@@ -301,10 +295,9 @@ def _create_manufacturer_sheet(ws, results: list[ProductAnalysis]) -> None:
     for manufacturer in sorted(by_manufacturer.keys()):
         products = by_manufacturer[manufacturer]
 
-        # Manufacturer group header
         group_fill = PatternFill(start_color="D9E2F3", end_color="D9E2F3", fill_type="solid")
         group_font = Font(bold=True, size=11)
-        cell = ws.cell(row=row_idx, column=1, value=f"── {manufacturer} ({len(products)} produkter) ──")
+        cell = ws.cell(row=row_idx, column=1, value=f"{manufacturer} ({len(products)} produkter)")
         cell.fill = group_fill
         cell.font = group_font
         for col in range(2, len(headers) + 1):
@@ -358,7 +351,7 @@ def _create_stats_sheet(ws, results: list[ProductAnalysis]) -> None:
     rows = [
         ("", ""),
         ("Totalt antall produkter:", total),
-        ("Funnet på OneMed:", found),
+        ("Funnet p\u00e5 OneMed:", found),
         ("Ikke funnet:", not_found),
         ("", ""),
         ("Gjennomsnittlig kvalitetsscore:", f"{avg_score:.1f}%"),
@@ -371,7 +364,7 @@ def _create_stats_sheet(ws, results: list[ProductAnalysis]) -> None:
 
     rows.extend([
         ("", ""),
-        ("Oppfølging:", ""),
+        ("Oppf\u00f8lging:", ""),
         ("  Auto-fix mulig:", auto_fix),
         ("  Manuell vurdering:", manual),
         ("  Krever produsentkontakt:", mfr_contact),
@@ -379,7 +372,7 @@ def _create_stats_sheet(ws, results: list[ProductAnalysis]) -> None:
 
     for idx, (label, value) in enumerate(rows, 3):
         cell_label = ws.cell(row=idx, column=1, value=label)
-        cell_value = ws.cell(row=idx, column=2, value=value)
+        ws.cell(row=idx, column=2, value=value)
         if label and not label.startswith("  "):
             cell_label.font = header_font
 

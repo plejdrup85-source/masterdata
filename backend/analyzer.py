@@ -16,6 +16,19 @@ logger = logging.getLogger(__name__)
 MIN_NAME_LENGTH = 5
 MIN_DESCRIPTION_LENGTH = 20
 
+# Field weights for scoring - critical fields weigh more
+FIELD_WEIGHTS = {
+    "Produktnavn": 2.0,
+    "Beskrivelse": 1.5,
+    "Spesifikasjon": 2.0,
+    "Produsent": 2.0,
+    "Produsentens varenummer": 1.5,
+    "Kategori": 1.0,
+    "Pakningsinformasjon": 1.0,
+    "Bilde tilgjengelig": 0.5,
+    "Konsistens mellom felter": 0.5,
+}
+
 
 def _analyze_product_name(product: ProductData) -> FieldAnalysis:
     """Analyze product name quality."""
@@ -32,29 +45,24 @@ def _analyze_product_name(product: ProductData) -> FieldAnalysis:
 
     issues = []
 
-    # Too short
     if len(name) < MIN_NAME_LENGTH:
         issues.append("Navn er for kort (under 5 tegn)")
 
-    # Too generic (single word or very common terms)
     generic_names = {"produkt", "vare", "artikkel", "item", "product", "test"}
     if name.lower().strip() in generic_names:
         issues.append("Navn er for generisk")
 
-    # Only numbers
     if re.match(r"^[\d\s\-/]+$", name):
         issues.append("Navn inneholder kun tall/tegn, mangler beskrivende tekst")
 
-    # Wrong language (contains common English words that should be Norwegian)
     english_indicators = ["gloves", "bandage", "tape", "pack", "box", "piece"]
     name_lower = name.lower()
     english_count = sum(1 for word in english_indicators if word in name_lower)
     if english_count >= 2:
-        issues.append("Navn ser ut til å være på engelsk, bør vurderes for norsk oversettelse")
+        issues.append("Navn ser ut til \u00e5 v\u00e6re p\u00e5 engelsk, b\u00f8r vurderes for norsk oversettelse")
 
-    # Check for ALL CAPS
     if name == name.upper() and len(name) > 3:
-        issues.append("Navn er i STORE BOKSTAVER, bør ha normal casing")
+        issues.append("Navn er i STORE BOKSTAVER, b\u00f8r ha normal casing")
 
     if not issues:
         analysis.status = QualityStatus.OK
@@ -87,20 +95,15 @@ def _analyze_description(product: ProductData) -> FieldAnalysis:
     if len(desc) < MIN_DESCRIPTION_LENGTH:
         issues.append(f"Beskrivelse er for kort ({len(desc)} tegn, minimum {MIN_DESCRIPTION_LENGTH})")
 
-    # Check if description is same as name
     if product.product_name and desc.strip().lower() == product.product_name.strip().lower():
         issues.append("Beskrivelse er identisk med produktnavn")
 
-    # Check for useful content (not just article number repeated)
     if product.article_number in desc and len(desc) < 50:
         issues.append("Beskrivelse inneholder hovedsakelig artikkelnummer")
 
     if not issues:
         analysis.status = QualityStatus.OK
         analysis.comment = "Beskrivelse OK"
-    elif len(issues) == 1 and "kort" in issues[0]:
-        analysis.status = QualityStatus.SHOULD_IMPROVE
-        analysis.comment = "; ".join(issues)
     else:
         analysis.status = QualityStatus.SHOULD_IMPROVE
         analysis.comment = "; ".join(issues)
@@ -120,21 +123,20 @@ def _analyze_specification(product: ProductData) -> FieldAnalysis:
 
     if not spec and not details:
         analysis.status = QualityStatus.MISSING
-        analysis.comment = "Spesifikasjoner mangler helt. Bør innhentes fra produsent."
+        analysis.comment = "Spesifikasjoner mangler helt. B\u00f8r innhentes fra produsent."
         return analysis
 
     issues = []
 
     if details and len(details) < 2:
-        issues.append("Få spesifikasjonsfelter (kun {})".format(len(details)))
+        issues.append("F\u00e5 spesifikasjonsfelter (kun {})".format(len(details)))
 
-    # Check for key specification fields that should exist
-    expected_fields = {"størrelse", "size", "materiale", "material", "farge", "color", "vekt", "weight"}
+    expected_fields = {"st\u00f8rrelse", "size", "materiale", "material", "farge", "color", "vekt", "weight"}
     if details:
         detail_keys_lower = {k.lower() for k in details.keys()}
         matching = expected_fields & detail_keys_lower
         if not matching:
-            issues.append("Mangler vanlige spesifikasjoner (størrelse, materiale, farge, vekt)")
+            issues.append("Mangler vanlige spesifikasjoner (st\u00f8rrelse, materiale, farge, vekt)")
 
     if not issues:
         analysis.status = QualityStatus.OK
@@ -164,7 +166,6 @@ def _analyze_manufacturer(product: ProductData) -> FieldAnalysis:
     if len(mfr) < 2:
         issues.append("Produsentnavn er for kort")
 
-    # Check for placeholder values
     placeholders = {"ukjent", "unknown", "n/a", "-", ".", "na", "ingen"}
     if mfr.lower().strip() in placeholders:
         issues.append("Produsentnavn er en placeholder-verdi")
@@ -192,7 +193,7 @@ def _analyze_manufacturer_article_number(product: ProductData) -> FieldAnalysis:
 
     if not mfr_num:
         analysis.status = QualityStatus.MISSING
-        analysis.comment = "Produsentens varenummer mangler. Bør innhentes."
+        analysis.comment = "Produsentens varenummer mangler. B\u00f8r innhentes."
         return analysis
 
     analysis.status = QualityStatus.OK
@@ -220,7 +221,7 @@ def _analyze_category(product: ProductData) -> FieldAnalysis:
     issues = []
 
     if breadcrumbs and len(breadcrumbs) < 2:
-        issues.append("Kategorihierarki er grunt (kun 1 nivå)")
+        issues.append("Kategorihierarki er grunt (kun 1 niv\u00e5)")
 
     if cat and len(cat) < 3:
         issues.append("Kategorinavn er for kort/generisk")
@@ -254,9 +255,9 @@ def _analyze_packaging(product: ProductData) -> FieldAnalysis:
 
 
 def _analyze_image(product: ProductData) -> FieldAnalysis:
-    """Analyze image quality."""
+    """Check image accessibility (not quality - just availability)."""
     analysis = FieldAnalysis(
-        field_name="Bilde",
+        field_name="Bilde tilgjengelig",
         current_value=product.image_url,
     )
 
@@ -267,11 +268,11 @@ def _analyze_image(product: ProductData) -> FieldAnalysis:
 
     if product.image_quality_ok is False:
         analysis.status = QualityStatus.SHOULD_IMPROVE
-        analysis.comment = "Bildekvalitet er lav eller bilde er ikke tilgjengelig"
+        analysis.comment = "Bilde er ikke tilgjengelig eller har sv\u00e6rt liten filst\u00f8rrelse"
         return analysis
 
     analysis.status = QualityStatus.OK
-    analysis.comment = "Produktbilde finnes"
+    analysis.comment = "Produktbilde er tilgjengelig"
     return analysis
 
 
@@ -284,24 +285,20 @@ def _check_field_consistency(product: ProductData) -> FieldAnalysis:
 
     issues = []
 
-    # Check if name and description contradict
     if product.product_name and product.description:
         name_words = set(product.product_name.lower().split())
         desc_words = set(product.description.lower().split())
-        # If name and description share no words (besides common ones)
         common_words = {"og", "i", "for", "med", "til", "av", "en", "et", "den", "det", "de", "er"}
         meaningful_name = name_words - common_words
         meaningful_desc = desc_words - common_words
         if meaningful_name and meaningful_desc:
             overlap = meaningful_name & meaningful_desc
             if not overlap and len(meaningful_name) > 2:
-                issues.append("Produktnavn og beskrivelse deler ingen nøkkelord - mulig inkonsistens")
+                issues.append("Produktnavn og beskrivelse deler ingen n\u00f8kkelord - mulig inkonsistens")
 
-    # Check category vs name consistency
     if product.category and product.product_name:
         cat_lower = product.category.lower()
         name_lower = product.product_name.lower()
-        # Very basic check - at least one word overlap
         cat_words = set(cat_lower.split()) - {"og", "i", "for", "med"}
         name_words = set(name_lower.split()) - {"og", "i", "for", "med"}
         if cat_words and name_words and not (cat_words & name_words):
@@ -310,7 +307,7 @@ def _check_field_consistency(product: ProductData) -> FieldAnalysis:
 
     if not issues:
         analysis.status = QualityStatus.OK
-        analysis.comment = "Ingen åpenbare inkonsistenser"
+        analysis.comment = "Ingen \u00e5penbare inkonsistenser"
     else:
         analysis.status = QualityStatus.SHOULD_IMPROVE
         analysis.comment = "; ".join(issues)
@@ -327,7 +324,7 @@ def analyze_product(product: ProductData) -> ProductAnalysis:
 
     if not product.found_on_onemed:
         analysis.overall_status = QualityStatus.MISSING
-        analysis.overall_comment = product.error or "Produkt ikke funnet på onemed.no"
+        analysis.overall_comment = product.error or "Produkt ikke funnet p\u00e5 onemed.no"
         analysis.manual_review_needed = True
         analysis.field_analyses = [
             FieldAnalysis(
@@ -354,7 +351,7 @@ def analyze_product(product: ProductData) -> ProductAnalysis:
 
     analysis.field_analyses = field_analyses
 
-    # Calculate total score
+    # Calculate weighted score
     score_map = {
         QualityStatus.OK: 1.0,
         QualityStatus.SHOULD_IMPROVE: 0.5,
@@ -363,8 +360,14 @@ def analyze_product(product: ProductData) -> ProductAnalysis:
         QualityStatus.REQUIRES_MANUFACTURER: 0.25,
     }
 
-    scores = [score_map.get(fa.status, 0) for fa in field_analyses]
-    analysis.total_score = round(sum(scores) / len(scores) * 100, 1) if scores else 0
+    weighted_sum = 0.0
+    total_weight = 0.0
+    for fa in field_analyses:
+        weight = FIELD_WEIGHTS.get(fa.field_name, 1.0)
+        weighted_sum += score_map.get(fa.status, 0) * weight
+        total_weight += weight
+
+    analysis.total_score = round(weighted_sum / total_weight * 100, 1) if total_weight > 0 else 0
 
     # Determine overall status
     statuses = [fa.status for fa in field_analyses]
@@ -411,20 +414,23 @@ def analyze_product(product: ProductData) -> ProductAnalysis:
     analysis.overall_comment = ". ".join(comments)
 
     # Generate suggested manufacturer message if needed
-    if requires_mfr and product.manufacturer:
+    if requires_mfr:
         missing_names = [fa.field_name for fa in missing_fields]
-        analysis.suggested_manufacturer_message = (
-            f"Hei,\n\nVi mangler følgende informasjon for produkt "
-            f"'{product.product_name or product.article_number}':\n"
-            f"- {chr(10).join('- ' + n for n in missing_names[1:]) if len(missing_names) > 1 else missing_names[0] if missing_names else ''}\n\n"
-            f"Kan dere sende oss oppdatert produktinformasjon?\n\n"
-            f"Med vennlig hilsen"
-        )
-    elif requires_mfr:
-        missing_names = [fa.field_name for fa in missing_fields]
-        analysis.suggested_manufacturer_message = (
-            f"Produsent ukjent. Manglende felt: {', '.join(missing_names)}. "
-            f"Artikkelnummer: {product.article_number}"
-        )
+        missing_list = "\n".join(f"- {name}" for name in missing_names)
+
+        if product.manufacturer:
+            product_label = product.product_name or product.article_number
+            analysis.suggested_manufacturer_message = (
+                f"Hei,\n\n"
+                f"Vi mangler f\u00f8lgende informasjon for produkt '{product_label}':\n"
+                f"{missing_list}\n\n"
+                f"Kan dere sende oss oppdatert produktinformasjon?\n\n"
+                f"Med vennlig hilsen"
+            )
+        else:
+            analysis.suggested_manufacturer_message = (
+                f"Produsent ukjent. Manglende felt: {', '.join(missing_names)}. "
+                f"Artikkelnummer: {product.article_number}"
+            )
 
     return analysis

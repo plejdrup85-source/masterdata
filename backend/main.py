@@ -3,14 +3,16 @@
 import asyncio
 import logging
 import os
+import time
 import uuid
+from collections import defaultdict
 from datetime import datetime
 from pathlib import Path
+from typing import Optional
 
-from fastapi import FastAPI, File, HTTPException, UploadFile
+from fastapi import FastAPI, File, HTTPException, Query, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse, HTMLResponse
-from fastapi.staticfiles import StaticFiles
 
 from backend.analyzer import analyze_product
 from backend.excel_handler import create_output_excel, read_article_numbers
@@ -18,7 +20,7 @@ from backend.manufacturer import (
     generate_improvement_suggestions,
     search_manufacturer_info,
 )
-from backend.models import AnalysisJob, JobStatus, ProductAnalysis
+from backend.models import AnalysisJob, JobStatus, ProductAnalysis, ProductData
 from backend.scraper import check_image_quality, scrape_product
 
 # Configure logging
@@ -31,26 +33,76 @@ logger = logging.getLogger(__name__)
 app = FastAPI(
     title="Masterdata Kvalitetssjekk",
     description="Kvalitetsanalyse av produktkatalog mot onemed.no",
-    version="1.0.0",
+    version="1.1.0",
 )
+
+# CORS - allow Render domain and localhost for dev
+ALLOWED_ORIGINS = os.environ.get(
+    "ALLOWED_ORIGINS",
+    "http://localhost:8000,http://localhost:3000,http://127.0.0.1:8000"
+).split(",")
 
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],
-    allow_methods=["*"],
+    allow_origins=ALLOWED_ORIGINS,
+    allow_credentials=True,
+    allow_methods=["GET", "POST", "DELETE"],
     allow_headers=["*"],
 )
 
 # In-memory job storage
 jobs: dict[str, AnalysisJob] = {}
 
-# Output directory
-OUTPUT_DIR = Path("output")
-OUTPUT_DIR.mkdir(exist_ok=True)
+# Keep references to background tasks so they don't get GC-ed
+_background_tasks: set[asyncio.Task] = set()
+
+# Output directory - use /tmp on deployed environments for reliability
+OUTPUT_DIR = Path(os.environ.get("OUTPUT_DIR", "/tmp/masterdata_output"))
+OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
 
 # Concurrency control - be polite to onemed.no
 SCRAPE_CONCURRENCY = 3
 SCRAPE_DELAY = 1.0  # seconds between requests
+
+# Limits
+MAX_FILE_SIZE = 5 * 1024 * 1024  # 5 MB
+MAX_ARTICLES = 1000
+MAX_CONCURRENT_JOBS = 3
+JOB_TTL_SECONDS = 2 * 60 * 60  # 2 hours
+
+# Rate limiting (simple per-IP)
+_rate_limit: dict[str, list[float]] = defaultdict(list)
+RATE_LIMIT_WINDOW = 60  # seconds
+RATE_LIMIT_MAX = 5  # max uploads per window
+
+
+def _cleanup_old_jobs() -> None:
+    """Remove jobs older than JOB_TTL_SECONDS."""
+    now = time.time()
+    expired = [
+        jid for jid, job in jobs.items()
+        if now - job.created_at > JOB_TTL_SECONDS
+    ]
+    for jid in expired:
+        job = jobs.pop(jid, None)
+        if job and job.output_file:
+            try:
+                Path(job.output_file).unlink(missing_ok=True)
+            except Exception:
+                pass
+        logger.info(f"Cleaned up expired job {jid}")
+
+
+def _check_rate_limit(client_ip: str) -> bool:
+    """Return True if request is within rate limits."""
+    now = time.time()
+    timestamps = _rate_limit[client_ip]
+    # Remove old entries
+    _rate_limit[client_ip] = [t for t in timestamps if now - t < RATE_LIMIT_WINDOW]
+    if len(_rate_limit[client_ip]) >= RATE_LIMIT_MAX:
+        return False
+    _rate_limit[client_ip].append(now)
+    return True
 
 
 @app.get("/", response_class=HTMLResponse)
@@ -62,26 +114,64 @@ async def root():
     return HTMLResponse(content="<h1>Frontend not found</h1>", status_code=404)
 
 
+@app.get("/api/health")
+async def health_check():
+    """Health check endpoint."""
+    return {"status": "ok", "version": "1.1.0", "active_jobs": len(jobs)}
+
+
 @app.post("/api/upload")
-async def upload_excel(file: UploadFile = File(...)):
+async def upload_excel(
+    file: UploadFile = File(...),
+    skip_cache: bool = Query(False, description="Skip cache and re-scrape all products"),
+):
     """Upload an Excel file and start analysis."""
+    # Cleanup old jobs first
+    _cleanup_old_jobs()
+
     if not file.filename:
-        raise HTTPException(400, "No file provided")
+        raise HTTPException(400, "Ingen fil valgt")
 
     ext = Path(file.filename).suffix.lower()
-    if ext not in (".xlsx", ".xls"):
-        raise HTTPException(400, f"Unsupported file format: {ext}. Use .xlsx or .xls")
+    if ext != ".xlsx":
+        raise HTTPException(
+            400,
+            f"Filformatet {ext} st\u00f8ttes ikke. Bruk .xlsx (Excel 2007+)."
+        )
 
+    # Check file size before reading
     content = await file.read()
+    if len(content) > MAX_FILE_SIZE:
+        raise HTTPException(
+            400,
+            f"Filen er for stor ({len(content) / 1024 / 1024:.1f} MB). Maks {MAX_FILE_SIZE / 1024 / 1024:.0f} MB."
+        )
+
+    # Check concurrent job limit
+    active_jobs = sum(
+        1 for j in jobs.values()
+        if j.status in (JobStatus.PENDING, JobStatus.RUNNING)
+    )
+    if active_jobs >= MAX_CONCURRENT_JOBS:
+        raise HTTPException(
+            429,
+            f"For mange samtidige analyser ({active_jobs}). Vent til en er ferdig."
+        )
 
     try:
-        article_numbers = read_article_numbers(content, file.filename)
+        article_numbers, detected_column = read_article_numbers(content, file.filename)
     except Exception as e:
         logger.error(f"Failed to read Excel: {e}")
-        raise HTTPException(400, f"Could not read Excel file: {e}")
+        raise HTTPException(400, f"Kunne ikke lese Excel-filen: {e}")
 
     if not article_numbers:
-        raise HTTPException(400, "No article numbers found in file")
+        raise HTTPException(400, "Ingen artikkelnumre funnet i filen")
+
+    if len(article_numbers) > MAX_ARTICLES:
+        raise HTTPException(
+            400,
+            f"For mange artikkelnumre ({len(article_numbers)}). Maks {MAX_ARTICLES} per analyse."
+        )
 
     # Remove duplicates while preserving order
     seen = set()
@@ -97,15 +187,19 @@ async def upload_excel(file: UploadFile = File(...)):
         job_id=job_id,
         status=JobStatus.PENDING,
         total_products=len(unique_articles),
+        created_at=time.time(),
     )
     jobs[job_id] = job
 
-    # Start analysis in background
-    asyncio.create_task(_run_analysis(job_id, unique_articles))
+    # Start analysis in background - store task reference to prevent GC
+    task = asyncio.create_task(_run_analysis(job_id, unique_articles, skip_cache))
+    _background_tasks.add(task)
+    task.add_done_callback(_background_tasks.discard)
 
     return {
         "job_id": job_id,
         "total_products": len(unique_articles),
+        "detected_column": detected_column,
         "message": f"Analyse startet for {len(unique_articles)} produkter",
     }
 
@@ -115,7 +209,7 @@ async def get_status(job_id: str):
     """Get the status of an analysis job."""
     job = jobs.get(job_id)
     if not job:
-        raise HTTPException(404, "Job not found")
+        raise HTTPException(404, "Jobb ikke funnet. Den kan ha utl\u00f8pt.")
 
     return {
         "job_id": job.job_id,
@@ -126,9 +220,28 @@ async def get_status(job_id: str):
         "progress_percent": round(
             job.processed_products / job.total_products * 100, 1
         ) if job.total_products > 0 else 0,
-        "errors": job.errors[-10:],  # Last 10 errors
+        "errors": job.errors[-10:],
         "output_file": job.output_file,
     }
+
+
+@app.delete("/api/cancel/{job_id}")
+async def cancel_job(job_id: str):
+    """Cancel a running analysis job."""
+    job = jobs.get(job_id)
+    if not job:
+        raise HTTPException(404, "Jobb ikke funnet")
+
+    if job.status not in (JobStatus.PENDING, JobStatus.RUNNING):
+        raise HTTPException(400, "Jobben er allerede ferdig")
+
+    job.cancelled = True
+    job.status = JobStatus.FAILED
+    job.errors.append("Analyse avbrutt av bruker")
+    job.current_product = None
+    logger.info(f"[{job_id}] Job cancelled by user")
+
+    return {"message": "Analyse avbrutt", "job_id": job_id}
 
 
 @app.get("/api/download/{job_id}")
@@ -136,13 +249,13 @@ async def download_result(job_id: str):
     """Download the analysis result Excel file."""
     job = jobs.get(job_id)
     if not job:
-        raise HTTPException(404, "Job not found")
+        raise HTTPException(404, "Jobb ikke funnet")
 
     if job.status != JobStatus.COMPLETED:
-        raise HTTPException(400, "Analysis not completed yet")
+        raise HTTPException(400, "Analysen er ikke fullf\u00f8rt enda")
 
     if not job.output_file or not Path(job.output_file).exists():
-        raise HTTPException(404, "Output file not found")
+        raise HTTPException(404, "Resultatfilen finnes ikke lenger. Den kan ha blitt slettet.")
 
     return FileResponse(
         job.output_file,
@@ -156,10 +269,10 @@ async def get_results(job_id: str):
     """Get analysis results as JSON."""
     job = jobs.get(job_id)
     if not job:
-        raise HTTPException(404, "Job not found")
+        raise HTTPException(404, "Jobb ikke funnet")
 
     if job.status not in (JobStatus.COMPLETED, JobStatus.RUNNING):
-        raise HTTPException(400, "No results available yet")
+        raise HTTPException(400, "Ingen resultater tilgjengelig enda")
 
     return {
         "job_id": job.job_id,
@@ -175,30 +288,57 @@ async def get_results(job_id: str):
                 "status": r.overall_status.value,
                 "comment": r.overall_comment,
                 "manufacturer": r.product_data.manufacturer,
+                "category": r.product_data.category,
                 "requires_followup": r.requires_manufacturer_contact,
                 "manual_review": r.manual_review_needed,
+                "auto_fix": r.auto_fix_possible,
+                "field_analyses": [
+                    {
+                        "field_name": fa.field_name,
+                        "current_value": fa.current_value,
+                        "status": fa.status.value,
+                        "comment": fa.comment,
+                        "suggested_value": fa.suggested_value,
+                        "source": fa.source,
+                        "confidence": fa.confidence,
+                    }
+                    for fa in r.field_analyses
+                ],
             }
             for r in job.results
         ],
     }
 
 
-async def _run_analysis(job_id: str, article_numbers: list[str]) -> None:
+async def _run_analysis(
+    job_id: str,
+    article_numbers: list[str],
+    skip_cache: bool = False,
+) -> None:
     """Run the full analysis pipeline for all products."""
     job = jobs[job_id]
     job.status = JobStatus.RUNNING
 
     semaphore = asyncio.Semaphore(SCRAPE_CONCURRENCY)
 
-    async def process_product(article_number: str) -> ProductAnalysis:
+    async def process_product(article_number: str) -> Optional[ProductAnalysis]:
+        # Check if job was cancelled
+        if job.cancelled:
+            return None
+
         async with semaphore:
+            if job.cancelled:
+                return None
+
             job.current_product = article_number
             try:
                 # Step 1: Scrape from onemed.no
                 logger.info(f"[{job_id}] Scraping {article_number}")
-                product_data = await scrape_product(article_number)
+                product_data = await scrape_product(
+                    article_number, use_cache=not skip_cache
+                )
 
-                # Step 1b: Check image quality if we have an image
+                # Step 1b: Check image accessibility if we have an image
                 if product_data.image_url:
                     img_result = await check_image_quality(product_data.image_url)
                     product_data.image_quality_ok = img_result.get("quality_ok", False)
@@ -218,7 +358,6 @@ async def _run_analysis(job_id: str, article_numbers: list[str]) -> None:
                             product_data, mfr_data
                         )
                         for suggestion in suggestions:
-                            # Update field analyses with suggestions
                             for fa in analysis.field_analyses:
                                 if fa.field_name == suggestion["field"]:
                                     fa.suggested_value = suggestion["suggested"]
@@ -231,8 +370,7 @@ async def _run_analysis(job_id: str, article_numbers: list[str]) -> None:
             except Exception as e:
                 logger.error(f"[{job_id}] Error processing {article_number}: {e}")
                 job.errors.append(f"{article_number}: {str(e)}")
-                from backend.models import ProductData as PD
-                fallback_data = PD(
+                fallback_data = ProductData(
                     article_number=article_number,
                     error=str(e),
                 )
@@ -245,17 +383,22 @@ async def _run_analysis(job_id: str, article_numbers: list[str]) -> None:
                 await asyncio.sleep(SCRAPE_DELAY)
 
     try:
-        # Process products with controlled concurrency
         tasks = [process_product(art) for art in article_numbers]
 
         for coro in asyncio.as_completed(tasks):
             result = await coro
+            if result is None:
+                continue  # Job was cancelled
             job.results.append(result)
             job.processed_products += 1
             logger.info(
                 f"[{job_id}] Progress: {job.processed_products}/{job.total_products} "
                 f"({result.article_number}: {result.overall_status.value})"
             )
+
+        if job.cancelled:
+            logger.info(f"[{job_id}] Analysis cancelled by user")
+            return
 
         # Sort results to match input order
         order_map = {art: idx for idx, art in enumerate(article_numbers)}

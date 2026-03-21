@@ -1,14 +1,16 @@
 """Data models for the masterdata quality check application."""
 
+import time
 from enum import Enum
 from typing import Optional
-from pydantic import BaseModel
+
+from pydantic import BaseModel, Field
 
 
 class QualityStatus(str, Enum):
     OK = "OK"
     MISSING = "Mangler"
-    SHOULD_IMPROVE = "Bør forbedres"
+    SHOULD_IMPROVE = "B\u00f8r forbedres"
     PROBABLE_ERROR = "Sannsynlig feil"
     REQUIRES_MANUFACTURER = "Krever produsent"
 
@@ -90,3 +92,5 @@ class AnalysisJob(BaseModel):
     results: list[ProductAnalysis] = []
     errors: list[str] = []
     output_file: Optional[str] = None
+    created_at: float = Field(default_factory=time.time)
+    cancelled: bool = False

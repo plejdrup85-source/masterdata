@@ -1,4 +1,9 @@
-"""Manufacturer lookup module - searches for better product data from manufacturer websites."""
+"""Manufacturer lookup module - searches for product data from manufacturer websites.
+
+This module attempts to find product information from known manufacturer websites.
+It uses a curated list of manufacturer domain mappings and search URL patterns.
+Results should be treated as suggestions, not authoritative data.
+"""
 
 import logging
 import re
@@ -17,31 +22,104 @@ HEADERS = {
     "Accept-Language": "nb-NO,nb;q=0.9,no;q=0.8,en;q=0.5",
 }
 
+# Known manufacturer website configurations
+# Only includes manufacturers where we know the site structure works
+KNOWN_MANUFACTURERS = {
+    "molnlycke": {
+        "domains": ["www.molnlycke.com"],
+        "search_pattern": "/search?q={query}",
+    },
+    "m\u00f6lnlycke": {
+        "domains": ["www.molnlycke.com"],
+        "search_pattern": "/search?q={query}",
+    },
+    "coloplast": {
+        "domains": ["www.coloplast.com", "www.coloplast.no"],
+        "search_pattern": "/search?q={query}",
+    },
+    "essity": {
+        "domains": ["www.essity.com"],
+        "search_pattern": "/search?q={query}",
+    },
+    "tena": {
+        "domains": ["www.tena.no"],
+        "search_pattern": "/search?q={query}",
+    },
+    "hartmann": {
+        "domains": ["www.hartmann.info"],
+        "search_pattern": "/search?q={query}",
+    },
+    "3m": {
+        "domains": ["www.3m.com"],
+        "search_pattern": "/3M/en_US/search/?Ntt={query}",
+    },
+    "convatec": {
+        "domains": ["www.convatec.com"],
+        "search_pattern": "/search?q={query}",
+    },
+    "b braun": {
+        "domains": ["www.bbraun.com"],
+        "search_pattern": "/search?q={query}",
+    },
+    "bbraun": {
+        "domains": ["www.bbraun.com"],
+        "search_pattern": "/search?q={query}",
+    },
+    "hollister": {
+        "domains": ["www.hollister.com"],
+        "search_pattern": "/search?q={query}",
+    },
+    "medline": {
+        "domains": ["www.medline.com"],
+        "search_pattern": "/search?q={query}",
+    },
+    "baxter": {
+        "domains": ["www.baxter.com"],
+        "search_pattern": "/search?q={query}",
+    },
+    "fresenius": {
+        "domains": ["www.fresenius.com"],
+        "search_pattern": "/search?q={query}",
+    },
+    "nutricia": {
+        "domains": ["www.nutricia.no", "www.nutricia.com"],
+        "search_pattern": "/search?q={query}",
+    },
+}
+
+
+def _find_manufacturer_config(manufacturer_name: str) -> Optional[dict]:
+    """Find a known manufacturer configuration by name."""
+    if not manufacturer_name:
+        return None
+
+    clean = manufacturer_name.lower().strip()
+
+    # Direct match
+    if clean in KNOWN_MANUFACTURERS:
+        return KNOWN_MANUFACTURERS[clean]
+
+    # Partial match (manufacturer name contains a known key)
+    for key, config in KNOWN_MANUFACTURERS.items():
+        if key in clean or clean in key:
+            return config
+
+    return None
+
 
 def _build_search_queries(product: ProductData) -> list[str]:
     """Build search queries for finding manufacturer product pages."""
     queries = []
 
-    manufacturer = product.manufacturer or ""
     mfr_article = product.manufacturer_article_number or ""
     name = product.product_name or ""
 
-    # Priority 1: Manufacturer + manufacturer article number
-    if manufacturer and mfr_article:
-        queries.append(f"{manufacturer} {mfr_article}")
-
-    # Priority 2: Manufacturer + product name
-    if manufacturer and name:
-        queries.append(f"{manufacturer} {name}")
-
-    # Priority 3: Product name + "datasheet" or "produktblad"
-    if name:
-        queries.append(f"{name} datasheet specifications")
-        queries.append(f"{name} produktblad spesifikasjoner")
-
-    # Priority 4: Manufacturer article number alone
+    # Most specific first
     if mfr_article:
         queries.append(mfr_article)
+
+    if name:
+        queries.append(name)
 
     return queries
 
@@ -54,12 +132,17 @@ def _extract_product_info_from_page(html: str, url: str) -> dict:
     # Try to get product name from h1
     h1 = soup.find("h1")
     if h1:
-        info["product_name"] = h1.get_text(strip=True)
+        text = h1.get_text(strip=True)
+        # Avoid picking up generic page titles
+        if len(text) > 2 and len(text) < 200:
+            info["product_name"] = text
 
-    # Try to get description from meta tags or content
+    # Try to get description from meta tags
     meta_desc = soup.find("meta", attrs={"name": "description"})
     if meta_desc:
-        info["description"] = meta_desc.get("content", "")
+        desc = meta_desc.get("content", "")
+        if desc and len(desc) > 10:
+            info["description"] = desc
 
     # Look for specification tables
     specs = {}
@@ -99,142 +182,79 @@ def _extract_product_info_from_page(html: str, url: str) -> dict:
     return info
 
 
-async def search_manufacturer_info(
-    product: ProductData,
-    search_func=None,
-) -> ManufacturerLookup:
-    """Search for product information from the manufacturer.
+async def search_manufacturer_info(product: ProductData) -> ManufacturerLookup:
+    """Search for product information from the manufacturer's website.
 
-    Args:
-        product: The product data with what we know
-        search_func: Optional async function for web search (query) -> list of URLs
+    Only attempts lookup for known manufacturers with configured websites.
+    Returns results with appropriate confidence levels.
     """
     result = ManufacturerLookup(searched=True)
 
     if not product.manufacturer and not product.product_name:
-        result.notes = "Ikke nok informasjon for å søke hos produsent"
+        result.notes = "Ikke nok informasjon for \u00e5 s\u00f8ke hos produsent"
+        return result
+
+    # Only attempt lookup for known manufacturers
+    mfr_config = _find_manufacturer_config(product.manufacturer or "")
+    if not mfr_config:
+        result.notes = (
+            f"Produsenten '{product.manufacturer or 'ukjent'}' er ikke i listen over kjente "
+            f"produsenter med s\u00f8kbart nettsted. Manuelt oppslag anbefales."
+        )
         return result
 
     queries = _build_search_queries(product)
     if not queries:
-        result.notes = "Kunne ikke bygge søkespørring"
+        result.notes = "Kunne ikke bygge s\u00f8kesp\u00f8rring - mangler b\u00e5de varenummer og produktnavn"
         return result
 
-    # Try to find and fetch manufacturer pages
+    search_pattern = mfr_config.get("search_pattern", "/search?q={query}")
+
     async with httpx.AsyncClient(timeout=15) as client:
-        for query in queries[:3]:  # Limit to top 3 queries
-            try:
-                # Use a search engine or direct manufacturer site
-                manufacturer = product.manufacturer or ""
-
-                # Try to guess manufacturer domain
-                mfr_domains = _guess_manufacturer_domains(manufacturer)
-
-                for domain in mfr_domains:
-                    try:
-                        # Try searching the manufacturer site
-                        search_url = f"https://{domain}/search?q={product.product_name or product.manufacturer_article_number or ''}"
-                        response = await client.get(
-                            search_url,
-                            headers=HEADERS,
-                            follow_redirects=True,
+        for domain in mfr_config["domains"]:
+            for query in queries[:2]:  # Max 2 queries per domain
+                try:
+                    search_url = f"https://{domain}{search_pattern.format(query=query)}"
+                    response = await client.get(
+                        search_url,
+                        headers=HEADERS,
+                        follow_redirects=True,
+                    )
+                    if response.status_code == 200:
+                        info = _extract_product_info_from_page(
+                            response.text, str(response.url)
                         )
-                        if response.status_code == 200:
-                            info = _extract_product_info_from_page(
-                                response.text, str(response.url)
+                        if info.get("product_name") or info.get("specifications"):
+                            result.found = True
+                            result.source_url = str(response.url)
+                            result.product_name = info.get("product_name")
+                            result.description = info.get("description")
+                            result.specifications = info.get("specifications")
+                            result.datasheet_url = info.get("datasheet_url")
+                            # Confidence is moderate - this is a search result page,
+                            # not necessarily the exact product
+                            result.confidence = 0.5
+                            result.notes = (
+                                f"Data funnet via {domain}. "
+                                f"Verifiser at det er riktig produkt f\u00f8r bruk."
                             )
-                            if info.get("product_name") or info.get("specifications"):
-                                result.found = True
-                                result.source_url = str(response.url)
-                                result.product_name = info.get("product_name")
-                                result.description = info.get("description")
-                                result.specifications = info.get("specifications")
-                                result.datasheet_url = info.get("datasheet_url")
-                                result.confidence = 0.6
-                                result.notes = f"Funnet via produsentens nettside: {domain}"
-                                return result
-                    except Exception:
-                        continue
+                            return result
+                except Exception as e:
+                    logger.debug(f"Search error for {domain}: {e}")
+                    continue
 
-            except Exception as e:
-                logger.debug(f"Search error for query '{query}': {e}")
-                continue
-
-    result.notes = "Ingen resultater fra produsentoppslag"
+    result.notes = f"Ingen treff hos kjente produsentnettsted for '{product.manufacturer or 'ukjent'}'"
     return result
-
-
-def _guess_manufacturer_domains(manufacturer_name: str) -> list[str]:
-    """Try to guess the manufacturer's website domain."""
-    if not manufacturer_name:
-        return []
-
-    domains = []
-    # Clean the name
-    clean = re.sub(r'[^\w\s]', '', manufacturer_name.lower()).strip()
-    parts = clean.split()
-
-    if not parts:
-        return []
-
-    # Common patterns
-    name_joined = "".join(parts)
-    name_hyphen = "-".join(parts)
-
-    domains.extend([
-        f"www.{name_joined}.com",
-        f"www.{name_joined}.no",
-        f"www.{name_joined}.se",
-        f"www.{name_joined}.dk",
-        f"www.{name_hyphen}.com",
-        f"{name_joined}.com",
-    ])
-
-    # If first word is long enough, try it alone
-    if len(parts[0]) > 3:
-        domains.append(f"www.{parts[0]}.com")
-        domains.append(f"www.{parts[0]}.no")
-
-    # Known manufacturer mappings for medical supplies
-    known_manufacturers = {
-        "molnlycke": ["www.molnlycke.com"],
-        "mölnlycke": ["www.molnlycke.com"],
-        "coloplast": ["www.coloplast.com", "www.coloplast.no"],
-        "bsn": ["www.bsnmedical.com"],
-        "essity": ["www.essity.com"],
-        "sca": ["www.essity.com"],
-        "tena": ["www.tena.no"],
-        "hartmann": ["www.hartmann.info"],
-        "paul hartmann": ["www.hartmann.info"],
-        "3m": ["www.3m.com"],
-        "smith nephew": ["www.smith-nephew.com"],
-        "smithnephew": ["www.smith-nephew.com"],
-        "convatec": ["www.convatec.com"],
-        "medela": ["www.medela.com"],
-        "dansac": ["www.dansac.com"],
-        "hollister": ["www.hollister.com"],
-        "b braun": ["www.bbraun.com", "www.bbraun.no"],
-        "bbraun": ["www.bbraun.com"],
-        "medline": ["www.medline.com"],
-        "cardinal": ["www.cardinalhealth.com"],
-        "baxter": ["www.baxter.com"],
-        "fresenius": ["www.fresenius.com"],
-        "nutricia": ["www.nutricia.no", "www.nutricia.com"],
-    }
-
-    for key, urls in known_manufacturers.items():
-        if key in clean:
-            domains = urls + domains
-            break
-
-    return domains[:5]  # Limit attempts
 
 
 def generate_improvement_suggestions(
     product: ProductData,
     manufacturer_data: ManufacturerLookup,
 ) -> list[dict]:
-    """Generate specific improvement suggestions based on manufacturer data."""
+    """Generate specific improvement suggestions based on manufacturer data.
+
+    All suggestions include a note that they should be verified manually.
+    """
     suggestions = []
 
     if not manufacturer_data.found:
@@ -250,7 +270,7 @@ def generate_improvement_suggestions(
                 "suggested": mfr_name,
                 "source": manufacturer_data.source_url,
                 "confidence": manufacturer_data.confidence,
-                "reason": "Produsentens produktnavn er mer beskrivende",
+                "reason": "Produsentens produktnavn er mer beskrivende (verifiser manuelt)",
             })
 
     # Suggest better description
@@ -263,7 +283,7 @@ def generate_improvement_suggestions(
             "suggested": manufacturer_data.description,
             "source": manufacturer_data.source_url,
             "confidence": manufacturer_data.confidence * 0.9,
-            "reason": "Produsentens beskrivelse er mer utfyllende",
+            "reason": "Produsentens beskrivelse er mer utfyllende (verifiser manuelt)",
         })
 
     # Suggest specifications
@@ -277,7 +297,7 @@ def generate_improvement_suggestions(
                     "suggested": value,
                     "source": manufacturer_data.source_url,
                     "confidence": manufacturer_data.confidence * 0.8,
-                    "reason": f"Ny spesifikasjon fra produsent",
+                    "reason": "Ny spesifikasjon fra produsent (verifiser manuelt)",
                 })
 
     # Suggest datasheet link

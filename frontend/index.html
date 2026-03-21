@@ -30,7 +30,7 @@
         }
 
         .container {
-            max-width: 960px;
+            max-width: 1060px;
             margin: 0 auto;
             padding: 2rem 1.5rem;
         }
@@ -145,11 +145,77 @@
             background: #15803d;
         }
 
+        .btn-danger {
+            background: var(--danger);
+            color: #fff;
+        }
+
+        .btn-danger:hover {
+            background: #b91c1c;
+        }
+
+        .btn-outline {
+            background: transparent;
+            color: var(--text-muted);
+            border: 1px solid var(--border);
+        }
+
+        .btn-outline:hover {
+            background: var(--bg);
+            color: var(--text);
+        }
+
         .actions {
             display: flex;
             gap: 1rem;
             margin-top: 1.5rem;
             align-items: center;
+            flex-wrap: wrap;
+        }
+
+        /* Options */
+        .upload-options {
+            display: flex;
+            gap: 1rem;
+            align-items: center;
+            margin-top: 1rem;
+            font-size: 0.9rem;
+        }
+
+        .upload-options label {
+            display: flex;
+            align-items: center;
+            gap: 0.4rem;
+            color: var(--text-muted);
+            cursor: pointer;
+        }
+
+        .upload-options input[type="checkbox"] {
+            cursor: pointer;
+        }
+
+        .column-info {
+            margin-top: 0.75rem;
+            padding: 0.5rem 0.75rem;
+            background: #eff6ff;
+            border-radius: 6px;
+            font-size: 0.85rem;
+            color: var(--primary-dark);
+        }
+
+        /* Spinner */
+        .spinner {
+            display: inline-block;
+            width: 18px;
+            height: 18px;
+            border: 2px solid rgba(255,255,255,0.3);
+            border-top-color: #fff;
+            border-radius: 50%;
+            animation: spin 0.6s linear infinite;
+        }
+
+        @keyframes spin {
+            to { transform: rotate(360deg); }
         }
 
         /* Progress */
@@ -183,6 +249,16 @@
             margin-top: 0.75rem;
             font-size: 0.85rem;
             color: var(--text-muted);
+        }
+
+        .progress-warning {
+            margin-top: 0.5rem;
+            padding: 0.5rem 0.75rem;
+            background: #fef3c7;
+            color: #92400e;
+            border-radius: 6px;
+            font-size: 0.8rem;
+            display: none;
         }
 
         /* Results table */
@@ -247,6 +323,91 @@
             background: #f1f5f9;
         }
 
+        .results-table tr.expandable {
+            cursor: pointer;
+        }
+
+        .results-table tr.expandable td:first-child::before {
+            content: "\25B6";
+            display: inline-block;
+            margin-right: 0.4rem;
+            font-size: 0.65rem;
+            transition: transform 0.2s;
+            color: var(--text-muted);
+        }
+
+        .results-table tr.expandable.expanded td:first-child::before {
+            transform: rotate(90deg);
+        }
+
+        .detail-row {
+            display: none;
+        }
+
+        .detail-row.visible {
+            display: table-row;
+        }
+
+        .detail-row td {
+            padding: 0;
+            background: #f8fafc;
+        }
+
+        .detail-content {
+            padding: 1rem 1.5rem;
+        }
+
+        .detail-content h4 {
+            font-size: 0.85rem;
+            font-weight: 600;
+            margin-bottom: 0.5rem;
+            color: var(--text);
+        }
+
+        .field-grid {
+            display: grid;
+            grid-template-columns: 1fr 1fr;
+            gap: 0.5rem;
+            font-size: 0.8rem;
+        }
+
+        .field-item {
+            display: flex;
+            align-items: center;
+            gap: 0.4rem;
+            padding: 0.3rem 0.5rem;
+            border-radius: 4px;
+            background: white;
+            border: 1px solid var(--border);
+        }
+
+        .field-item .field-status {
+            width: 8px;
+            height: 8px;
+            border-radius: 50%;
+            flex-shrink: 0;
+        }
+
+        .field-item .field-status.ok { background: var(--success); }
+        .field-item .field-status.missing { background: var(--danger); }
+        .field-item .field-status.improve { background: var(--warning); }
+        .field-item .field-status.error { background: #ef4444; }
+
+        .field-item .field-name {
+            font-weight: 500;
+            color: var(--text);
+        }
+
+        .field-item .field-comment {
+            color: var(--text-muted);
+            margin-left: auto;
+            text-align: right;
+            max-width: 200px;
+            overflow: hidden;
+            text-overflow: ellipsis;
+            white-space: nowrap;
+        }
+
         .status-badge {
             display: inline-block;
             padding: 0.2rem 0.6rem;
@@ -280,6 +441,7 @@
             .card { padding: 1.25rem; }
             .stats-grid { grid-template-columns: repeat(2, 1fr); }
             .results-table { font-size: 0.75rem; }
+            .field-grid { grid-template-columns: 1fr; }
         }
     </style>
 </head>
@@ -287,7 +449,7 @@
     <div class="container">
         <header>
             <h1>Masterdata Kvalitetssjekk</h1>
-            <p>Analyser produktkatalog mot onemed.no</p>
+            <p>Last opp en Excel-fil med artikkelnumre for automatisk kvalitetsanalyse mot onemed.no</p>
         </header>
 
         <!-- Upload Section -->
@@ -300,10 +462,17 @@
                     <line x1="12" y1="3" x2="12" y2="15"/>
                 </svg>
                 <p>Dra og slipp Excel-fil her, eller klikk for a velge</p>
-                <p style="font-size:0.8rem; margin-top:0.5rem; color:#94a3b8">.xlsx-filer med artikkelnummer i forste kolonne</p>
+                <p style="font-size:0.8rem; margin-top:0.5rem; color:#94a3b8">.xlsx-fil med artikkelnumre (maks 1000 rader, 5 MB)</p>
                 <p class="filename hidden" id="fileName"></p>
-                <input type="file" id="fileInput" accept=".xlsx,.xls">
+                <input type="file" id="fileInput" accept=".xlsx">
             </div>
+            <div class="upload-options">
+                <label>
+                    <input type="checkbox" id="skipCacheCheckbox">
+                    Ignorer cache (hent ferske data fra onemed.no)
+                </label>
+            </div>
+            <div class="column-info hidden" id="columnInfo"></div>
             <div class="actions">
                 <button class="btn btn-primary" id="startBtn" disabled>Start analyse</button>
                 <span id="fileInfo" style="color:var(--text-muted);font-size:0.9rem"></span>
@@ -312,7 +481,7 @@
 
         <!-- Progress Section -->
         <div class="card progress-section" id="progressSection">
-            <h2>Analyse pagar...</h2>
+            <h2 id="progressTitle">Analyse pagar...</h2>
             <div class="progress-bar-container">
                 <div class="progress-bar" id="progressBar"></div>
             </div>
@@ -321,6 +490,10 @@
                 <span id="progressPercent">0%</span>
             </div>
             <div class="progress-detail" id="progressDetail">Starter...</div>
+            <div class="progress-warning" id="progressWarning"></div>
+            <div class="actions">
+                <button class="btn btn-danger" id="cancelBtn">Avbryt analyse</button>
+            </div>
         </div>
 
         <!-- Results Section -->
@@ -335,7 +508,7 @@
             </div>
 
             <div class="card">
-                <h2>Produktoversikt</h2>
+                <h2>Produktoversikt <span style="font-weight:400;font-size:0.85rem;color:var(--text-muted)">(klikk en rad for detaljer)</span></h2>
                 <div style="overflow-x:auto">
                     <table class="results-table">
                         <thead>
@@ -365,6 +538,8 @@
         let currentJobId = null;
         let pollInterval = null;
         let selectedFile = null;
+        let pollErrorCount = 0;
+        let fullResults = null;
 
         // DOM elements
         const fileInput = document.getElementById('fileInput');
@@ -372,11 +547,16 @@
         const fileName = document.getElementById('fileName');
         const fileInfo = document.getElementById('fileInfo');
         const startBtn = document.getElementById('startBtn');
+        const skipCacheCheckbox = document.getElementById('skipCacheCheckbox');
+        const columnInfo = document.getElementById('columnInfo');
         const progressSection = document.getElementById('progressSection');
+        const progressTitle = document.getElementById('progressTitle');
         const progressBar = document.getElementById('progressBar');
         const progressText = document.getElementById('progressText');
         const progressPercent = document.getElementById('progressPercent');
         const progressDetail = document.getElementById('progressDetail');
+        const progressWarning = document.getElementById('progressWarning');
+        const cancelBtn = document.getElementById('cancelBtn');
         const resultsSection = document.getElementById('resultsSection');
         const statsGrid = document.getElementById('statsGrid');
         const resultsBody = document.getElementById('resultsBody');
@@ -409,23 +589,54 @@
         });
 
         function selectFile(file) {
+            if (!file.name.endsWith('.xlsx')) {
+                alert('Kun .xlsx-filer st\u00f8ttes. Lagre filen som .xlsx i Excel f\u00f8rst.');
+                return;
+            }
+            if (file.size > 5 * 1024 * 1024) {
+                alert('Filen er for stor (maks 5 MB).');
+                return;
+            }
             selectedFile = file;
             fileName.textContent = file.name;
             fileName.classList.remove('hidden');
             fileInfo.textContent = `${(file.size / 1024).toFixed(1)} KB`;
             startBtn.disabled = false;
+            columnInfo.classList.add('hidden');
         }
+
+        // Cancel analysis
+        cancelBtn.addEventListener('click', async () => {
+            if (!currentJobId) return;
+            if (!confirm('Er du sikker p\u00e5 at du vil avbryte analysen?')) return;
+
+            try {
+                await fetch(`${API_BASE}/api/cancel/${currentJobId}`, { method: 'DELETE' });
+                clearInterval(pollInterval);
+                pollInterval = null;
+                progressTitle.textContent = 'Analyse avbrutt';
+                progressDetail.textContent = 'Analysen ble avbrutt av bruker.';
+                cancelBtn.classList.add('hidden');
+            } catch (e) {
+                console.error('Cancel error:', e);
+            }
+        });
 
         // Start analysis
         startBtn.addEventListener('click', async () => {
             if (!selectedFile) return;
 
             startBtn.disabled = true;
+            startBtn.innerHTML = '<span class="spinner"></span> Laster opp...';
+
             const formData = new FormData();
             formData.append('file', selectedFile);
 
+            const skipCache = skipCacheCheckbox.checked;
+            const url = `${API_BASE}/api/upload${skipCache ? '?skip_cache=true' : ''}`;
+
             try {
-                const resp = await fetch(`${API_BASE}/api/upload`, {
+                const resp = await fetch(url, {
                     method: 'POST',
                     body: formData,
                 });
@@ -434,6 +645,7 @@
                     const err = await resp.json();
                     alert(`Feil: ${err.detail || 'Ukjent feil'}`);
                     startBtn.disabled = false;
+                    startBtn.textContent = 'Start analyse';
                     return;
                 }
 
@@ -441,9 +653,19 @@
                 currentJobId = data.job_id;
                 fileInfo.textContent = `${data.total_products} produkter funnet`;
 
+                // Show detected column
+                if (data.detected_column) {
+                    columnInfo.textContent = `Artikkelnumre leses fra kolonne: "${data.detected_column}"`;
+                    columnInfo.classList.remove('hidden');
+                }
+
                 // Show progress
+                startBtn.textContent = 'Start analyse';
                 progressSection.classList.add('active');
+                progressTitle.textContent = 'Analyse p\u00e5g\u00e5r...';
+                cancelBtn.classList.remove('hidden');
                 resultsSection.classList.remove('active');
+                pollErrorCount = 0;
 
                 // Start polling
                 pollInterval = setInterval(pollStatus, 2000);
@@ -452,6 +674,7 @@
             } catch (e) {
                 alert(`Nettverksfeil: ${e.message}`);
                 startBtn.disabled = false;
+                startBtn.textContent = 'Start analyse';
             }
         });
 
@@ -460,7 +683,14 @@
 
             try {
                 const resp = await fetch(`${API_BASE}/api/status/${currentJobId}`);
+
+                if (!resp.ok) {
+                    throw new Error(`HTTP ${resp.status}`);
+                }
+
                 const data = await resp.json();
+                pollErrorCount = 0; // Reset on success
+                progressWarning.style.display = 'none';
 
                 // Update progress
                 progressBar.style.width = `${data.progress_percent}%`;
@@ -474,12 +704,15 @@
                 if (data.status === 'completed' || data.status === 'failed') {
                     clearInterval(pollInterval);
                     pollInterval = null;
+                    cancelBtn.classList.add('hidden');
 
                     if (data.status === 'completed') {
-                        progressDetail.textContent = 'Analyse fullfort!';
+                        progressTitle.textContent = 'Analyse fullf\u00f8rt!';
+                        progressDetail.textContent = 'Laster resultater...';
                         await loadResults();
                     } else {
-                        progressDetail.textContent = 'Analyse feilet. Sjekk feillogg.';
+                        progressTitle.textContent = 'Analyse feilet';
+                        progressDetail.textContent = 'Analysen feilet. Sjekk feilloggen nedenfor.';
                     }
 
                     if (data.errors && data.errors.length > 0) {
@@ -490,7 +723,21 @@
                     }
                 }
             } catch (e) {
+                pollErrorCount++;
                 console.error('Poll error:', e);
+
+                if (pollErrorCount >= 3) {
+                    progressWarning.textContent = `Tilkoblingsproblem (${pollErrorCount} fors\u00f8k mislyktes). Sjekker fortsatt...`;
+                    progressWarning.style.display = 'block';
+                }
+
+                if (pollErrorCount >= 10) {
+                    clearInterval(pollInterval);
+                    pollInterval = null;
+                    progressTitle.textContent = 'Tilkoblingen ble brutt';
+                    progressDetail.textContent = 'Kunne ikke n\u00e5 serveren. Pr\u00f8v \u00e5 laste siden p\u00e5 nytt.';
+                    cancelBtn.classList.add('hidden');
+                }
             }
         }
 
@@ -498,8 +745,8 @@
             try {
                 const resp = await fetch(`${API_BASE}/api/results/${currentJobId}`);
                 const data = await resp.json();
+                fullResults = data.results;
 
-                // Calculate stats
                 const results = data.results;
                 const total = results.length;
                 const found = results.filter(r => r.found).length;
@@ -508,11 +755,6 @@
                     : 0;
                 const needsFollowup = results.filter(r => r.requires_followup).length;
                 const needsReview = results.filter(r => r.manual_review).length;
-
-                const statusCounts = {};
-                results.forEach(r => {
-                    statusCounts[r.status] = (statusCounts[r.status] || 0) + 1;
-                });
 
                 // Render stats
                 statsGrid.innerHTML = `
@@ -538,17 +780,40 @@
                     </div>
                 `;
 
-                // Render results table
-                resultsBody.innerHTML = results.map(r => `
-                    <tr>
-                        <td>${escapeHtml(r.article_number)}</td>
-                        <td title="${escapeHtml(r.product_name || '')}">${escapeHtml(r.product_name || '-')}</td>
-                        <td>${r.score}%</td>
-                        <td><span class="status-badge ${getStatusClass(r.status)}">${escapeHtml(r.status)}</span></td>
-                        <td>${escapeHtml(r.manufacturer || '-')}</td>
-                        <td title="${escapeHtml(r.comment || '')}">${escapeHtml(r.comment || '-')}</td>
-                    </tr>
-                `).join('');
+                // Render results table with expandable rows
+                resultsBody.innerHTML = results.map((r, idx) => {
+                    const fieldHtml = (r.field_analyses || []).map(fa => {
+                        const statusClass = getFieldStatusClass(fa.status);
+                        return `
+                            <div class="field-item">
+                                <span class="field-status ${statusClass}"></span>
+                                <span class="field-name">${escapeHtml(fa.field_name)}</span>
+                                <span class="field-comment">${escapeHtml(fa.comment || '')}</span>
+                            </div>
+                        `;
+                    }).join('');
+
+                    return `
+                        <tr class="expandable" data-idx="${idx}" onclick="toggleDetail(${idx})">
+                            <td>${escapeHtml(r.article_number)}</td>
+                            <td title="${escapeHtml(r.product_name || '')}">${escapeHtml(r.product_name || '-')}</td>
+                            <td>${r.score}%</td>
+                            <td><span class="status-badge ${getStatusClass(r.status)}">${escapeHtml(r.status)}</span></td>
+                            <td>${escapeHtml(r.manufacturer || '-')}</td>
+                            <td title="${escapeHtml(r.comment || '')}">${escapeHtml(r.comment || '-')}</td>
+                        </tr>
+                        <tr class="detail-row" id="detail-${idx}">
+                            <td colspan="6">
+                                <div class="detail-content">
+                                    <h4>Feltanalyse for ${escapeHtml(r.article_number)}</h4>
+                                    <div class="field-grid">
+                                        ${fieldHtml || '<p style="color:var(--text-muted)">Ingen feltanalyse tilgjengelig</p>'}
+                                    </div>
+                                </div>
+                            </td>
+                        </tr>
+                    `;
+                }).join('');
 
                 // Show results
                 progressSection.classList.remove('active');
@@ -556,6 +821,16 @@
 
             } catch (e) {
                 console.error('Load results error:', e);
+                progressDetail.textContent = 'Kunne ikke laste resultater. Last ned Excel-rapporten i stedet.';
+            }
+        }
+
+        function toggleDetail(idx) {
+            const row = document.querySelector(`tr[data-idx="${idx}"]`);
+            const detail = document.getElementById(`detail-${idx}`);
+            if (row && detail) {
+                row.classList.toggle('expanded');
+                detail.classList.toggle('visible');
             }
         }
 
@@ -563,11 +838,22 @@
             const map = {
                 'OK': 'status-ok',
                 'Mangler': 'status-missing',
-                'Bør forbedres': 'status-improve',
+                'B\u00f8r forbedres': 'status-improve',
                 'Sannsynlig feil': 'status-error',
                 'Krever produsent': 'status-manufacturer',
             };
             return map[status] || 'status-improve';
+        }
+
+        function getFieldStatusClass(status) {
+            const map = {
+                'OK': 'ok',
+                'Mangler': 'missing',
+                'B\u00f8r forbedres': 'improve',
+                'Sannsynlig feil': 'error',
+                'Krever produsent': 'improve',
+            };
+            return map[status] || 'improve';
         }
 
         function escapeHtml(str) {
@@ -577,25 +863,51 @@
             return div.innerHTML;
         }
 
-        // Download
-        downloadBtn.addEventListener('click', () => {
-            if (currentJobId) {
-                window.location.href = `${API_BASE}/api/download/${currentJobId}`;
+        // Download with error handling
+        downloadBtn.addEventListener('click', async () => {
+            if (!currentJobId) return;
+
+            try {
+                const resp = await fetch(`${API_BASE}/api/download/${currentJobId}`);
+                if (!resp.ok) {
+                    const err = await resp.json().catch(() => ({}));
+                    alert(`Kunne ikke laste ned: ${err.detail || 'Ukjent feil'}`);
+                    return;
+                }
+                const blob = await resp.blob();
+                const url = URL.createObjectURL(blob);
+                const a = document.createElement('a');
+                a.href = url;
+                a.download = `masterdata_kvalitetssjekk_${currentJobId}.xlsx`;
+                document.body.appendChild(a);
+                a.click();
+                document.body.removeChild(a);
+                URL.revokeObjectURL(url);
+            } catch (e) {
+                alert(`Nedlasting feilet: ${e.message}`);
             }
         });
 
-        // New analysis
+        // New analysis with confirmation
         newAnalysisBtn.addEventListener('click', () => {
+            if (!confirm('Start ny analyse? Gjeldende resultater vil ikke lenger v\u00e6re tilgjengelig i nettleseren.\n\n(Excel-rapporten kan fortsatt lastes ned hvis du har lagret den.)')) {
+                return;
+            }
             currentJobId = null;
             selectedFile = null;
+            fullResults = null;
             fileInput.value = '';
             fileName.classList.add('hidden');
             fileInfo.textContent = '';
+            columnInfo.classList.add('hidden');
             startBtn.disabled = true;
+            startBtn.textContent = 'Start analyse';
             progressSection.classList.remove('active');
             resultsSection.classList.remove('active');
             errorsCard.classList.add('hidden');
             progressBar.style.width = '0%';
+            progressWarning.style.display = 'none';
+            skipCacheCheckbox.checked = false;
         });
     </script>
 </body>
