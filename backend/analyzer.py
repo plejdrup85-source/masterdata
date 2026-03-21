@@ -9,6 +9,7 @@ import re
 
 from backend.models import (
     FieldAnalysis,
+    JeevesData,
     ProductAnalysis,
     ProductData,
     QualityStatus,
@@ -30,10 +31,24 @@ FIELD_WEIGHTS = {
     "Kategori": 1.0,
     "Pakningsinformasjon": 1.0,
     "Bildekvalitet": 1.5,
+    "Merkevare": 0.5,
     "Konsistens mellom felter": 0.5,
 }
 
 # Technical/measurable keywords that indicate specification content
+def _source_label(website_val, jeeves_val, website_label="nettside", jeeves_label="Jeeves"):
+    """Return a human-readable source label for two-source comparison."""
+    has_web = bool(website_val)
+    has_jeeves = bool(jeeves_val)
+    if has_web and has_jeeves:
+        return f"{website_label} + {jeeves_label}"
+    elif has_web:
+        return f"{website_label} kun"
+    elif has_jeeves:
+        return f"{jeeves_label} kun"
+    return None
+
+
 SPEC_KEYWORDS = {
     "mm", "cm", "m", "ml", "l", "g", "kg", "stk", "pk", "µm",
     "størrelse", "size", "materiale", "material", "farge", "color",
@@ -46,17 +61,29 @@ SPEC_KEYWORDS = {
 }
 
 
-def _analyze_product_name(product: ProductData) -> FieldAnalysis:
-    """Analyze product name quality."""
+def _analyze_product_name(product: ProductData, jeeves: JeevesData = None) -> FieldAnalysis:
+    """Analyze product name quality using website + Jeeves sources."""
     name = product.product_name
+    jeeves_name = (jeeves.item_description or jeeves.web_title) if jeeves else None
+
+    # Use website name, fall back to Jeeves
+    effective_name = name or jeeves_name
+    source_info = _source_label(name, jeeves_name, "nettside", "Jeeves")
+
     analysis = FieldAnalysis(
         field_name="Produktnavn",
-        current_value=name,
+        current_value=effective_name,
+        source=source_info,
     )
 
-    if not name:
+    if not effective_name:
         analysis.status = QualityStatus.MISSING
-        analysis.comment = "Produktnavn mangler helt"
+        analysis.comment = "Produktnavn mangler i både Jeeves og nettside"
+        return analysis
+
+    if not name and jeeves_name:
+        analysis.status = QualityStatus.OK
+        analysis.comment = f"Produktnavn fra Jeeves: {jeeves_name}"
         return analysis
 
     issues = []
@@ -93,17 +120,27 @@ def _analyze_product_name(product: ProductData) -> FieldAnalysis:
     return analysis
 
 
-def _analyze_description(product: ProductData) -> FieldAnalysis:
-    """Analyze product description quality."""
+def _analyze_description(product: ProductData, jeeves: JeevesData = None) -> FieldAnalysis:
+    """Analyze product description quality using website + Jeeves sources."""
     desc = product.description
+    jeeves_desc = jeeves.web_text if jeeves else None
+    effective_desc = desc or jeeves_desc
+    source_info = _source_label(desc, jeeves_desc, "nettside", "Jeeves")
+
     analysis = FieldAnalysis(
         field_name="Beskrivelse",
-        current_value=desc,
+        current_value=effective_desc,
+        source=source_info,
     )
 
-    if not desc:
+    if not effective_desc:
         analysis.status = QualityStatus.MISSING
-        analysis.comment = "Beskrivelse mangler helt"
+        analysis.comment = "Beskrivelse mangler i både Jeeves og nettside"
+        return analysis
+
+    if not desc and jeeves_desc:
+        analysis.status = QualityStatus.OK
+        analysis.comment = f"Beskrivelse fra Jeeves ({len(jeeves_desc)} tegn)"
         return analysis
 
     issues = []
@@ -160,25 +197,33 @@ def _count_structured_attributes(details: dict, spec: str) -> int:
     return count
 
 
-def _analyze_specification(product: ProductData) -> FieldAnalysis:
-    """Analyze product specification quality.
+def _analyze_specification(product: ProductData, jeeves: JeevesData = None) -> FieldAnalysis:
+    """Analyze product specification quality using website + Jeeves sources.
 
     Valid if:
     - At least 2 structured attributes exist in technical_details
     - OR specification text contains measurable/technical info
+    - OR Jeeves has specification data
     - OR description contains substantial technical details
     """
     spec = product.specification
     details = product.technical_details
+    jeeves_spec = jeeves.specification if jeeves else None
 
     # Build current_value from all available sources
     display_value = spec
     if details and not display_value:
         display_value = "; ".join(f"{k}: {v}" for k, v in details.items())
+    if not display_value and jeeves_spec:
+        display_value = jeeves_spec
+
+    source_info = _source_label(spec or ("; ".join(f"{k}: {v}" for k, v in details.items()) if details else None),
+                                jeeves_spec, "nettside", "Jeeves")
 
     analysis = FieldAnalysis(
         field_name="Spesifikasjon",
         current_value=display_value,
+        source=source_info,
     )
 
     # Count structured attributes from technical_details
@@ -192,6 +237,10 @@ def _analyze_specification(product: ProductData) -> FieldAnalysis:
 
     # Determine status
     if not spec and not details:
+        if jeeves_spec:
+            analysis.status = QualityStatus.OK
+            analysis.comment = f"Spesifikasjon fra Jeeves: {jeeves_spec}"
+            return analysis
         if has_tech_in_desc:
             analysis.status = QualityStatus.SHOULD_IMPROVE
             analysis.comment = (
@@ -200,7 +249,7 @@ def _analyze_specification(product: ProductData) -> FieldAnalysis:
             )
         else:
             analysis.status = QualityStatus.MISSING
-            analysis.comment = "Spesifikasjoner mangler helt. Bør innhentes fra produsent."
+            analysis.comment = "Spesifikasjoner mangler i både Jeeves og nettside"
         return analysis
 
     issues = []
@@ -239,17 +288,32 @@ def _analyze_specification(product: ProductData) -> FieldAnalysis:
     return analysis
 
 
-def _analyze_manufacturer(product: ProductData) -> FieldAnalysis:
-    """Analyze manufacturer information."""
+def _analyze_manufacturer(product: ProductData, jeeves: JeevesData = None) -> FieldAnalysis:
+    """Analyze manufacturer information using website + Jeeves sources.
+
+    Supplier/brand from Jeeves is the authoritative source for manufacturer.
+    Do NOT mark as missing just because the website doesn't show it.
+    """
     mfr = product.manufacturer
+    jeeves_supplier = jeeves.supplier if jeeves else None
+    effective_mfr = mfr or jeeves_supplier
+    source_info = _source_label(mfr, jeeves_supplier, "nettside", "Jeeves")
+
     analysis = FieldAnalysis(
         field_name="Produsent",
-        current_value=mfr,
+        current_value=effective_mfr,
+        source=source_info,
     )
 
-    if not mfr:
+    if not effective_mfr:
         analysis.status = QualityStatus.MISSING
-        analysis.comment = "Produsentinformasjon mangler"
+        analysis.comment = "Produsentinformasjon mangler i både Jeeves og nettside"
+        return analysis
+
+    if not mfr and jeeves_supplier:
+        # Present in Jeeves only — this is fine, not missing
+        analysis.status = QualityStatus.OK
+        analysis.comment = f"Produsent fra Jeeves: {jeeves_supplier}"
         return analysis
 
     issues = []
@@ -274,21 +338,56 @@ def _analyze_manufacturer(product: ProductData) -> FieldAnalysis:
     return analysis
 
 
-def _analyze_manufacturer_article_number(product: ProductData) -> FieldAnalysis:
-    """Analyze manufacturer article number."""
+def _analyze_manufacturer_article_number(product: ProductData, jeeves: JeevesData = None) -> FieldAnalysis:
+    """Analyze manufacturer article number using website + Jeeves sources.
+
+    Do NOT mark as missing just because the website doesn't show it.
+    Jeeves 'Supplier Item.no' is the authoritative source.
+    """
     mfr_num = product.manufacturer_article_number
+    jeeves_num = jeeves.supplier_item_no if jeeves else None
+    effective_num = mfr_num or jeeves_num
+    source_info = _source_label(mfr_num, jeeves_num, "nettside", "Jeeves")
+
     analysis = FieldAnalysis(
         field_name="Produsentens varenummer",
-        current_value=mfr_num,
+        current_value=effective_num,
+        source=source_info,
     )
 
-    if not mfr_num:
+    if not effective_num:
         analysis.status = QualityStatus.MISSING
-        analysis.comment = "Produsentens varenummer mangler. B\u00f8r innhentes."
+        analysis.comment = "Produsentens varenummer mangler i både Jeeves og nettside"
+        return analysis
+
+    if not mfr_num and jeeves_num:
+        analysis.status = QualityStatus.OK
+        analysis.comment = f"Produsentens varenummer fra Jeeves: {jeeves_num}"
         return analysis
 
     analysis.status = QualityStatus.OK
     analysis.comment = "Produsentens varenummer finnes"
+    return analysis
+
+
+def _analyze_brand(product: ProductData, jeeves: JeevesData = None) -> FieldAnalysis:
+    """Analyze product brand using Jeeves Product Brand field."""
+    jeeves_brand = jeeves.product_brand if jeeves else None
+
+    analysis = FieldAnalysis(
+        field_name="Merkevare",
+        current_value=jeeves_brand,
+        source="Jeeves" if jeeves_brand else None,
+    )
+
+    if not jeeves_brand:
+        # Brand is not always available — don't treat as critical missing
+        analysis.status = QualityStatus.SHOULD_IMPROVE
+        analysis.comment = "Merkevare ikke oppgitt i Jeeves"
+        return analysis
+
+    analysis.status = QualityStatus.OK
+    analysis.comment = f"Merkevare fra Jeeves: {jeeves_brand}"
     return analysis
 
 
@@ -472,19 +571,25 @@ def _check_field_consistency(product: ProductData) -> FieldAnalysis:
     return analysis
 
 
-def analyze_product(product: ProductData, image_quality: dict = None) -> ProductAnalysis:
+def analyze_product(
+    product: ProductData,
+    image_quality: dict = None,
+    jeeves: JeevesData = None,
+) -> ProductAnalysis:
     """Run full quality analysis on a product.
 
     Args:
-        product: Scraped product data
+        product: Scraped product data from website
         image_quality: Optional dict from ProductImageSummary.to_dict()
+        jeeves: Optional Jeeves ERP data for two-source comparison
     """
     analysis = ProductAnalysis(
         article_number=product.article_number,
         product_data=product,
+        jeeves_data=jeeves,
     )
 
-    if not product.found_on_onemed:
+    if not product.found_on_onemed and not jeeves:
         analysis.overall_status = QualityStatus.MISSING
         analysis.overall_comment = product.error or "Produkt ikke funnet p\u00e5 onemed.no"
         analysis.manual_review_needed = True
@@ -498,15 +603,23 @@ def analyze_product(product: ProductData, image_quality: dict = None) -> Product
         analysis.total_score = 0.0
         return analysis
 
+    # If product not on website but exists in Jeeves, still analyze with Jeeves data
+    if not product.found_on_onemed and jeeves:
+        logger.info(
+            f"[analyze:{product.article_number}] Not on website, "
+            f"but found in Jeeves — analyzing with Jeeves data only"
+        )
+
     tag = f"[analyze:{product.article_number}]"
 
-    # Run all field analyses
+    # Run all field analyses with both sources
     field_analyses = [
-        _analyze_product_name(product),
-        _analyze_description(product),
-        _analyze_specification(product),
-        _analyze_manufacturer(product),
-        _analyze_manufacturer_article_number(product),
+        _analyze_product_name(product, jeeves),
+        _analyze_description(product, jeeves),
+        _analyze_specification(product, jeeves),
+        _analyze_manufacturer(product, jeeves),
+        _analyze_manufacturer_article_number(product, jeeves),
+        _analyze_brand(product, jeeves),
         _analyze_category(product),
         _analyze_packaging(product),
         _analyze_image(product, image_quality),

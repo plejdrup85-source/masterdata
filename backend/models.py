@@ -69,6 +69,31 @@ class FieldAnalysis(BaseModel):
     comment: Optional[str] = None
 
 
+class JeevesData(BaseModel):
+    """Structured base data from the Jeeves ERP Excel export.
+
+    Field mapping from Excel columns:
+      Item. No        → article_number (primary key)
+      GID             → gid (internal OneMed product ID)
+      Item description → item_description (ERP product name)
+      Specification   → specification (ERP specification)
+      Supplier        → supplier (producer / supplier)
+      Supplier Item.no → supplier_item_no (producer item number)
+      Product Brand   → product_brand (brand)
+      Web Title       → web_title (website title candidate)
+      Web Text        → web_text (website description candidate)
+    """
+    article_number: str
+    gid: Optional[str] = None
+    item_description: Optional[str] = None
+    specification: Optional[str] = None
+    supplier: Optional[str] = None
+    supplier_item_no: Optional[str] = None
+    product_brand: Optional[str] = None
+    web_title: Optional[str] = None
+    web_text: Optional[str] = None
+
+
 class ProductData(BaseModel):
     """Raw product data scraped from onemed.no."""
     article_number: str
@@ -108,6 +133,7 @@ class ProductAnalysis(BaseModel):
     """Complete analysis result for a single product."""
     article_number: str
     product_data: ProductData
+    jeeves_data: Optional[JeevesData] = None
     manufacturer_lookup: ManufacturerLookup = ManufacturerLookup()
     field_analyses: list[FieldAnalysis] = []
     total_score: float = 0.0
