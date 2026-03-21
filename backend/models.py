@@ -44,6 +44,21 @@ class EnrichmentResult(BaseModel):
     review_status: str = "auto"  # "auto", "needs_review", "conflict"
 
 
+class EnrichmentSuggestion(BaseModel):
+    """A single field enrichment suggestion with source traceability.
+
+    Produced by the enrichment engine after consolidating all sources.
+    """
+    field_name: str  # Norwegian field name (e.g., "Produktnavn")
+    current_value: Optional[str] = None
+    suggested_value: Optional[str] = None
+    source: Optional[str] = None  # Human-readable source label
+    source_url: Optional[str] = None
+    evidence: Optional[str] = None  # Quote / snippet proving the value
+    confidence: float = 0.0  # 0.0-1.0
+    review_required: bool = True  # Must a human verify this?
+
+
 class FieldAnalysis(BaseModel):
     field_name: str
     current_value: Optional[str] = None
@@ -106,6 +121,8 @@ class ProductAnalysis(BaseModel):
     image_quality: Optional[dict] = None
     # Enrichment results (populated by pdf_enricher pipeline)
     enrichment_results: list[EnrichmentResult] = []
+    # Enrichment suggestions (populated by enricher engine)
+    enrichment_suggestions: list[EnrichmentSuggestion] = []
     pdf_available: bool = False
     pdf_url: Optional[str] = None
     # AI scoring results (populated by ai_scorer)

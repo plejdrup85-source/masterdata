@@ -17,6 +17,7 @@ from fastapi.responses import FileResponse, HTMLResponse
 
 from backend.ai_scorer import enrich_product_async, score_product_async
 from backend.analyzer import analyze_product
+from backend.enricher import apply_enrichment_suggestions, enrich_product
 from backend.excel_handler import create_output_excel, read_article_numbers
 from backend.image_analyzer import analyze_product_images
 from backend.manufacturer import (
@@ -403,6 +404,19 @@ async def get_results(job_id: str):
                 ]),
                 "ai_score": r.ai_score,
                 "ai_enrichment": r.ai_enrichment,
+                "enrichment_suggestions": [
+                    {
+                        "field_name": es.field_name,
+                        "current_value": es.current_value,
+                        "suggested_value": es.suggested_value,
+                        "source": es.source,
+                        "source_url": es.source_url,
+                        "evidence": es.evidence,
+                        "confidence": es.confidence,
+                        "review_required": es.review_required,
+                    }
+                    for es in r.enrichment_suggestions
+                ],
                 "field_analyses": [
                     {
                         "field_name": fa.field_name,
@@ -556,6 +570,8 @@ def _apply_enrichment_to_analysis(analysis: ProductAnalysis) -> None:
         "manufacturer": "Produsent",
         "manufacturer_article_number": "Produsentens varenummer",
         "packaging_info": "Pakningsinformasjon",
+        "specifications": "Spesifikasjon",
+        "category": "Kategori",
     }
 
     for er in analysis.enrichment_results:
@@ -701,6 +717,18 @@ async def _run_analysis(
 
                 # Apply enrichment suggestions to field_analyses (PDF takes priority)
                 _apply_enrichment_to_analysis(analysis)
+
+                # Run source-priority enrichment engine
+                enrichment_suggestions = enrich_product(
+                    analysis, enrichment_results, manufacturer_data=mfr_data
+                )
+                if enrichment_suggestions:
+                    analysis.enrichment_suggestions = enrichment_suggestions
+                    apply_enrichment_suggestions(analysis, enrichment_suggestions)
+                    logger.info(
+                        f"[{job_id}] {article_number}: "
+                        f"{len(enrichment_suggestions)} enrichment suggestion(s)"
+                    )
 
                 # Step 6: AI scoring and enrichment (if API key configured)
                 job.current_step = "ai_scoring"

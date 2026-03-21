@@ -300,16 +300,21 @@ def _create_detail_sheet(ws, results: list[ProductAnalysis]) -> None:
 
 
 def _create_improvements_sheet(ws, results: list[ProductAnalysis]) -> None:
-    """Create improvements suggestion sheet."""
+    """Create improvements suggestion sheet.
+
+    Combines field analysis suggestions with enrichment engine suggestions.
+    Enrichment suggestions include source evidence and review-required flag.
+    """
     headers = [
         "Artikkelnummer",
         "Produktnavn",
         "Felt",
-        "N\u00e5v\u00e6rende verdi",
-        "Foresl\u00e5tt verdi",
+        "Nåværende verdi",
+        "Foreslått verdi",
         "Kilde",
         "Confidence",
-        "Begrunnelse",
+        "Evidens / Begrunnelse",
+        "Krever gjennomgang",
     ]
 
     for col, header in enumerate(headers, 1):
@@ -318,8 +323,30 @@ def _create_improvements_sheet(ws, results: list[ProductAnalysis]) -> None:
 
     row_idx = 2
     for result in results:
+        # Track which fields already have enrichment suggestions (to avoid duplicates)
+        enriched_fields = set()
+
+        # First: enrichment suggestions (higher priority, with evidence)
+        for es in result.enrichment_suggestions:
+            if es.suggested_value:
+                ws.cell(row=row_idx, column=1, value=result.article_number)
+                ws.cell(row=row_idx, column=2, value=result.product_data.product_name or "")
+                ws.cell(row=row_idx, column=3, value=es.field_name)
+                ws.cell(row=row_idx, column=4, value=es.current_value or "")
+                ws.cell(row=row_idx, column=5, value=es.suggested_value)
+                source_display = es.source or ""
+                if es.source_url:
+                    source_display = f"{source_display} ({es.source_url})"
+                ws.cell(row=row_idx, column=6, value=source_display)
+                ws.cell(row=row_idx, column=7, value=es.confidence if es.confidence else "")
+                ws.cell(row=row_idx, column=8, value=es.evidence or "")
+                ws.cell(row=row_idx, column=9, value="Ja" if es.review_required else "Nei")
+                enriched_fields.add(es.field_name)
+                row_idx += 1
+
+        # Then: field analysis suggestions (for fields not covered by enricher)
         for fa in result.field_analyses:
-            if fa.suggested_value:
+            if fa.suggested_value and fa.field_name not in enriched_fields:
                 ws.cell(row=row_idx, column=1, value=result.article_number)
                 ws.cell(row=row_idx, column=2, value=result.product_data.product_name or "")
                 ws.cell(row=row_idx, column=3, value=fa.field_name)
@@ -328,6 +355,7 @@ def _create_improvements_sheet(ws, results: list[ProductAnalysis]) -> None:
                 ws.cell(row=row_idx, column=6, value=fa.source or "")
                 ws.cell(row=row_idx, column=7, value=fa.confidence if fa.confidence else "")
                 ws.cell(row=row_idx, column=8, value=fa.comment or "")
+                ws.cell(row=row_idx, column=9, value="Ja")
                 row_idx += 1
 
     if row_idx == 2:
