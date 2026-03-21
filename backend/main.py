@@ -27,7 +27,7 @@ from backend.manufacturer import (
 )
 from backend.models import AnalysisJob, BatchMode, JobStatus, ProductAnalysis, ProductData, QualityStatus
 from backend.pdf_enricher import run_enrichment_pipeline
-from backend.scraper import scrape_product, _load_sitemap, _sitemap_loaded
+from backend.scraper import scrape_product, _load_sitemap, _sitemap_loaded, _sku_to_url
 
 # Configure logging
 logging.basicConfig(
@@ -711,7 +711,12 @@ async def _run_analysis(
         )
 
     # Scope logging — verify strict input processing
-    in_index = sum(1 for a in unique_articles if a.strip() in _sku_to_url)
+    # Defensive: _sku_to_url is an optional metrics aid; never crash the job if unavailable
+    try:
+        in_index = sum(1 for a in unique_articles if a.strip() in _sku_to_url)
+    except Exception:
+        logger.warning(f"[{job_id}] SKU index unavailable for scope metrics, defaulting to 0")
+        in_index = 0
     logger.info(
         f"[{job_id}] SCOPE: mode=strict_input | "
         f"input_rows={len(article_numbers)} | "
