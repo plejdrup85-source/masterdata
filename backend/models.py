@@ -125,8 +125,34 @@ class ManufacturerLookup(BaseModel):
     description: Optional[str] = None
     specifications: Optional[dict[str, str]] = None
     datasheet_url: Optional[str] = None
+    image_url: Optional[str] = None  # Better product image from manufacturer
     confidence: float = 0.0
     notes: Optional[str] = None
+
+
+class NorengrosLookup(BaseModel):
+    """Results from Norengros secondary reference lookup."""
+    searched: bool = False
+    found: bool = False
+    source_url: Optional[str] = None
+    product_name: Optional[str] = None
+    description: Optional[str] = None
+    specifications: Optional[dict[str, str]] = None
+    image_url: Optional[str] = None
+    confidence: float = 0.0
+    notes: Optional[str] = None
+
+
+class ImageSuggestion(BaseModel):
+    """A suggestion for a better product image from an external source."""
+    current_image_url: Optional[str] = None
+    current_image_status: str = "unknown"  # ok, missing, low_quality, poor_background
+    suggested_image_url: Optional[str] = None
+    suggested_source: Optional[str] = None  # "manufacturer", "norengros"
+    suggested_source_url: Optional[str] = None
+    confidence: float = 0.0
+    review_required: bool = True
+    reason: Optional[str] = None
 
 
 class ProductAnalysis(BaseModel):
@@ -135,6 +161,7 @@ class ProductAnalysis(BaseModel):
     product_data: ProductData
     jeeves_data: Optional[JeevesData] = None
     manufacturer_lookup: ManufacturerLookup = ManufacturerLookup()
+    norengros_lookup: Optional[NorengrosLookup] = None
     field_analyses: list[FieldAnalysis] = []
     total_score: float = 0.0
     overall_status: QualityStatus = QualityStatus.OK
@@ -145,6 +172,8 @@ class ProductAnalysis(BaseModel):
     suggested_manufacturer_message: Optional[str] = None
     # Image quality analysis (populated by image_analyzer)
     image_quality: Optional[dict] = None
+    # Image suggestion from manufacturer/Norengros
+    image_suggestion: Optional[ImageSuggestion] = None
     # Enrichment results (populated by pdf_enricher pipeline)
     enrichment_results: list[EnrichmentResult] = []
     # Enrichment suggestions (populated by enricher engine)

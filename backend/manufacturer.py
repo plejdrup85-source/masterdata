@@ -1,18 +1,22 @@
-"""Manufacturer lookup module - searches for product data from manufacturer websites.
+"""Manufacturer and secondary source lookup module.
 
-This module attempts to find product information from known manufacturer websites.
-It uses a curated list of manufacturer domain mappings and search URL patterns.
+Searches for product data from:
+1. Known manufacturer websites (primary supplementary source)
+2. Norengros (secondary market reference — conservative use only)
+
 Results should be treated as suggestions, not authoritative data.
+All competitor-derived information requires manual review.
 """
 
 import logging
 import re
 from typing import Optional
+from urllib.parse import quote_plus
 
 import httpx
 from bs4 import BeautifulSoup
 
-from backend.models import ManufacturerLookup, ProductData
+from backend.models import ManufacturerLookup, NorengrosLookup, ProductData
 
 logger = logging.getLogger(__name__)
 
@@ -179,7 +183,44 @@ def _extract_product_info_from_page(html: str, url: str) -> dict:
             info["datasheet_url"] = pdf_url
             break
 
+    # Extract product image URL
+    # Look for og:image meta tag first (most reliable)
+    og_image = soup.find("meta", attrs={"property": "og:image"})
+    if og_image:
+        img_url = og_image.get("content", "")
+        if img_url and _is_likely_product_image(img_url):
+            info["image_url"] = img_url if img_url.startswith("http") else f"https:{img_url}"
+
+    # Fallback: look for large product images in the page
+    if "image_url" not in info:
+        for img in soup.find_all("img", src=True):
+            src = img.get("src", "")
+            alt = (img.get("alt", "") or "").lower()
+            # Look for product images (skip icons, logos, decorative)
+            if _is_likely_product_image(src) and not any(
+                skip in alt for skip in ["logo", "icon", "banner", "arrow", "flag"]
+            ):
+                info["image_url"] = src if src.startswith("http") else f"https:{src}"
+                break
+
     return info
+
+
+def _is_likely_product_image(url: str) -> bool:
+    """Check if a URL is likely a product image (not icon/logo/placeholder)."""
+    if not url:
+        return False
+    url_lower = url.lower()
+    # Must be an image
+    if not any(ext in url_lower for ext in [".jpg", ".jpeg", ".png", ".webp"]):
+        # Could also be a dynamic image URL without extension
+        if "image" not in url_lower and "img" not in url_lower and "photo" not in url_lower:
+            return False
+    # Skip small/icon/placeholder images
+    skip_patterns = ["icon", "logo", "favicon", "placeholder", "1x1", "pixel", "spacer", "blank"]
+    if any(s in url_lower for s in skip_patterns):
+        return False
+    return True
 
 
 async def search_manufacturer_info(product: ProductData) -> ManufacturerLookup:
@@ -231,6 +272,7 @@ async def search_manufacturer_info(product: ProductData) -> ManufacturerLookup:
                             result.description = info.get("description")
                             result.specifications = info.get("specifications")
                             result.datasheet_url = info.get("datasheet_url")
+                            result.image_url = info.get("image_url")
                             # Confidence is moderate - this is a search result page,
                             # not necessarily the exact product
                             result.confidence = 0.5
@@ -312,3 +354,124 @@ def generate_improvement_suggestions(
         })
 
     return suggestions
+
+
+# ── Norengros secondary reference lookup ──
+
+NORENGROS_BASE = "https://www.norengros.no"
+NORENGROS_SEARCH = f"{NORENGROS_BASE}/search"
+
+
+async def search_norengros(product: ProductData) -> NorengrosLookup:
+    """Search Norengros as a secondary market reference source.
+
+    Used ONLY when primary sources (Jeeves, website, PDF, manufacturer) are
+    weak or missing. Norengros data requires manual review and is never
+    auto-approved.
+
+    Returns results with conservative confidence and review_required=True.
+    """
+    result = NorengrosLookup(searched=True)
+
+    # Build search queries — prefer article number for exact match
+    queries = []
+    art_num = product.article_number.strip()
+    # Try without N-prefix for broader match
+    clean_num = art_num.lstrip("N") if art_num.startswith("N") else art_num
+    if product.manufacturer_article_number:
+        queries.append(product.manufacturer_article_number)
+    queries.append(clean_num)
+    if product.product_name:
+        queries.append(product.product_name)
+
+    async with httpx.AsyncClient(timeout=15) as client:
+        for query in queries[:2]:
+            try:
+                search_url = f"{NORENGROS_SEARCH}?q={quote_plus(query)}"
+                response = await client.get(
+                    search_url,
+                    headers=HEADERS,
+                    follow_redirects=True,
+                )
+                if response.status_code != 200:
+                    continue
+
+                info = _extract_norengros_product(response.text, str(response.url))
+                if info.get("product_name") or info.get("image_url"):
+                    result.found = True
+                    result.source_url = str(response.url)
+                    result.product_name = info.get("product_name")
+                    result.description = info.get("description")
+                    result.specifications = info.get("specifications")
+                    result.image_url = info.get("image_url")
+                    # Conservative confidence — competitor source
+                    result.confidence = 0.35
+                    result.notes = (
+                        "Norengros brukt som sekundær referansekilde. "
+                        "All data krever manuell verifisering."
+                    )
+                    logger.info(
+                        f"Norengros: found data for {art_num} "
+                        f"(name={'yes' if info.get('product_name') else 'no'}, "
+                        f"image={'yes' if info.get('image_url') else 'no'})"
+                    )
+                    return result
+
+            except Exception as e:
+                logger.debug(f"Norengros search error for query '{query}': {e}")
+                continue
+
+    result.notes = f"Ingen treff på Norengros for {art_num}"
+    return result
+
+
+def _extract_norengros_product(html: str, url: str) -> dict:
+    """Extract product info from a Norengros page."""
+    soup = BeautifulSoup(html, "lxml")
+    info = {}
+
+    # Product name from h1
+    h1 = soup.find("h1")
+    if h1:
+        text = h1.get_text(strip=True)
+        if 2 < len(text) < 200:
+            info["product_name"] = text
+
+    # Description from meta or page content
+    meta_desc = soup.find("meta", attrs={"name": "description"})
+    if meta_desc:
+        desc = meta_desc.get("content", "")
+        if desc and len(desc) > 10:
+            info["description"] = desc
+
+    # Image from og:image or product image
+    og_image = soup.find("meta", attrs={"property": "og:image"})
+    if og_image:
+        img_url = og_image.get("content", "")
+        if img_url and _is_likely_product_image(img_url):
+            info["image_url"] = img_url if img_url.startswith("http") else f"https:{img_url}"
+
+    if "image_url" not in info:
+        for img in soup.find_all("img", src=True):
+            src = img.get("src", "")
+            alt = (img.get("alt", "") or "").lower()
+            if _is_likely_product_image(src) and not any(
+                skip in alt for skip in ["logo", "icon", "banner"]
+            ):
+                info["image_url"] = src if src.startswith("http") else f"https:{src}"
+                break
+
+    # Specifications from tables
+    specs = {}
+    for table in soup.find_all("table"):
+        for row in table.find_all("tr"):
+            cells = row.find_all(["td", "th"])
+            if len(cells) >= 2:
+                key = cells[0].get_text(strip=True)
+                val = cells[1].get_text(strip=True)
+                if key and val and len(key) < 100 and len(val) < 500:
+                    specs[key] = val
+    if specs:
+        info["specifications"] = specs
+
+    return info

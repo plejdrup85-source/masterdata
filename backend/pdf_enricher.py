@@ -59,7 +59,9 @@ FIELD_PATTERNS = {
         r"(?:produktnavn|product\s*name|varenavn|betegnelse)\s*[:\-]?\s*(.+?)(?:\n|$)",
     ],
     "description": [
-        r"(?:beskrivelse|description|produktbeskrivelse|product\s*description)\s*[:\-]?\s*(.+?)(?:\n\n|\n(?=[A-Z\u00C0-\u00FF])|\Z)",
+        # Multi-paragraph: capture until double newline or end
+        r"(?:beskrivelse|description|produktbeskrivelse|product\s*description)\s*[:\-]?\s*((?:(?!\n\n).)+)",
+        # Fallback: single line
         r"(?:beskrivelse|description|produktbeskrivelse|product\s*description)\s*[:\-]?\s*(.+?)(?:\n|$)",
     ],
     "manufacturer": [
@@ -70,15 +72,47 @@ FIELD_PATTERNS = {
         r"(?:ref[\.\s]*(?:nr|no|number|kode))\s*[:\-]?\s*(.+?)(?:\n|$)",
     ],
     "packaging_info": [
-        r"(?:pakning|emballasje|packaging|pack\s*size|innhold|contents?)\s*[:\-]?\s*(.+?)(?:\n|$)",
+        # Strict packaging patterns only — no "innhold"/"contents" (too broad)
+        r"(?:pakning|emballasje|packaging|pack\s*size|pakningsstørrelse|forpakning)\s*[:\-]?\s*(.+?)(?:\n|$)",
+        r"(?:antall\s*(?:i|per|pr)?\s*(?:pakning|eske|kartong|pall))\s*[:\-]?\s*(.+?)(?:\n|$)",
     ],
     "materials": [
-        r"(?:materiale?|material|sammensetning|composition|innhold)\s*[:\-]?\s*(.+?)(?:\n|$)",
+        r"(?:materiale?|material|sammensetning|composition)\s*[:\-]?\s*(.+?)(?:\n|$)",
     ],
     "dimensions": [
         r"(?:dimensjoner?|dimensions?|st.rrelse|size|m.l)\s*[:\-]?\s*(.+?)(?:\n|$)",
     ],
 }
+
+# Per-field max value lengths (prevents accepting irrelevant long text blocks)
+FIELD_MAX_LENGTHS = {
+    "product_name": 200,
+    "description": 2000,
+    "manufacturer": 100,
+    "manufacturer_article_number": 60,
+    "packaging_info": 200,
+    "materials": 300,
+    "dimensions": 200,
+}
+FIELD_MAX_LENGTH_DEFAULT = 500
+
+# ── Content quality rules ──
+# Boilerplate / irrelevant text patterns that should be rejected from ANY field
+_BOILERPLATE_PATTERNS = [
+    r"(?i)(?:oppbevar|lagr)\w*\s+(?:tørt|kjølig|mørkt|romtemperatur)",  # storage instructions
+    r"(?i)(?:best\s*før|holdbar|expir|shelf\s*life)",  # expiry info
+    r"(?i)(?:les\s+bruksanvisning|read\s+instructions)",
+    r"(?i)(?:kontakt\s+(?:lege|helsepersonell)|consult\s+(?:doctor|physician))",
+    r"(?i)(?:www\.\S+\.(?:com|no|se|dk))",  # URLs
+    r"(?i)(?:copyright|©|\ball\s+rights\s+reserved)",
+]
+
+# Packaging-specific: patterns that look like packaging content
+_PACKAGING_VALID_PATTERNS = [
+    r"(?i)\d+\s*(?:stk|pk|stykk|per|i\s+(?:pakning|eske|kartong|pall))",
+    r"(?i)(?:eske|kartong|pall|pose|boks|pakke|forpakning|inner|outer|master)\b",
+    r"(?i)\d+\s*(?:x\s*\d+)",  # e.g. "10 x 50"
+]
 
 # Specification table patterns (key: value or key\tvalue)
 SPEC_TABLE_PATTERNS = [
@@ -170,26 +204,96 @@ def _extract_tables_from_pdf(pdf_bytes: bytes) -> list[dict[str, str]]:
         return []
 
 
-def _extract_field_from_text(text: str, field_name: str) -> Optional[tuple[str, str]]:
+def _extract_field_from_text(text: str, field_name: str) -> Optional[tuple[str, str, float]]:
     """Try to extract a specific field value from PDF text.
 
-    Returns (value, evidence_snippet) or None if not found.
+    Returns (value, evidence_snippet, quality_score) or None if not found.
+    quality_score is 0.0-1.0 reflecting extraction confidence.
     Uses regex patterns to find labeled values.
     """
     patterns = FIELD_PATTERNS.get(field_name, [])
+    max_len = FIELD_MAX_LENGTHS.get(field_name, FIELD_MAX_LENGTH_DEFAULT)
 
     for pattern in patterns:
-        match = re.search(pattern, text, re.IGNORECASE | re.MULTILINE)
+        match = re.search(pattern, text, re.IGNORECASE | re.MULTILINE | re.DOTALL)
         if match:
             value = match.group(1).strip()
-            if value and len(value) > 1 and len(value) < 500:
-                # Get surrounding text as evidence
-                start = max(0, match.start() - 20)
-                end = min(len(text), match.end() + 20)
-                snippet = text[start:end].strip()
-                return value, snippet
+            # Collapse internal whitespace for multi-line captures
+            value = re.sub(r"\s+", " ", value).strip()
+            if not value or len(value) <= 1:
+                continue
+            if len(value) > max_len:
+                logger.debug(
+                    f"Extracted {field_name} too long ({len(value)} > {max_len}), "
+                    f"truncating to field limit"
+                )
+                # Truncate at last sentence boundary within limit
+                truncated = value[:max_len]
+                last_period = truncated.rfind(".")
+                if last_period > max_len // 2:
+                    value = truncated[:last_period + 1]
+                else:
+                    value = truncated.rstrip()
+
+            # Quality scoring
+            quality = _score_extraction_quality(value, field_name)
+            if quality < 0.1:
+                logger.debug(f"Rejected {field_name} extraction: quality {quality:.2f}")
+                continue
+
+            # Evidence: ±80 chars for meaningful context
+            start = max(0, match.start() - 80)
+            end = min(len(text), match.end() + 80)
+            snippet = text[start:end].strip()
+            # Collapse whitespace in snippet too
+            snippet = re.sub(r"\s+", " ", snippet)
+
+            return value, snippet, quality
 
     return None
+
+
+def _score_extraction_quality(value: str, field_name: str) -> float:
+    """Score the quality of an extracted value (0.0 = reject, 1.0 = perfect).
+
+    Checks for:
+    - Fragment detection (cut-off mid-sentence)
+    - Boilerplate/irrelevant content
+    - Field-specific validity
+    """
+    score = 1.0
+
+    # Reject boilerplate text in any field
+    for bp_pattern in _BOILERPLATE_PATTERNS:
+        if re.search(bp_pattern, value):
+            score *= 0.3
+            break
+
+    # Fragment detection: cut off mid-sentence
+    # Only penalize longer text that looks like a truncated sentence
+    if len(value) > 40 and value[-1] not in ".!?)\"':;,0123456789%":
+        has_sentence_words = bool(re.search(r"\b(?:og|for|som|med|til|av|er|i|and|for|with|the|is)\b", value))
+        if has_sentence_words:
+            score *= 0.5
+    # Very short for a description-type field
+    if field_name == "description" and len(value) < 20:
+        score *= 0.3
+
+    # Packaging-specific validation
+    if field_name == "packaging_info":
+        has_packaging_content = any(
+            re.search(p, value) for p in _PACKAGING_VALID_PATTERNS
+        )
+        if not has_packaging_content:
+            # Text matched the packaging label but doesn't contain actual packaging data
+            score *= 0.2
+            logger.debug(f"Packaging value rejected — no packaging content: {value[:80]}")
+
+    # Short values for fields that should be substantive
+    if field_name in ("description", "specifications") and len(value) < 10:
+        score *= 0.3
+
+    return score
 
 
 def _extract_specifications_from_text(text: str) -> dict[str, str]:
@@ -278,7 +382,11 @@ def parse_pdf_content(
 
         extraction = _extract_field_from_text(text, field)
         if extraction:
-            value, snippet = extraction
+            value, snippet, quality = extraction
+            # Confidence is quality-weighted: base 0.75 * quality score
+            # High-quality extraction → 0.75, low quality → 0.15-0.45
+            field_confidence = round(min(0.85, 0.75 * quality), 2)
+            needs_review = quality < 0.7 or field_confidence < 0.60
             results.append(EnrichmentResult(
                 artnr=article_number,
                 field_name=field,
@@ -287,8 +395,9 @@ def parse_pdf_content(
                 source_url=pdf_url,
                 source_type=source_type,
                 evidence_snippet=snippet,
-                confidence=0.75,
+                confidence=field_confidence,
                 match_status=EnrichmentMatchStatus.FOUND_IN_INTERNAL_PDF.value,
+                review_status="needs_review" if needs_review else "auto",
             ))
         else:
             results.append(EnrichmentResult(

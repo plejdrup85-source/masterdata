@@ -7,13 +7,16 @@ consolidating data from all available sources in strict priority order:
   2. Internal product datasheet / PDF
   3. Product catalog / internal source file
   4. Manufacturer website
-  5. AI structuring / translation (only from retrieved source data)
+  5. Norengros (secondary market reference — conservative use only)
+  6. AI structuring / translation (only from retrieved source data)
 
 Hard rules:
   - Never invent medical facts
   - Only propose values grounded in retrieved source content
   - If a field is already good enough, skip enrichment
   - English source text may be translated to Norwegian if meaning is preserved
+  - Packaging field must only contain packaging-related data
+  - Fragment/truncated text must be rejected or flagged for review
 """
 
 import logging
@@ -37,6 +40,7 @@ logger = logging.getLogger(__name__)
 SOURCE_ONEMED = "OneMed produktside"
 SOURCE_PDF = "Produktdatablad (PDF)"
 SOURCE_MANUFACTURER = "Produsent"
+SOURCE_NORENGROS = "Norengros (sekundærkilde)"
 SOURCE_SPEC_STRUCTURING = "Strukturering av kildedata"
 SOURCE_TRANSLATION = "Oversettelse fra kildedata"
 
@@ -52,6 +56,75 @@ NORWEGIAN_PRODUCT_KEYWORDS = {
     "engangs", "steril", "usteril", "pudderfri", "lateksfri",
     "nitril", "vinyl", "polyester",
 }
+
+
+def _validate_suggestion_value(value: str, field_name: str) -> tuple[bool, str]:
+    """Validate that a suggestion value is suitable for its target field.
+
+    Returns (is_valid, reason). If not valid, the suggestion should be
+    rejected or flagged for manual review.
+    """
+    if not value or not value.strip():
+        return False, "Tom verdi"
+
+    value = value.strip()
+
+    # ── Universal checks ──
+    # Fragment detection: looks genuinely truncated mid-sentence
+    # Short values (< 40 chars) are likely titles/labels — not truncated
+    # Only flag longer texts that end abruptly without punctuation AND look like
+    # they were cut from a larger sentence (contain spaces, commas, etc.)
+    if len(value) > 40 and value[-1] not in ".!?)\"':;,–—0123456789%":
+        # Has sentence-like structure (multiple words with connectors)?
+        has_sentence_structure = bool(re.search(r"\b(?:og|for|som|med|til|av|er|i|and|for|with|the|is)\b", value))
+        if has_sentence_structure:
+            return False, "Teksten ser ut til å være avkortet midt i en setning"
+
+    # Very short for substantive fields
+    if field_name in ("Beskrivelse",) and len(value) < 15:
+        return False, "Beskrivelsen er for kort til å være nyttig"
+
+    # ── Packaging-specific validation ──
+    if field_name == "Pakningsinformasjon":
+        packaging_indicators = [
+            r"(?i)\d+\s*(?:stk|pk|stykk|per|pr|i\s+pakning)",
+            r"(?i)(?:eske|kartong|pall|pose|boks|pakke|forpakning)\b",
+            r"(?i)\d+\s*(?:x\s*\d+)",
+            r"(?i)(?:inner|outer|master|transport)\s*(?:pak|box|cart)",
+        ]
+        has_packaging = any(re.search(p, value) for p in packaging_indicators)
+
+        # Reject non-packaging content
+        non_packaging = [
+            r"(?i)(?:oppbevar|lagr)\w*\s+(?:tørt|kjølig|mørkt)",
+            r"(?i)(?:brukes?\s+til|designed\s+for|intended\s+for|suitable\s+for)",
+            r"(?i)(?:fordeler|benefits|advantages|features)\b",
+            r"(?i)(?:instruksjon|instruction|bruksanvisning)\b",
+        ]
+        has_non_packaging = any(re.search(p, value) for p in non_packaging)
+
+        if has_non_packaging and not has_packaging:
+            return False, "Verdien inneholder ikke pakningsinformasjon (lagring/bruk/markedsføring)"
+        if not has_packaging and len(value) > 50:
+            return False, "Lang tekst uten gjenkjennelig pakningsdata"
+
+    # ── Produktnavn: should be a clean title, not a paragraph ──
+    if field_name == "Produktnavn":
+        if len(value) > 150:
+            return False, "Produktnavnet er for langt — ser ut som en beskrivelse"
+        if value.count(".") > 2:
+            return False, "Produktnavnet inneholder flere setninger"
+
+    return True, ""
+
+
+def _add_rationale(suggestion: EnrichmentSuggestion, reason: str) -> EnrichmentSuggestion:
+    """Add a rationale comment to a suggestion's evidence field."""
+    if suggestion.evidence:
+        suggestion.evidence = f"{suggestion.evidence} | {reason}"
+    else:
+        suggestion.evidence = reason
+    return suggestion
 
 
 def enrich_product(
@@ -164,30 +237,36 @@ def _enrich_product_name(
     # Source 1: PDF
     pdf_val, pdf_evidence, pdf_conf = _get_enrichment_value(er_by_field, "product_name")
     if pdf_val and pdf_val != current:
-        return EnrichmentSuggestion(
-            field_name="Produktnavn",
-            current_value=current,
-            suggested_value=pdf_val,
-            source=SOURCE_PDF,
-            source_url=_get_enrichment_url(er_by_field, "product_name"),
-            evidence=pdf_evidence,
-            confidence=pdf_conf,
-            review_required=pdf_conf < MIN_CONFIDENCE_AUTO,
-        )
+        is_valid, reject_reason = _validate_suggestion_value(pdf_val, "Produktnavn")
+        if not is_valid:
+            logger.info(f"[enrich] Product name rejected: {reject_reason}")
+        else:
+            return EnrichmentSuggestion(
+                field_name="Produktnavn",
+                current_value=current,
+                suggested_value=pdf_val,
+                source=SOURCE_PDF,
+                source_url=_get_enrichment_url(er_by_field, "product_name"),
+                evidence=pdf_evidence,
+                confidence=pdf_conf,
+                review_required=pdf_conf < MIN_CONFIDENCE_AUTO,
+            )
 
     # Source 2: Manufacturer
     if mfr and mfr.found and mfr.product_name and mfr.product_name != current:
-        conf = mfr.confidence * 0.9
-        return EnrichmentSuggestion(
-            field_name="Produktnavn",
-            current_value=current,
-            suggested_value=mfr.product_name,
-            source=SOURCE_MANUFACTURER,
-            source_url=mfr.source_url,
-            evidence=f"Produsentens produktnavn: {mfr.product_name}",
-            confidence=conf,
-            review_required=conf < MIN_CONFIDENCE_AUTO,
-        )
+        is_valid, reject_reason = _validate_suggestion_value(mfr.product_name, "Produktnavn")
+        if is_valid:
+            conf = mfr.confidence * 0.9
+            return EnrichmentSuggestion(
+                field_name="Produktnavn",
+                current_value=current,
+                suggested_value=mfr.product_name,
+                source=SOURCE_MANUFACTURER,
+                source_url=mfr.source_url,
+                evidence=f"Produsentens produktnavn: {mfr.product_name}",
+                confidence=conf,
+                review_required=conf < MIN_CONFIDENCE_AUTO,
+            )
 
     return None
 
@@ -253,14 +332,29 @@ def _enrich_description(
                 )
         return None
 
+    # Validate description quality before suggesting
+    is_valid, reject_reason = _validate_suggestion_value(best_val, "Beskrivelse")
+    if not is_valid:
+        logger.info(
+            f"[enrich] Description suggestion rejected: {reject_reason} "
+            f"(value: {best_val[:80]})"
+        )
+        return None
+
     # If source is English, note translation needed
     review = best_conf < MIN_CONFIDENCE_AUTO
+    rationale = ""
     if best_val and _looks_english(best_val):
         best_source = f"{best_source} (oversettelse påkrevet)"
         review = True
         best_conf = min(best_conf, 0.65)
+        rationale = "Engelsk kildetekst — oversettelse påkrevet"
+    elif best_source == SOURCE_PDF:
+        rationale = "PDF-beskrivelse validert som komplett"
+    elif best_source == SOURCE_MANUFACTURER:
+        rationale = "Produsentens beskrivelse brukt som supplement"
 
-    return EnrichmentSuggestion(
+    suggestion = EnrichmentSuggestion(
         field_name="Beskrivelse",
         current_value=current,
         suggested_value=best_val,
@@ -270,6 +364,9 @@ def _enrich_description(
         confidence=best_conf,
         review_required=review,
     )
+    if rationale:
+        suggestion = _add_rationale(suggestion, rationale)
+    return suggestion
 
 
 def _enrich_specification(
@@ -371,7 +468,12 @@ def _enrich_packaging(
     er_by_field: dict,
     mfr: Optional[ManufacturerLookup],
 ) -> Optional[EnrichmentSuggestion]:
-    """Parse actual pack/carton/pallet/unit info from sources."""
+    """Parse actual pack/carton/pallet/unit info from sources.
+
+    Strict validation: only accepts values containing actual packaging data
+    (quantities, unit types, pack sizes). Rejects storage instructions,
+    usage descriptions, marketing text, and random PDF fragments.
+    """
     fa = _get_field_analysis(analysis, "Pakningsinformasjon")
     if fa and fa.status == QualityStatus.OK:
         return None
@@ -381,15 +483,26 @@ def _enrich_packaging(
     # Source 1: PDF packaging
     pdf_val, pdf_evidence, pdf_conf = _get_enrichment_value(er_by_field, "packaging_info")
     if pdf_val and pdf_val != current:
-        return EnrichmentSuggestion(
-            field_name="Pakningsinformasjon",
-            current_value=current,
-            suggested_value=pdf_val,
-            source=SOURCE_PDF,
-            source_url=_get_enrichment_url(er_by_field, "packaging_info"),
-            evidence=pdf_evidence,
-            confidence=pdf_conf,
-            review_required=pdf_conf < MIN_CONFIDENCE_AUTO,
+        # Validate that this is actual packaging content
+        is_valid, reject_reason = _validate_suggestion_value(pdf_val, "Pakningsinformasjon")
+        if not is_valid:
+            logger.info(
+                f"[enrich] Packaging suggestion rejected: {reject_reason} "
+                f"(value: {pdf_val[:80]})"
+            )
+            return None
+        return _add_rationale(
+            EnrichmentSuggestion(
+                field_name="Pakningsinformasjon",
+                current_value=current,
+                suggested_value=pdf_val,
+                source=SOURCE_PDF,
+                source_url=_get_enrichment_url(er_by_field, "packaging_info"),
+                evidence=pdf_evidence,
+                confidence=pdf_conf,
+                review_required=pdf_conf < MIN_CONFIDENCE_AUTO,
+            ),
+            "PDF pakningsdata validert",
         )
 
     return None

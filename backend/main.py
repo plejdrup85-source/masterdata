@@ -24,8 +24,12 @@ from backend.jeeves_loader import JeevesIndex, load_jeeves
 from backend.manufacturer import (
     generate_improvement_suggestions,
     search_manufacturer_info,
+    search_norengros,
 )
-from backend.models import AnalysisJob, BatchMode, JobStatus, ProductAnalysis, ProductData, QualityStatus
+from backend.models import (
+    AnalysisJob, BatchMode, ImageSuggestion, JobStatus,
+    ProductAnalysis, ProductData, QualityStatus,
+)
 from backend.pdf_enricher import run_enrichment_pipeline
 from backend.scraper import scrape_product, _load_sitemap, _sitemap_loaded, _sku_to_url
 
@@ -617,6 +621,82 @@ async def batch_evaluate_endpoint(data: dict):
     return {"results": results}
 
 
+def _build_image_suggestion(
+    product_data: ProductData,
+    image_summary,
+    mfr_data,
+    norengros_data,
+) -> Optional[ImageSuggestion]:
+    """Build an image improvement suggestion if the current image is weak/missing.
+
+    Priority: manufacturer image > Norengros image.
+    Manufacturer images can be auto-suggested; Norengros always requires review.
+    """
+    current_url = product_data.image_url
+    current_status = "ok"
+
+    # Determine current image status
+    if not image_summary or not image_summary.main_image_exists:
+        current_status = "missing"
+    elif image_summary.image_analyses:
+        main = image_summary.image_analyses[0]
+        score = main.overall_score
+        if score < 40:
+            current_status = "low_quality"
+        elif score < 70:
+            issues = main.issues or []
+            if any("background" in str(i).lower() for i in issues):
+                current_status = "poor_background"
+            elif any("resolution" in str(i).lower() for i in issues):
+                current_status = "low_quality"
+            else:
+                current_status = "review"
+        # OK images don't need suggestions
+        else:
+            return None
+
+    if current_status == "ok":
+        return None
+
+    # Check manufacturer image first (preferred)
+    if mfr_data and mfr_data.found and mfr_data.image_url:
+        return ImageSuggestion(
+            current_image_url=current_url,
+            current_image_status=current_status,
+            suggested_image_url=mfr_data.image_url,
+            suggested_source="manufacturer",
+            suggested_source_url=mfr_data.source_url,
+            confidence=mfr_data.confidence * 0.8,
+            review_required=True,
+            reason=f"Produsentbilde funnet ({current_status}). Verifiser produktmatch.",
+        )
+
+    # Fallback: Norengros image (always conservative)
+    if norengros_data and norengros_data.found and norengros_data.image_url:
+        return ImageSuggestion(
+            current_image_url=current_url,
+            current_image_status=current_status,
+            suggested_image_url=norengros_data.image_url,
+            suggested_source="norengros",
+            suggested_source_url=norengros_data.source_url,
+            confidence=0.25,
+            review_required=True,
+            reason=f"Norengros-bilde funnet ({current_status}). Konkurrentkilde — krever manuell godkjenning.",
+        )
+
+    # No better image available — just report the issue
+    if current_status != "ok":
+        return ImageSuggestion(
+            current_image_url=current_url,
+            current_image_status=current_status,
+            confidence=0.0,
+            review_required=True,
+            reason=f"Bildestatus: {current_status}. Ingen bedre bildekilde funnet automatisk.",
+        )
+
+    return None
+
+
 def _apply_enrichment_to_analysis(analysis: ProductAnalysis) -> None:
     """Apply enrichment results to field analyses.
 
@@ -771,6 +851,7 @@ async def _run_analysis(
 
                 # Step 3-5: enrichment pipeline
                 mfr_data = None
+                norengros_data = None
                 enrichment_results = []
                 pdf_exists = False
                 pdf_url = None
@@ -794,6 +875,21 @@ async def _run_analysis(
                 pdf_exists, pdf_url, enrichment_results = await run_enrichment_pipeline(
                     article_number, product_data, manufacturer_data=mfr_data
                 )
+
+                # Step 4b: Norengros secondary lookup
+                # Only when primary sources are weak (no PDF, no manufacturer data)
+                data_is_weak = (
+                    not pdf_exists
+                    and (not mfr_data or not mfr_data.found)
+                    and (not product_data.description or len(product_data.description or "") < 20)
+                )
+                if data_is_weak and product_data.found_on_onemed:
+                    job.current_step = "norengros_lookup"
+                    logger.info(f"[{job_id}] Norengros secondary lookup for {article_number}")
+                    try:
+                        norengros_data = await search_norengros(product_data)
+                    except Exception as e:
+                        logger.debug(f"[{job_id}] Norengros lookup failed for {article_number}: {e}")
 
                 # Step 5: Quality analysis (with all collected data + Jeeves)
                 job.current_step = "quality_analysis"
@@ -820,6 +916,16 @@ async def _run_analysis(
                                     fa.source = suggestion["source"]
                                     fa.confidence = suggestion["confidence"]
                                     break
+
+                # Store Norengros data if found
+                if norengros_data:
+                    analysis.norengros_lookup = norengros_data
+
+                # Step 5b: Image suggestion logic
+                # Check if current image is weak/missing and suggest better alternatives
+                analysis.image_suggestion = _build_image_suggestion(
+                    product_data, image_summary, mfr_data, norengros_data,
+                )
 
                 # Apply enrichment suggestions to field_analyses (PDF takes priority)
                 _apply_enrichment_to_analysis(analysis)
