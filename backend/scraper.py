@@ -678,14 +678,20 @@ async def scrape_product(
     article_number: str,
     use_cache: bool = True,
     playwright_browser=None,
+    enable_discovery: bool = False,
 ) -> ProductData:
     """Scrape product data from onemed.no for a given article number.
 
-    Strategy order:
-    1. Check cache
-    2. Check SKU→URL index (from previous sitemap scans)
-    3. Verify product exists via CDN image (fast, <1s)
-    4. Try to find full product page via sitemap scan (slower, enriches data)
+    Normal mode (enable_discovery=False) — strict input-scoped:
+    1. Check disk cache
+    2. Check SKU→URL index (cached mapping from previous runs)
+    3. Verify product exists via CDN image (fast HEAD request)
+    No sitemap scan or broad crawl is performed.
+
+    Discovery mode (enable_discovery=True) — explicit opt-in only:
+    Also tries to find the product page via sitemap page scanning.
+    This fetches unrelated product pages and should NOT be used in
+    normal validation runs.
 
     The CDN at res.onemed.com uses article numbers directly for images and PDFs,
     so product existence can be confirmed without finding the product page.
@@ -702,7 +708,8 @@ async def scrape_product(
     clean_num = article_number.strip()
 
     async with httpx.AsyncClient() as client:
-        # Strategy 1: Check if we already know the URL from sitemap index
+        # Strategy 1: Check if we already know the URL from SKU→URL index
+        # This uses only the cached index from disk — no network calls to discover new mappings
         if clean_num in _sku_to_url:
             known_url = _sku_to_url[clean_num]
             logger.info(f"SKU index hit for {clean_num}: {known_url}")
@@ -720,30 +727,41 @@ async def scrape_product(
                 _save_to_cache(product)
                 return product
 
-        # Strategy 2: Verify product exists via CDN image (fast)
+        # Strategy 2: Verify product exists via CDN image (fast HEAD request)
         cdn_exists = await _check_cdn_image_exists(client, clean_num)
 
-        # Strategy 3: Try to find product page via sitemap for full metadata
-        # Only load sitemap if not already loaded (first call triggers download)
-        product_url = await _find_product_url_via_sitemap(client, clean_num)
-        if product_url:
-            response = await _fetch_with_retry(client, product_url)
-            if response and response.status_code == 200:
-                product = _parse_product_page(response.text, clean_num)
-                product.product_url = str(response.url)
-                if not _verify_sku_match(response.text, clean_num):
-                    logger.warning(
-                        f"SKU mismatch for {clean_num} at {product_url} — "
-                        f"page SKU does not match requested article number"
-                    )
-                    product.error = "SKU-mismatch: nettside-data kan tilhøre feil produkt"
-                _save_to_cache(product)
-                return product
+        # Strategy 3 (DISCOVERY MODE ONLY): Sitemap page scan
+        # This fetches unrelated product pages to build the SKU→URL index.
+        # DISABLED in normal validation runs to prevent scope explosion.
+        if enable_discovery:
+            logger.warning(
+                f"DISCOVERY MODE: sitemap scan triggered for {clean_num} "
+                f"(this should NOT happen in normal validation runs)"
+            )
+            product_url = await _find_product_url_via_sitemap(client, clean_num)
+            if product_url:
+                response = await _fetch_with_retry(client, product_url)
+                if response and response.status_code == 200:
+                    product = _parse_product_page(response.text, clean_num)
+                    product.product_url = str(response.url)
+                    if not _verify_sku_match(response.text, clean_num):
+                        logger.warning(
+                            f"SKU mismatch for {clean_num} at {product_url} — "
+                            f"page SKU does not match requested article number"
+                        )
+                        product.error = "SKU-mismatch: nettside-data kan tilhøre feil produkt"
+                    _save_to_cache(product)
+                    return product
+        else:
+            if clean_num not in _sku_to_url:
+                logger.info(
+                    f"{clean_num}: not in SKU index, skipping sitemap scan (strict input mode)"
+                )
 
         # Strategy 4: If CDN image exists, product is in the OneMed system
         # Return partial data (image analysis and PDF check will fill in the rest)
         if cdn_exists:
-            logger.info(f"{clean_num}: CDN image confirmed, product page not found in sitemap")
+            logger.info(f"{clean_num}: CDN image confirmed, product page not found in index")
             product = ProductData(
                 article_number=clean_num,
                 found_on_onemed=True,

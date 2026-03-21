@@ -92,12 +92,14 @@ async def preload_data():
             "'Masterdata 2103.xlsx' in the project root. Two-source comparison disabled."
         )
 
-    # Pre-download product sitemap
+    # Pre-load sitemap XML and cached SKU→URL index on startup.
+    # This downloads ONE sitemap XML file and loads the cached SKU index from disk.
+    # It does NOT scan/crawl product pages — that only happens in discovery mode.
     try:
         import httpx
         async with httpx.AsyncClient() as client:
             await _load_sitemap(client)
-        logger.info("Sitemap pre-loaded on startup")
+        logger.info("Sitemap index pre-loaded on startup (no page scanning)")
     except Exception as e:
         logger.warning(f"Failed to pre-load sitemap on startup: {e}")
 
@@ -708,9 +710,22 @@ async def _run_analysis(
             f"({duplicate_count} duplicate fetches prevented)"
         )
 
+    # Scope logging — verify strict input processing
+    in_index = sum(1 for a in unique_articles if a.strip() in _sku_to_url)
+    logger.info(
+        f"[{job_id}] SCOPE: mode=strict_input | "
+        f"input_rows={len(article_numbers)} | "
+        f"unique_articles={len(unique_articles)} | "
+        f"in_sku_index={in_index} | "
+        f"not_in_index={len(unique_articles) - in_index} | "
+        f"discovery=OFF"
+    )
+
     semaphore = asyncio.Semaphore(SCRAPE_CONCURRENCY)
+    _fetch_count = 0  # Track actual URL fetches for scope verification
 
     async def process_product(article_number: str) -> Optional[ProductAnalysis]:
+        nonlocal _fetch_count
         # Check if job was cancelled
         if job.cancelled:
             return None
@@ -721,12 +736,14 @@ async def _run_analysis(
 
             job.current_product = article_number
             try:
-                # Step 1: Scrape from onemed.no
+                # Step 1: Scrape from onemed.no (strict input mode — no sitemap scan)
                 job.current_step = "scraping"
                 logger.info(f"[{job_id}] Scraping {article_number}")
                 product_data = await scrape_product(
-                    article_number, use_cache=not skip_cache
+                    article_number, use_cache=not skip_cache,
+                    enable_discovery=False,
                 )
+                _fetch_count += 1
 
                 # Step 2: Analyze product images with CV
                 # Always run - CDN URLs use article numbers directly, no scraping needed
@@ -890,10 +907,18 @@ async def _run_analysis(
         job.processed_products = len(job.results)
 
         logger.info(
-            f"[{job_id}] Fetch stats: {len(article_numbers)} rows, "
-            f"{len(unique_articles)} unique fetches, "
-            f"{duplicate_count} duplicate fetches prevented"
+            f"[{job_id}] Fetch stats: {len(article_numbers)} input_rows, "
+            f"{len(unique_articles)} unique_articles, "
+            f"{_fetch_count} product_urls_fetched, "
+            f"{duplicate_count} duplicates_prevented, "
+            f"discovery=OFF"
         )
+        # Scope safety check: fetched URLs should never exceed unique articles
+        if _fetch_count > len(unique_articles) * 2:
+            logger.error(
+                f"[{job_id}] SCOPE VIOLATION: fetched {_fetch_count} URLs "
+                f"for {len(unique_articles)} unique articles — possible scope leak"
+            )
 
         # Results are already in input order from the article_numbers loop above.
         # No sort needed — duplicate rows preserve their original positions.
