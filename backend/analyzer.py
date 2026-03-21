@@ -25,7 +25,7 @@ FIELD_WEIGHTS = {
     "Produsentens varenummer": 1.5,
     "Kategori": 1.0,
     "Pakningsinformasjon": 1.0,
-    "Bilde tilgjengelig": 0.5,
+    "Bildekvalitet": 1.5,
     "Konsistens mellom felter": 0.5,
 }
 
@@ -254,25 +254,53 @@ def _analyze_packaging(product: ProductData) -> FieldAnalysis:
     return analysis
 
 
-def _analyze_image(product: ProductData) -> FieldAnalysis:
-    """Check image accessibility (not quality - just availability)."""
+def _analyze_image(product: ProductData, image_quality: dict = None) -> FieldAnalysis:
+    """Analyze image quality using CV analysis results.
+
+    If image_quality dict is provided (from image_analyzer), uses real CV scores.
+    Otherwise falls back to basic availability check.
+    """
     analysis = FieldAnalysis(
-        field_name="Bilde tilgjengelig",
-        current_value=product.image_url,
+        field_name="Bildekvalitet",
     )
 
+    if image_quality:
+        status = image_quality.get("image_quality_status", "MISSING")
+        main_score = image_quality.get("main_image_score", 0)
+        avg_score = image_quality.get("avg_image_score", 0)
+        count = image_quality.get("image_count_found", 0)
+        main_exists = image_quality.get("main_image_exists", False)
+        issues = image_quality.get("image_issue_summary", "")
+
+        analysis.current_value = f"Score: {avg_score:.0f}/100, {count} bilde(r) funnet"
+
+        if status == "MISSING" or not main_exists:
+            analysis.status = QualityStatus.MISSING
+            analysis.comment = "Hovedbilde mangler"
+        elif status == "FAIL":
+            analysis.status = QualityStatus.PROBABLE_ERROR
+            analysis.comment = f"Lav bildekvalitet (score {avg_score:.0f}). Problemer: {issues}"
+        elif status in ("REVIEW", "PASS_WITH_NOTES"):
+            analysis.status = QualityStatus.SHOULD_IMPROVE
+            analysis.comment = f"Bildekvalitet kan forbedres (score {avg_score:.0f}). {issues}"
+        else:
+            analysis.status = QualityStatus.OK
+            analysis.comment = f"Bildekvalitet OK (score {avg_score:.0f}, {count} bilde(r))"
+
+        return analysis
+
+    # Fallback: basic availability check
+    analysis.current_value = product.image_url
     if not product.image_url:
         analysis.status = QualityStatus.MISSING
         analysis.comment = "Produktbilde mangler"
-        return analysis
-
-    if product.image_quality_ok is False:
+    elif product.image_quality_ok is False:
         analysis.status = QualityStatus.SHOULD_IMPROVE
         analysis.comment = "Bilde er ikke tilgjengelig eller har sv\u00e6rt liten filst\u00f8rrelse"
-        return analysis
+    else:
+        analysis.status = QualityStatus.OK
+        analysis.comment = "Produktbilde er tilgjengelig (ikke kvalitetsvurdert)"
 
-    analysis.status = QualityStatus.OK
-    analysis.comment = "Produktbilde er tilgjengelig"
     return analysis
 
 
@@ -315,8 +343,13 @@ def _check_field_consistency(product: ProductData) -> FieldAnalysis:
     return analysis
 
 
-def analyze_product(product: ProductData) -> ProductAnalysis:
-    """Run full quality analysis on a product."""
+def analyze_product(product: ProductData, image_quality: dict = None) -> ProductAnalysis:
+    """Run full quality analysis on a product.
+
+    Args:
+        product: Scraped product data
+        image_quality: Optional dict from ProductImageSummary.to_dict()
+    """
     analysis = ProductAnalysis(
         article_number=product.article_number,
         product_data=product,
@@ -345,7 +378,7 @@ def analyze_product(product: ProductData) -> ProductAnalysis:
         _analyze_manufacturer_article_number(product),
         _analyze_category(product),
         _analyze_packaging(product),
-        _analyze_image(product),
+        _analyze_image(product, image_quality),
         _check_field_consistency(product),
     ]
 

@@ -516,6 +516,7 @@
                                 <th>Artikkelnr</th>
                                 <th>Produktnavn</th>
                                 <th>Score</th>
+                                <th>Bilde</th>
                                 <th>Status</th>
                                 <th>Produsent</th>
                                 <th>Kommentar</th>
@@ -780,6 +781,22 @@
                     </div>
                 `;
 
+                // Calculate image stats
+                const imgScores = results.filter(r => r.image_quality && r.image_quality.count > 0).map(r => r.image_quality.score);
+                const avgImgScore = imgScores.length > 0 ? (imgScores.reduce((a,b) => a+b, 0) / imgScores.length).toFixed(0) : 0;
+                const imgMissing = results.filter(r => !r.image_quality || !r.image_quality.main_exists).length;
+
+                statsGrid.innerHTML += `
+                    <div class="stat-card ${parseFloat(avgImgScore) >= 70 ? 'success' : parseFloat(avgImgScore) >= 40 ? 'warning' : 'danger'}">
+                        <div class="value">${avgImgScore}</div>
+                        <div class="label">Snitt bildescore</div>
+                    </div>
+                    <div class="stat-card ${imgMissing === 0 ? 'success' : 'danger'}">
+                        <div class="value">${imgMissing}</div>
+                        <div class="label">Mangler bilde</div>
+                    </div>
+                `;
+
                 // Render results table with expandable rows
                 resultsBody.innerHTML = results.map((r, idx) => {
                     const fieldHtml = (r.field_analyses || []).map(fa => {
@@ -793,22 +810,65 @@
                         `;
                     }).join('');
 
+                    // Image quality badge
+                    const iq = r.image_quality || {};
+                    const imgScore = iq.score ? Math.round(iq.score) : 0;
+                    const imgStatus = iq.status || 'MISSING';
+                    const imgClass = imgStatus === 'PASS' ? 'status-ok' : imgStatus === 'MISSING' ? 'status-missing' : imgStatus === 'FAIL' ? 'status-error' : 'status-improve';
+                    const imgLabel = `${imgScore}`;
+                    const imgCount = iq.count || 0;
+
+                    // Image detail section
+                    let imageDetailHtml = '';
+                    if (iq.main_exists !== undefined) {
+                        imageDetailHtml = `
+                            <div style="margin-top:0.75rem">
+                                <h4 style="font-size:0.85rem;font-weight:600;margin-bottom:0.5rem">Bildekvalitet</h4>
+                                <div class="field-grid">
+                                    <div class="field-item">
+                                        <span class="field-status ${iq.main_exists ? 'ok' : 'missing'}"></span>
+                                        <span class="field-name">Hovedbilde</span>
+                                        <span class="field-comment">${iq.main_exists ? 'Finnes' : 'Mangler'}</span>
+                                    </div>
+                                    <div class="field-item">
+                                        <span class="field-status ${imgScore >= 70 ? 'ok' : imgScore >= 40 ? 'improve' : 'missing'}"></span>
+                                        <span class="field-name">Bildescore</span>
+                                        <span class="field-comment">${imgScore}/100</span>
+                                    </div>
+                                    <div class="field-item">
+                                        <span class="field-status ok"></span>
+                                        <span class="field-name">Antall bilder</span>
+                                        <span class="field-comment">${imgCount}</span>
+                                    </div>
+                                    ${iq.issues && iq.issues !== 'Ingen problemer' ? `
+                                    <div class="field-item">
+                                        <span class="field-status improve"></span>
+                                        <span class="field-name">Problemer</span>
+                                        <span class="field-comment" title="${escapeHtml(iq.issues)}">${escapeHtml(iq.issues)}</span>
+                                    </div>` : ''}
+                                </div>
+                            </div>
+                        `;
+                    }
+
                     return `
                         <tr class="expandable" data-idx="${idx}" onclick="toggleDetail(${idx})">
                             <td>${escapeHtml(r.article_number)}</td>
                             <td title="${escapeHtml(r.product_name || '')}">${escapeHtml(r.product_name || '-')}</td>
                             <td>${r.score}%</td>
+                            <td><span class="status-badge ${imgClass}" title="${imgStatus}: ${imgCount} bilde(r)">${imgLabel}</span></td>
                             <td><span class="status-badge ${getStatusClass(r.status)}">${escapeHtml(r.status)}</span></td>
                             <td>${escapeHtml(r.manufacturer || '-')}</td>
                             <td title="${escapeHtml(r.comment || '')}">${escapeHtml(r.comment || '-')}</td>
                         </tr>
                         <tr class="detail-row" id="detail-${idx}">
-                            <td colspan="6">
+                            <td colspan="7">
                                 <div class="detail-content">
                                     <h4>Feltanalyse for ${escapeHtml(r.article_number)}</h4>
                                     <div class="field-grid">
                                         ${fieldHtml || '<p style="color:var(--text-muted)">Ingen feltanalyse tilgjengelig</p>'}
                                     </div>
+                                    ${imageDetailHtml}
                                 </div>
                             </td>
                         </tr>

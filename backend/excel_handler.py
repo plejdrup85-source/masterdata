@@ -107,7 +107,15 @@ def create_output_excel(
     ws_manufacturer = wb.create_sheet("Produsentoppf\u00f8lging")
     _create_manufacturer_sheet(ws_manufacturer, results)
 
-    # Sheet 5: Summary Statistics
+    # Sheet 5: Image Details
+    ws_images = wb.create_sheet("Bildeanalyse")
+    _create_image_detail_sheet(ws_images, results)
+
+    # Sheet 6: Image Issues Priority
+    ws_img_issues = wb.create_sheet("Bildeproblemer")
+    _create_image_issues_sheet(ws_img_issues, results)
+
+    # Sheet 7: Summary Statistics
     ws_stats = wb.create_sheet("Statistikk")
     _create_stats_sheet(ws_stats, results)
 
@@ -142,6 +150,31 @@ def _apply_status_style(cell, status: QualityStatus) -> None:
     cell.font = Font(color=font_color)
 
 
+IMAGE_STATUS_COLORS = {
+    "PASS": "C6EFCE",
+    "PASS_WITH_NOTES": "FFEB9C",
+    "REVIEW": "FFEB9C",
+    "FAIL": "FF6B6B",
+    "MISSING": "FFC7CE",
+}
+
+IMAGE_STATUS_FONT_COLORS = {
+    "PASS": "006100",
+    "PASS_WITH_NOTES": "9C6500",
+    "REVIEW": "9C6500",
+    "FAIL": "FFFFFF",
+    "MISSING": "9C0006",
+}
+
+
+def _apply_image_status_style(cell, status: str) -> None:
+    """Apply color styling based on image quality status."""
+    fill_color = IMAGE_STATUS_COLORS.get(status, "FFFFFF")
+    font_color = IMAGE_STATUS_FONT_COLORS.get(status, "000000")
+    cell.fill = PatternFill(start_color=fill_color, end_color=fill_color, fill_type="solid")
+    cell.font = Font(color=font_color)
+
+
 def _create_overview_sheet(ws, results: list[ProductAnalysis]) -> None:
     """Create the overview sheet with one row per product."""
     headers = [
@@ -153,6 +186,9 @@ def _create_overview_sheet(ws, results: list[ProductAnalysis]) -> None:
         "Kommentar",
         "Produsent",
         "Kategori",
+        "Bildescore",
+        "Bildestatus",
+        "Antall bilder",
         "Auto-fix",
         "Manuell vurdering",
         "Krever produsentkontakt",
@@ -165,6 +201,7 @@ def _create_overview_sheet(ws, results: list[ProductAnalysis]) -> None:
 
     for row_idx, result in enumerate(results, 2):
         pd = result.product_data
+        iq = result.image_quality or {}
         ws.cell(row=row_idx, column=1, value=result.article_number)
         ws.cell(row=row_idx, column=2, value=pd.product_name or "")
         ws.cell(row=row_idx, column=3, value="Ja" if pd.found_on_onemed else "Nei")
@@ -174,10 +211,18 @@ def _create_overview_sheet(ws, results: list[ProductAnalysis]) -> None:
         ws.cell(row=row_idx, column=6, value=result.overall_comment or "")
         ws.cell(row=row_idx, column=7, value=pd.manufacturer or "")
         ws.cell(row=row_idx, column=8, value=pd.category or "")
-        ws.cell(row=row_idx, column=9, value="Ja" if result.auto_fix_possible else "Nei")
-        ws.cell(row=row_idx, column=10, value="Ja" if result.manual_review_needed else "Nei")
-        ws.cell(row=row_idx, column=11, value="Ja" if result.requires_manufacturer_contact else "Nei")
-        ws.cell(row=row_idx, column=12, value=pd.product_url or "")
+        # Image quality columns
+        img_score = iq.get("avg_image_score", 0)
+        img_status = iq.get("image_quality_status", "MISSING")
+        img_count = iq.get("image_count_found", 0)
+        ws.cell(row=row_idx, column=9, value=round(img_score, 1) if img_score else 0)
+        img_status_cell = ws.cell(row=row_idx, column=10, value=img_status)
+        _apply_image_status_style(img_status_cell, img_status)
+        ws.cell(row=row_idx, column=11, value=img_count)
+        ws.cell(row=row_idx, column=12, value="Ja" if result.auto_fix_possible else "Nei")
+        ws.cell(row=row_idx, column=13, value="Ja" if result.manual_review_needed else "Nei")
+        ws.cell(row=row_idx, column=14, value="Ja" if result.requires_manufacturer_contact else "Nei")
+        ws.cell(row=row_idx, column=15, value=pd.product_url or "")
 
     for col in range(1, len(headers) + 1):
         ws.column_dimensions[get_column_letter(col)].width = max(15, len(headers[col - 1]) + 5)
@@ -327,6 +372,143 @@ def _create_manufacturer_sheet(ws, results: list[ProductAnalysis]) -> None:
     ws.freeze_panes = "A2"
 
 
+def _create_image_detail_sheet(ws, results: list[ProductAnalysis]) -> None:
+    """Create detailed image analysis sheet with one row per image."""
+    headers = [
+        "Artikkelnummer",
+        "Bilde",
+        "URL",
+        "Finnes",
+        "Filstr. (KB)",
+        "Bredde",
+        "H\u00f8yde",
+        "Ratio",
+        "Oppl\u00f8sning",
+        "Skarphet (r\u00e5)",
+        "Skarphet",
+        "Lysstyrke",
+        "Lysstyrke score",
+        "Kontrast",
+        "Kontrast score",
+        "Hvit bakgr.",
+        "Bakgrunn score",
+        "Kantdeteksjon",
+        "Kant score",
+        "Produktfyll",
+        "Fyll score",
+        "Total score",
+        "Status",
+        "Problemer",
+    ]
+
+    for col, header in enumerate(headers, 1):
+        ws.cell(row=1, column=col, value=header)
+    _style_header(ws, 1, len(headers))
+
+    row_idx = 2
+    for result in results:
+        iq = result.image_quality
+        if not iq:
+            continue
+        for img in iq.get("image_analyses", []):
+            ws.cell(row=row_idx, column=1, value=result.article_number)
+            ws.cell(row=row_idx, column=2, value=img.get("image_name", ""))
+            ws.cell(row=row_idx, column=3, value=img.get("image_url", ""))
+            ws.cell(row=row_idx, column=4, value="Ja" if img.get("exists") else "Nei")
+            ws.cell(row=row_idx, column=5, value=img.get("file_size_kb", 0))
+            ws.cell(row=row_idx, column=6, value=img.get("width", 0))
+            ws.cell(row=row_idx, column=7, value=img.get("height", 0))
+            ws.cell(row=row_idx, column=8, value=img.get("aspect_ratio", 0))
+            ws.cell(row=row_idx, column=9, value=img.get("resolution_score", 0))
+            ws.cell(row=row_idx, column=10, value=img.get("blur_score_raw", 0))
+            ws.cell(row=row_idx, column=11, value=img.get("blur_score", 0))
+            ws.cell(row=row_idx, column=12, value=img.get("brightness_mean", 0))
+            ws.cell(row=row_idx, column=13, value=img.get("brightness_score", 0))
+            ws.cell(row=row_idx, column=14, value=img.get("contrast_std", 0))
+            ws.cell(row=row_idx, column=15, value=img.get("contrast_score", 0))
+            ws.cell(row=row_idx, column=16, value=img.get("white_bg_ratio", 0))
+            ws.cell(row=row_idx, column=17, value=img.get("background_score", 0))
+            ws.cell(row=row_idx, column=18, value=img.get("edge_density", 0))
+            ws.cell(row=row_idx, column=19, value=img.get("edge_score", 0))
+            ws.cell(row=row_idx, column=20, value=img.get("product_fill_ratio", 0))
+            ws.cell(row=row_idx, column=21, value=img.get("fill_score", 0))
+            ws.cell(row=row_idx, column=22, value=img.get("overall_score", 0))
+            status = img.get("status", "MISSING")
+            status_cell = ws.cell(row=row_idx, column=23, value=status)
+            _apply_image_status_style(status_cell, status)
+            issues = img.get("issues", [])
+            ws.cell(row=row_idx, column=24, value=", ".join(issues) if issues else "")
+            row_idx += 1
+
+    if row_idx == 2:
+        ws.cell(row=2, column=1, value="Ingen bildedata tilgjengelig")
+
+    for col in range(1, len(headers) + 1):
+        ws.column_dimensions[get_column_letter(col)].width = max(12, len(headers[col - 1]) + 3)
+
+    ws.freeze_panes = "A2"
+    if row_idx > 2:
+        ws.auto_filter.ref = f"A1:{get_column_letter(len(headers))}{row_idx - 1}"
+
+
+def _create_image_issues_sheet(ws, results: list[ProductAnalysis]) -> None:
+    """Create prioritized image issues sheet."""
+    headers = [
+        "Prioritet",
+        "Artikkelnummer",
+        "Produktnavn",
+        "Bildestatus",
+        "Bildescore",
+        "Antall bilder",
+        "Problemer",
+    ]
+
+    for col, header in enumerate(headers, 1):
+        ws.cell(row=1, column=col, value=header)
+    _style_header(ws, 1, len(headers))
+
+    # Collect products with image issues, sorted by priority
+    issue_rows = []
+    for result in results:
+        iq = result.image_quality or {}
+        status = iq.get("image_quality_status", "MISSING")
+        priority = iq.get("image_quality_priority", "none")
+        if priority == "none":
+            continue
+        priority_order = {"high": 0, "medium": 1, "low": 2}
+        issue_rows.append((
+            priority_order.get(priority, 3),
+            priority,
+            result,
+            iq,
+        ))
+
+    issue_rows.sort(key=lambda x: (x[0], -x[3].get("avg_image_score", 0)))
+
+    row_idx = 2
+    priority_labels = {"high": "H\u00f8y", "medium": "Medium", "low": "Lav"}
+    for _, priority, result, iq in issue_rows:
+        label = priority_labels.get(priority, priority)
+        ws.cell(row=row_idx, column=1, value=label)
+        ws.cell(row=row_idx, column=2, value=result.article_number)
+        ws.cell(row=row_idx, column=3, value=result.product_data.product_name or "")
+        status = iq.get("image_quality_status", "MISSING")
+        status_cell = ws.cell(row=row_idx, column=4, value=status)
+        _apply_image_status_style(status_cell, status)
+        ws.cell(row=row_idx, column=5, value=round(iq.get("avg_image_score", 0), 1))
+        ws.cell(row=row_idx, column=6, value=iq.get("image_count_found", 0))
+        ws.cell(row=row_idx, column=7, value=iq.get("image_issue_summary", ""))
+        row_idx += 1
+
+    if row_idx == 2:
+        ws.cell(row=2, column=1, value="Ingen bildeproblemer funnet")
+
+    for col in range(1, len(headers) + 1):
+        ws.column_dimensions[get_column_letter(col)].width = max(15, len(headers[col - 1]) + 5)
+
+    ws.freeze_panes = "A2"
+
+
 def _create_stats_sheet(ws, results: list[ProductAnalysis]) -> None:
     """Create summary statistics sheet."""
     title_font = Font(bold=True, size=14)
@@ -362,7 +544,36 @@ def _create_stats_sheet(ws, results: list[ProductAnalysis]) -> None:
     for status_name, count in sorted(status_counts.items()):
         rows.append((f"  {status_name}:", count))
 
+    # Image quality stats
+    img_scores = []
+    img_missing = 0
+    img_fail = 0
+    img_review = 0
+    img_pass = 0
+    for r in results:
+        iq = r.image_quality or {}
+        s = iq.get("image_quality_status", "MISSING")
+        if s == "MISSING":
+            img_missing += 1
+        elif s == "FAIL":
+            img_fail += 1
+        elif s in ("REVIEW", "PASS_WITH_NOTES"):
+            img_review += 1
+        else:
+            img_pass += 1
+        if iq.get("avg_image_score", 0) > 0:
+            img_scores.append(iq["avg_image_score"])
+
+    avg_img_score = sum(img_scores) / len(img_scores) if img_scores else 0
+
     rows.extend([
+        ("", ""),
+        ("Bildekvalitet:", ""),
+        ("  Gjennomsnittlig bildescore:", f"{avg_img_score:.1f}"),
+        ("  Bilder OK:", img_pass),
+        ("  Trenger gjennomgang:", img_review),
+        ("  Feiler:", img_fail),
+        ("  Mangler bilde:", img_missing),
         ("", ""),
         ("Oppf\u00f8lging:", ""),
         ("  Auto-fix mulig:", auto_fix),

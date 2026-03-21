@@ -390,33 +390,5 @@ async def _scrape_with_playwright(browser, article_number: str) -> ProductData:
         await page.close()
 
 
-async def check_image_quality(image_url: str) -> dict:
-    """Check if an image URL is accessible and assess basic availability.
-
-    Note: This is an accessibility check, not a true quality assessment.
-    It verifies the image exists and has reasonable file size.
-    """
-    result = {"accessible": False, "quality_ok": False, "size_bytes": 0}
-
-    if not image_url:
-        return result
-
-    try:
-        async with httpx.AsyncClient() as client:
-            response = await client.head(image_url, headers=HEADERS, timeout=10, follow_redirects=True)
-            if response.status_code == 200:
-                result["accessible"] = True
-                content_length = int(response.headers.get("content-length", 0))
-                result["quality_ok"] = content_length > 10_000
-                result["size_bytes"] = content_length
-            else:
-                # Try GET as fallback (some CDNs don't support HEAD)
-                response = await client.get(image_url, headers=HEADERS, timeout=10, follow_redirects=True)
-                if response.status_code == 200:
-                    result["accessible"] = True
-                    result["size_bytes"] = len(response.content)
-                    result["quality_ok"] = len(response.content) > 10_000
-    except Exception as e:
-        logger.warning(f"Image check failed for {image_url}: {e}")
-
-    return result
+# Note: check_image_quality has been replaced by backend.image_analyzer
+# which provides full CV-based analysis instead of simple HEAD/size check.

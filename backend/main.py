@@ -20,8 +20,9 @@ from backend.manufacturer import (
     generate_improvement_suggestions,
     search_manufacturer_info,
 )
+from backend.image_analyzer import analyze_product_images
 from backend.models import AnalysisJob, JobStatus, ProductAnalysis, ProductData
-from backend.scraper import check_image_quality, scrape_product
+from backend.scraper import scrape_product
 
 # Configure logging
 logging.basicConfig(
@@ -292,6 +293,7 @@ async def get_results(job_id: str):
                 "requires_followup": r.requires_manufacturer_contact,
                 "manual_review": r.manual_review_needed,
                 "auto_fix": r.auto_fix_possible,
+                "image_quality": _format_image_quality(r.image_quality),
                 "field_analyses": [
                     {
                         "field_name": fa.field_name,
@@ -307,6 +309,19 @@ async def get_results(job_id: str):
             }
             for r in job.results
         ],
+    }
+
+
+def _format_image_quality(iq: Optional[dict]) -> dict:
+    """Format image quality data for API response."""
+    if not iq:
+        return {"score": 0, "status": "MISSING", "count": 0, "main_exists": False, "issues": ""}
+    return {
+        "score": iq.get("avg_image_score", 0),
+        "status": iq.get("image_quality_status", "MISSING"),
+        "count": iq.get("image_count_found", 0),
+        "main_exists": iq.get("main_image_exists", False),
+        "issues": iq.get("image_issue_summary", ""),
     }
 
 
@@ -338,13 +353,19 @@ async def _run_analysis(
                     article_number, use_cache=not skip_cache
                 )
 
-                # Step 1b: Check image accessibility if we have an image
-                if product_data.image_url:
-                    img_result = await check_image_quality(product_data.image_url)
-                    product_data.image_quality_ok = img_result.get("quality_ok", False)
+                # Step 1b: Analyze product images with CV
+                logger.info(f"[{job_id}] Image analysis for {article_number}")
+                image_summary = await analyze_product_images(article_number)
+                image_quality_dict = image_summary.to_dict()
 
-                # Step 2: Analyze quality
-                analysis = analyze_product(product_data)
+                # Update product_data with image info from CV analysis
+                product_data.image_quality_ok = image_summary.main_image_exists
+                if image_summary.main_image_exists and image_summary.image_analyses:
+                    product_data.image_url = image_summary.image_analyses[0].image_url
+
+                # Step 2: Analyze quality (with image CV data)
+                analysis = analyze_product(product_data, image_quality=image_quality_dict)
+                analysis.image_quality = image_quality_dict
 
                 # Step 3: Search manufacturer if data is insufficient
                 if analysis.requires_manufacturer_contact or analysis.total_score < 60:

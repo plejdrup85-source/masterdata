@@ -73,6 +73,8 @@ class ProductAnalysis(BaseModel):
     manual_review_needed: bool = False
     requires_manufacturer_contact: bool = False
     suggested_manufacturer_message: Optional[str] = None
+    # Image quality analysis (populated by image_analyzer)
+    image_quality: Optional[dict] = None
 
 
 class JobStatus(str, Enum):
