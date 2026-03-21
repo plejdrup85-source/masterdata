@@ -10,7 +10,7 @@ from openpyxl import Workbook, load_workbook
 from openpyxl.styles import Alignment, Border, Font, PatternFill, Side
 from openpyxl.utils import get_column_letter
 
-from backend.models import ProductAnalysis, QualityStatus
+from backend.models import JeevesData, ProductAnalysis, QualityStatus
 
 logger = logging.getLogger(__name__)
 
@@ -91,44 +91,48 @@ def create_output_excel(
     """
     wb = Workbook()
 
-    # Sheet 1: Overview
-    ws_overview = wb.active
-    ws_overview.title = "Oversikt"
+    # Sheet 1: Summary (high-level metrics)
+    ws_summary = wb.active
+    ws_summary.title = "Summary"
+    _create_summary_sheet(ws_summary, results)
+
+    # Sheet 2: Comparison_And_Enrichment (main review sheet)
+    ws_comparison = wb.create_sheet("Comparison_And_Enrichment")
+    _create_comparison_and_enrichment_sheet(ws_comparison, results)
+
+    # Sheet 3: Debug_Log (traceability)
+    ws_debug = wb.create_sheet("Debug_Log")
+    _create_debug_log_sheet(ws_debug, results)
+
+    # Sheet 4: Overview (one row per product, legacy)
+    ws_overview = wb.create_sheet("Oversikt")
     _create_overview_sheet(ws_overview, results)
 
-    # Sheet 2: Field Analysis Detail
+    # Sheet 5: Field Analysis Detail
     ws_detail = wb.create_sheet("Feltanalyse")
     _create_detail_sheet(ws_detail, results)
 
-    # Sheet 3: Improvement Suggestions
+    # Sheet 6: Improvement Suggestions
     ws_improvements = wb.create_sheet("Forbedringsforslag")
     _create_improvements_sheet(ws_improvements, results)
 
-    # Sheet 4: Manufacturer Follow-up
+    # Sheet 7: Manufacturer Follow-up
     ws_manufacturer = wb.create_sheet("Produsentoppf\u00f8lging")
     _create_manufacturer_sheet(ws_manufacturer, results)
 
-    # Sheet 5: Image Details
+    # Sheet 8: Image Details
     ws_images = wb.create_sheet("Bildeanalyse")
     _create_image_detail_sheet(ws_images, results)
 
-    # Sheet 6: Image Issues Priority
+    # Sheet 9: Image Issues Priority
     ws_img_issues = wb.create_sheet("Bildeproblemer")
     _create_image_issues_sheet(ws_img_issues, results)
 
-    # Sheet 7: Enrichment Details
-    ws_enrichment = wb.create_sheet("Berikelse")
-    _create_enrichment_sheet(ws_enrichment, results)
-
-    # Sheet 8: Source Conflicts
+    # Sheet 10: Source Conflicts
     ws_conflicts = wb.create_sheet("Kildekonflikter")
     _create_conflicts_sheet(ws_conflicts, results)
 
-    # Sheet 9: Summary Statistics
-    ws_stats = wb.create_sheet("Statistikk")
-    _create_stats_sheet(ws_stats, results)
-
-    # Sheet 10: Inriver Import staging
+    # Sheet 11: Inriver Import staging
     ws_inriver = wb.create_sheet("Inriver Import")
     _create_inriver_import_sheet(ws_inriver, results)
 
@@ -579,25 +583,54 @@ def _apply_enrichment_status_style(cell, status: str) -> None:
     cell.fill = PatternFill(start_color=fill_color, end_color=fill_color, fill_type="solid")
 
 
-def _create_enrichment_sheet(ws, results: list[ProductAnalysis]) -> None:
-    """Create enrichment sheet with one row per product, paired current/suggested columns."""
+def _create_comparison_and_enrichment_sheet(ws, results: list[ProductAnalysis]) -> None:
+    """Create the main comparison + enrichment sheet.
+
+    One row per product. Shows Jeeves source values, website source values,
+    field statuses, enrichment suggestions, and traceability columns.
+    Every product is included — not just those with suggestions.
+    """
     headers = [
+        # IDENTIFIERS (1-2)
         "Artikkelnummer",
-        "Produktnavn_eksisterende",
-        "Produktnavn_forslag",
-        "Beskrivelse_eksisterende",
-        "Beskrivelse_forslag",
-        "Spesifikasjon_eksisterende",
-        "Spesifikasjon_forslag",
-        "Kategori_eksisterende",
-        "Kategori_forslag",
-        "Pakningsinformasjon_eksisterende",
-        "Pakningsinformasjon_forslag",
-        "Produsent_eksisterende",
-        "Produsent_forslag",
-        "Produsent_artnr_eksisterende",
-        "Produsent_artnr_forslag",
-        "Datablad_URL",
+        "GID",
+        # JEEVES SOURCE VALUES (3-9)
+        "Jeeves_Item_description",
+        "Jeeves_Specification",
+        "Jeeves_Supplier",
+        "Jeeves_Supplier_Item_no",
+        "Jeeves_Product_Brand",
+        "Jeeves_Web_Title",
+        "Jeeves_Web_Text",
+        # WEBSITE SOURCE VALUES (10-17)
+        "Website_URL",
+        "Website_Title",
+        "Website_Breadcrumb",
+        "Website_Description",
+        "Website_Specification",
+        "Website_Packaging",
+        "Website_Image_Present",
+        "Website_Datasheet_URL",
+        # STATUS COLUMNS (18-26)
+        "Status_Produktnavn",
+        "Status_Beskrivelse",
+        "Status_Spesifikasjon",
+        "Status_Produsent",
+        "Status_Produsent_Artnr",
+        "Status_Merkevare",
+        "Status_Kategori",
+        "Status_Pakningsinformasjon",
+        "Status_Bilde",
+        # SUGGESTION COLUMNS (27-34)
+        "Forslag_Produktnavn",
+        "Forslag_Beskrivelse",
+        "Forslag_Spesifikasjon",
+        "Forslag_Produsent",
+        "Forslag_Produsent_Artnr",
+        "Forslag_Merkevare",
+        "Forslag_Kategori",
+        "Forslag_Pakningsinformasjon",
+        # TRACEABILITY (35-38)
         "Kilde_for_forslag",
         "Confidence",
         "Review_Required",
@@ -606,22 +639,48 @@ def _create_enrichment_sheet(ws, results: list[ProductAnalysis]) -> None:
 
     for col, header in enumerate(headers, 1):
         ws.cell(row=1, column=col, value=header)
-    _style_header(ws, 1, len(headers))
 
-    # Define fill for suggestion cells that have a value
+    # Section-based header colors
+    section_colors = {
+        range(1, 3): "4472C4",     # Identifiers: blue
+        range(3, 10): "548235",    # Jeeves: green
+        range(10, 18): "BF8F00",   # Website: gold
+        range(18, 27): "7030A0",   # Status: purple
+        range(27, 35): "C55A11",   # Suggestions: orange
+        range(35, 39): "404040",   # Traceability: dark gray
+    }
+    header_font = Font(bold=True, color="FFFFFF", size=10)
+    thin_border = Border(
+        left=Side(style="thin"), right=Side(style="thin"),
+        top=Side(style="thin"), bottom=Side(style="thin"),
+    )
+    for col_range, color in section_colors.items():
+        fill = PatternFill(start_color=color, end_color=color, fill_type="solid")
+        for col in col_range:
+            cell = ws.cell(row=1, column=col)
+            cell.fill = fill
+            cell.font = header_font
+            cell.border = thin_border
+            cell.alignment = Alignment(horizontal="center", vertical="center", wrap_text=True)
+
+    # Fills for suggestion / status cells
     suggestion_fill = PatternFill(start_color="E2EFDA", end_color="E2EFDA", fill_type="solid")
     review_fill = PatternFill(start_color="FFF2CC", end_color="FFF2CC", fill_type="solid")
+    wrap_align = Alignment(wrap_text=True, vertical="top")
+    top_align = Alignment(vertical="top")
 
     row_idx = 2
     for result in results:
         product = result.product_data
+        jeeves = result.jeeves_data
 
-        # Build suggestion index from enrichment_suggestions
+        # Build field status lookup
+        fa_by_name = {fa.field_name: fa for fa in result.field_analyses}
+
+        # Build suggestion lookup from enrichment_suggestions + field_analyses
         sugg_by_field = {}
         for es in result.enrichment_suggestions:
             sugg_by_field[es.field_name] = es
-
-        # Also check field_analyses for suggestions not covered by enricher
         for fa in result.field_analyses:
             if fa.suggested_value and fa.field_name not in sugg_by_field:
                 from backend.models import EnrichmentSuggestion
@@ -634,86 +693,134 @@ def _create_enrichment_sheet(ws, results: list[ProductAnalysis]) -> None:
                     review_required=True,
                 )
 
-        # Skip products with no suggestions at all
-        if not sugg_by_field and not result.enrichment_results:
-            continue
+        # Website-derived values
+        web_spec = product.specification or ""
+        if not web_spec and product.technical_details:
+            web_spec = "; ".join(f"{k}: {v}" for k, v in product.technical_details.items())
+        web_breadcrumb = " > ".join(product.category_breadcrumb) if product.category_breadcrumb else ""
+        web_packaging = product.packaging_info or product.packaging_unit or ""
+        web_image_present = "Ja" if product.image_url else "Nei"
 
-        # Collect sources and confidence across all suggestions
+        def _status_val(field_name):
+            fa = fa_by_name.get(field_name)
+            if not fa:
+                return ""
+            return fa.status.value
+
+        def _sugg_val(field_name):
+            es = sugg_by_field.get(field_name)
+            return es.suggested_value if es else ""
+
+        # Build comment and sources for traceability
         sources = set()
+        comments = []
         min_confidence = 1.0
         any_review = False
-        comments = []
 
         for es in sugg_by_field.values():
             if es.source:
                 sources.add(es.source)
-            if es.confidence:
+            if es.confidence is not None:
                 min_confidence = min(min_confidence, es.confidence)
             if es.review_required:
                 any_review = True
-            if es.evidence:
-                comments.append(f"{es.field_name}: {es.evidence}")
 
-        # Category display
-        cat_display = None
-        if product.category_breadcrumb:
-            cat_display = " > ".join(product.category_breadcrumb)
-        elif product.category:
-            cat_display = product.category
+        # Generate per-field comments
+        field_comment_parts = []
+        for fa in result.field_analyses:
+            if fa.field_name in ("Konsistens mellom felter",):
+                continue
+            src = fa.source or ""
+            if fa.status == QualityStatus.OK and "Jeeves kun" in src:
+                field_comment_parts.append(f"{fa.field_name}: present in Jeeves only")
+            elif fa.status == QualityStatus.OK and "nettside kun" in src:
+                field_comment_parts.append(f"{fa.field_name}: present on website only")
+            elif fa.status == QualityStatus.MISSING:
+                field_comment_parts.append(f"{fa.field_name}: missing in both sources")
+            elif fa.status == QualityStatus.SHOULD_IMPROVE:
+                field_comment_parts.append(f"{fa.field_name}: {fa.comment}")
 
-        # Spec display
-        spec_display = product.specification
-        if not spec_display and product.technical_details:
-            spec_display = "; ".join(f"{k}: {v}" for k, v in product.technical_details.items())
+        # Check for Jeeves vs website conflicts
+        if jeeves and product.product_name and jeeves.item_description:
+            if product.product_name.lower().strip() != jeeves.item_description.lower().strip():
+                if jeeves.web_title and product.product_name.lower().strip() != jeeves.web_title.lower().strip():
+                    field_comment_parts.append(
+                        "Produktnavn: website and Jeeves differ"
+                    )
+                    any_review = True
 
-        # Helper to get suggestion for a field
-        def _sugg(field_name):
-            es = sugg_by_field.get(field_name)
-            return es.suggested_value if es else None
+        comment_text = "; ".join(field_comment_parts) if field_comment_parts else ""
 
-        ws.cell(row=row_idx, column=1, value=result.article_number)
-        ws.cell(row=row_idx, column=2, value=product.product_name or "")
-        ws.cell(row=row_idx, column=3, value=_sugg("Produktnavn") or "")
-        ws.cell(row=row_idx, column=4, value=product.description or "")
-        ws.cell(row=row_idx, column=5, value=_sugg("Beskrivelse") or "")
-        ws.cell(row=row_idx, column=6, value=spec_display or "")
-        ws.cell(row=row_idx, column=7, value=_sugg("Spesifikasjon") or "")
-        ws.cell(row=row_idx, column=8, value=cat_display or "")
-        ws.cell(row=row_idx, column=9, value=_sugg("Kategori") or "")
-        ws.cell(row=row_idx, column=10, value=product.packaging_info or product.packaging_unit or "")
-        ws.cell(row=row_idx, column=11, value=_sugg("Pakningsinformasjon") or "")
-        ws.cell(row=row_idx, column=12, value=product.manufacturer or "")
-        ws.cell(row=row_idx, column=13, value=_sugg("Produsent") or "")
-        ws.cell(row=row_idx, column=14, value=product.manufacturer_article_number or "")
-        ws.cell(row=row_idx, column=15, value=_sugg("Produsentens varenummer") or "")
-        ws.cell(row=row_idx, column=16, value=result.pdf_url or "")
-        ws.cell(row=row_idx, column=17, value="; ".join(sorted(sources)) if sources else "")
-        ws.cell(row=row_idx, column=18, value=round(min_confidence, 2) if sugg_by_field else "")
-        ws.cell(row=row_idx, column=19, value="Ja" if any_review else "Nei")
-        ws.cell(row=row_idx, column=20, value="; ".join(comments) if comments else "")
-
-        # Highlight suggestion columns that have values
-        for col_idx in (3, 5, 7, 9, 11, 13, 15):
-            cell = ws.cell(row=row_idx, column=col_idx)
-            if cell.value:
-                fill = review_fill if any_review else suggestion_fill
-                cell.fill = fill
+        # --- Write row ---
+        c = 1
+        # IDENTIFIERS
+        ws.cell(row=row_idx, column=c, value=result.article_number).alignment = top_align; c += 1
+        ws.cell(row=row_idx, column=c, value=jeeves.gid if jeeves else "").alignment = top_align; c += 1
+        # JEEVES SOURCE VALUES
+        ws.cell(row=row_idx, column=c, value=jeeves.item_description if jeeves else "").alignment = top_align; c += 1
+        ws.cell(row=row_idx, column=c, value=jeeves.specification if jeeves else "").alignment = wrap_align; c += 1
+        ws.cell(row=row_idx, column=c, value=jeeves.supplier if jeeves else "").alignment = top_align; c += 1
+        ws.cell(row=row_idx, column=c, value=jeeves.supplier_item_no if jeeves else "").alignment = top_align; c += 1
+        ws.cell(row=row_idx, column=c, value=jeeves.product_brand if jeeves else "").alignment = top_align; c += 1
+        ws.cell(row=row_idx, column=c, value=jeeves.web_title if jeeves else "").alignment = top_align; c += 1
+        ws.cell(row=row_idx, column=c, value=jeeves.web_text if jeeves else "").alignment = wrap_align; c += 1
+        # WEBSITE SOURCE VALUES
+        ws.cell(row=row_idx, column=c, value=product.product_url or "").alignment = top_align; c += 1
+        ws.cell(row=row_idx, column=c, value=product.product_name or "").alignment = top_align; c += 1
+        ws.cell(row=row_idx, column=c, value=web_breadcrumb).alignment = top_align; c += 1
+        ws.cell(row=row_idx, column=c, value=product.description or "").alignment = wrap_align; c += 1
+        ws.cell(row=row_idx, column=c, value=web_spec).alignment = wrap_align; c += 1
+        ws.cell(row=row_idx, column=c, value=web_packaging).alignment = top_align; c += 1
+        ws.cell(row=row_idx, column=c, value=web_image_present).alignment = top_align; c += 1
+        ws.cell(row=row_idx, column=c, value=result.pdf_url or "").alignment = top_align; c += 1
+        # STATUS COLUMNS
+        status_fields = [
+            "Produktnavn", "Beskrivelse", "Spesifikasjon", "Produsent",
+            "Produsentens varenummer", "Merkevare", "Kategori",
+            "Pakningsinformasjon", "Bildekvalitet",
+        ]
+        for sf in status_fields:
+            status_text = _status_val(sf)
+            cell = ws.cell(row=row_idx, column=c, value=status_text)
+            cell.alignment = top_align
+            fa = fa_by_name.get(sf)
+            if fa:
+                _apply_status_style(cell, fa.status)
+            c += 1
+        # SUGGESTION COLUMNS
+        suggestion_fields = [
+            "Produktnavn", "Beskrivelse", "Spesifikasjon", "Produsent",
+            "Produsentens varenummer", "Merkevare", "Kategori", "Pakningsinformasjon",
+        ]
+        for sf in suggestion_fields:
+            val = _sugg_val(sf) or ""
+            cell = ws.cell(row=row_idx, column=c, value=val)
+            cell.alignment = wrap_align
+            if val:
+                cell.fill = review_fill if any_review else suggestion_fill
+            c += 1
+        # TRACEABILITY
+        ws.cell(row=row_idx, column=c, value="; ".join(sorted(sources)) if sources else "").alignment = top_align; c += 1
+        conf_val = round(min_confidence, 2) if sugg_by_field else ""
+        ws.cell(row=row_idx, column=c, value=conf_val).alignment = top_align; c += 1
+        ws.cell(row=row_idx, column=c, value="Ja" if any_review else "Nei").alignment = top_align; c += 1
+        ws.cell(row=row_idx, column=c, value=comment_text).alignment = wrap_align; c += 1
 
         row_idx += 1
 
-    if row_idx == 2:
-        ws.cell(row=2, column=1, value="Ingen berikelser funnet")
-
     # Column widths
     col_widths = {
-        1: 16, 2: 25, 3: 25, 4: 40, 5: 40, 6: 40, 7: 40,
-        8: 25, 9: 25, 10: 25, 11: 25, 12: 20, 13: 20,
-        14: 20, 15: 20, 16: 35, 17: 25, 18: 12, 19: 14, 20: 50,
+        1: 16, 2: 12,                                    # identifiers
+        3: 25, 4: 20, 5: 22, 6: 18, 7: 16, 8: 25, 9: 35,  # Jeeves
+        10: 35, 11: 25, 12: 30, 13: 35, 14: 35, 15: 25, 16: 14, 17: 35,  # website
+        18: 14, 19: 14, 20: 14, 21: 14, 22: 14, 23: 14, 24: 14, 25: 14, 26: 14,  # status
+        27: 25, 28: 35, 29: 30, 30: 20, 31: 18, 32: 16, 33: 20, 34: 25,  # suggestions
+        35: 25, 36: 12, 37: 14, 38: 50,  # traceability
     }
     for col, width in col_widths.items():
         ws.column_dimensions[get_column_letter(col)].width = width
 
-    ws.freeze_panes = "B2"
+    ws.freeze_panes = "C2"
     if row_idx > 2:
         ws.auto_filter.ref = f"A1:{get_column_letter(len(headers))}{row_idx - 1}"
 
@@ -773,119 +880,269 @@ def _create_conflicts_sheet(ws, results: list[ProductAnalysis]) -> None:
     ws.freeze_panes = "A2"
 
 
-def _create_stats_sheet(ws, results: list[ProductAnalysis]) -> None:
-    """Create summary statistics sheet."""
+def _create_summary_sheet(ws, results: list[ProductAnalysis]) -> None:
+    """Create the Summary sheet with high-level two-source metrics."""
     title_font = Font(bold=True, size=14)
-    header_font = Font(bold=True, size=11)
+    section_font = Font(bold=True, size=12, color="4472C4")
+    label_font = Font(bold=True, size=11)
+    value_font = Font(size=11)
+    indent_font = Font(size=11, color="404040")
 
-    ws.cell(row=1, column=1, value="Masterdata Kvalitetsrapport - Sammendrag").font = title_font
+    ws.cell(row=1, column=1, value="Masterdata Kvalitetsrapport").font = title_font
+    ws.cell(row=2, column=1, value=f"Generert: {datetime.now().strftime('%Y-%m-%d %H:%M')}").font = indent_font
 
     total = len(results)
     found = sum(1 for r in results if r.product_data.found_on_onemed)
     not_found = total - found
+    has_jeeves = sum(1 for r in results if r.jeeves_data)
+    avg_score = sum(r.total_score for r in results) / total if total else 0
 
+    # Per-field: count how many have website data
+    web_desc = sum(1 for r in results if r.product_data.description)
+    web_spec = sum(1 for r in results if r.product_data.specification or r.product_data.technical_details)
+    web_pkg = sum(1 for r in results if r.product_data.packaging_info or r.product_data.packaging_unit)
+    web_img = sum(1 for r in results if r.product_data.image_url)
+    web_cat = sum(1 for r in results if r.product_data.category or r.product_data.category_breadcrumb)
+
+    # Suggestions
+    products_with_suggestions = sum(1 for r in results if r.enrichment_suggestions)
+    total_suggestions = sum(len(r.enrichment_suggestions) for r in results)
+    manual_review = sum(
+        1 for r in results
+        if r.manual_review_needed or any(es.review_required for es in r.enrichment_suggestions)
+    )
+
+    # Status distribution
     status_counts = {}
     for r in results:
         status = r.overall_status.value
         status_counts[status] = status_counts.get(status, 0) + 1
 
-    avg_score = sum(r.total_score for r in results) / total if total else 0
-    auto_fix = sum(1 for r in results if r.auto_fix_possible)
-    manual = sum(1 for r in results if r.manual_review_needed)
-    mfr_contact = sum(1 for r in results if r.requires_manufacturer_contact)
+    # Per-field status distribution
+    field_status_counts: dict[str, dict[str, int]] = {}
+    for r in results:
+        for fa in r.field_analyses:
+            if fa.field_name == "Konsistens mellom felter":
+                continue
+            if fa.field_name not in field_status_counts:
+                field_status_counts[fa.field_name] = {}
+            s = fa.status.value
+            field_status_counts[fa.field_name][s] = field_status_counts[fa.field_name].get(s, 0) + 1
 
-    rows = [
-        ("", ""),
-        ("Totalt antall produkter:", total),
-        ("Funnet p\u00e5 OneMed:", found),
-        ("Ikke funnet:", not_found),
-        ("", ""),
-        ("Gjennomsnittlig kvalitetsscore:", f"{avg_score:.1f}%"),
-        ("", ""),
-        ("Statusfordeling:", ""),
+    # Build summary rows as (label, value, indent_level)
+    rows: list[tuple[str, str | int | float, int]] = [
+        # General
+        ("GENERELT", "", 0),
+        ("Totalt antall produkter", total, 1),
+        ("Produkter i Jeeves", has_jeeves, 1),
+        ("Gjennomsnittlig kvalitetsscore", f"{avg_score:.1f}%", 1),
+        ("", "", 0),
+        # Website coverage
+        ("NETTSIDE-DEKNING", "", 0),
+        ("Funnet på onemed.no", found, 1),
+        ("Ikke funnet på onemed.no", not_found, 1),
+        ("Med nettside-beskrivelse", web_desc, 1),
+        ("Med nettside-spesifikasjon", web_spec, 1),
+        ("Med pakningsinformasjon", web_pkg, 1),
+        ("Med bilde", web_img, 1),
+        ("Med kategori/breadcrumb", web_cat, 1),
+        ("", "", 0),
+        # Enrichment
+        ("BERIKELSE OG FORSLAG", "", 0),
+        ("Produkter med forslag", products_with_suggestions, 1),
+        ("Totalt antall forslag", total_suggestions, 1),
+        ("Krever manuell gjennomgang", manual_review, 1),
+        ("", "", 0),
+        # Status distribution
+        ("STATUSFORDELING (OVERORDNET)", "", 0),
+    ]
+    for status_name, count in sorted(status_counts.items()):
+        rows.append((status_name, count, 1))
+
+    rows.append(("", "", 0))
+    rows.append(("STATUSFORDELING PER FELT", "", 0))
+    for field_name in [
+        "Produktnavn", "Beskrivelse", "Spesifikasjon", "Produsent",
+        "Produsentens varenummer", "Merkevare", "Kategori",
+        "Pakningsinformasjon", "Bildekvalitet",
+    ]:
+        counts = field_status_counts.get(field_name, {})
+        if not counts:
+            continue
+        ok = counts.get("OK", 0)
+        missing = counts.get("Mangler", 0)
+        improve = counts.get("Bør forbedres", 0)
+        error = counts.get("Sannsynlig feil", 0)
+        rows.append((field_name, f"OK: {ok} | Mangler: {missing} | Forbedres: {improve} | Feil: {error}", 1))
+
+    # Write rows
+    row_num = 4
+    for label, value, indent in rows:
+        if not label and not value:
+            row_num += 1
+            continue
+        cell_label = ws.cell(row=row_num, column=1, value=label)
+        cell_value = ws.cell(row=row_num, column=2, value=value)
+        if indent == 0:
+            cell_label.font = section_font
+        elif indent == 1:
+            cell_label.font = label_font
+            cell_value.font = value_font
+        row_num += 1
+
+    ws.column_dimensions["A"].width = 40
+    ws.column_dimensions["B"].width = 55
+
+
+def _create_debug_log_sheet(ws, results: list[ProductAnalysis]) -> None:
+    """Create the Debug_Log sheet for traceability.
+
+    One row per product. Shows raw extraction details so a reviewer can
+    understand why the product got its status and suggestions.
+    """
+    headers = [
+        "Artikkelnummer",
+        "Website_URL",
+        "Product_Found_On_Website",
+        "Accordion_Expanded",
+        "Extracted_Title_Raw",
+        "Extracted_Breadcrumb_Raw",
+        "Extracted_Description_Raw",
+        "Extracted_Specification_Raw",
+        "Extracted_Packaging_Raw",
+        "Image_Found",
+        "Datasheet_URL_Found",
+        "Jeeves_Fields_Used",
+        "Website_Fields_Used",
+        "Suggestion_Source",
+        "Review_Required",
+        "Quality_Score",
+        "Debug_Comment",
     ]
 
-    for status_name, count in sorted(status_counts.items()):
-        rows.append((f"  {status_name}:", count))
+    for col, header in enumerate(headers, 1):
+        ws.cell(row=1, column=col, value=header)
+    _style_header(ws, 1, len(headers))
 
-    # Image quality stats
-    img_scores = []
-    img_missing = 0
-    img_fail = 0
-    img_review = 0
-    img_pass = 0
-    for r in results:
-        iq = r.image_quality or {}
-        s = iq.get("image_quality_status", "MISSING")
-        if s == "MISSING":
-            img_missing += 1
-        elif s == "FAIL":
-            img_fail += 1
-        elif s in ("REVIEW", "PASS_WITH_NOTES"):
-            img_review += 1
-        else:
-            img_pass += 1
-        if iq.get("avg_image_score", 0) > 0:
-            img_scores.append(iq["avg_image_score"])
+    wrap_align = Alignment(wrap_text=True, vertical="top")
+    top_align = Alignment(vertical="top")
 
-    avg_img_score = sum(img_scores) / len(img_scores) if img_scores else 0
+    for row_idx, result in enumerate(results, 2):
+        product = result.product_data
+        jeeves = result.jeeves_data
 
-    rows.extend([
-        ("", ""),
-        ("Bildekvalitet:", ""),
-        ("  Gjennomsnittlig bildescore:", f"{avg_img_score:.1f}"),
-        ("  Bilder OK:", img_pass),
-        ("  Trenger gjennomgang:", img_review),
-        ("  Feiler:", img_fail),
-        ("  Mangler bilde:", img_missing),
-    ])
+        # Determine which Jeeves fields are populated
+        jeeves_fields_used = []
+        if jeeves:
+            if jeeves.item_description:
+                jeeves_fields_used.append("Item description")
+            if jeeves.specification:
+                jeeves_fields_used.append("Specification")
+            if jeeves.supplier:
+                jeeves_fields_used.append("Supplier")
+            if jeeves.supplier_item_no:
+                jeeves_fields_used.append("Supplier Item.no")
+            if jeeves.product_brand:
+                jeeves_fields_used.append("Product Brand")
+            if jeeves.web_title:
+                jeeves_fields_used.append("Web Title")
+            if jeeves.web_text:
+                jeeves_fields_used.append("Web Text")
 
-    # Enrichment stats
-    pdf_found = sum(1 for r in results if r.pdf_available)
-    enriched_products = sum(1 for r in results if any(
-        e.match_status != "NOT_FOUND" for e in r.enrichment_results
-    ))
-    total_enrichments = sum(
-        1 for r in results for e in r.enrichment_results
-        if e.match_status != "NOT_FOUND"
-    )
-    from_pdf = sum(
-        1 for r in results for e in r.enrichment_results
-        if e.match_status in ("FOUND_IN_INTERNAL_PDF", "FOUND_IN_BOTH_MATCH")
-    )
-    from_mfr = sum(
-        1 for r in results for e in r.enrichment_results
-        if e.match_status == "FOUND_IN_MANUFACTURER_SOURCE"
-    )
-    conflict_count = sum(
-        1 for r in results for e in r.enrichment_results
-        if e.match_status == "FOUND_IN_BOTH_CONFLICT"
-    )
+        # Determine which website fields are populated
+        website_fields_used = []
+        if product.product_name:
+            website_fields_used.append("Title")
+        if product.description:
+            website_fields_used.append("Description")
+        if product.specification or product.technical_details:
+            website_fields_used.append("Specification")
+        if product.category or product.category_breadcrumb:
+            website_fields_used.append("Category")
+        if product.packaging_info or product.packaging_unit:
+            website_fields_used.append("Packaging")
+        if product.image_url:
+            website_fields_used.append("Image")
+        if product.manufacturer:
+            website_fields_used.append("Manufacturer")
 
-    rows.extend([
-        ("", ""),
-        ("Berikelse:", ""),
-        ("  Produktdatablad funnet:", pdf_found),
-        ("  Produkter med berikelse:", enriched_products),
-        ("  Totalt berikede felt:", total_enrichments),
-        ("  Fra internt datablad:", from_pdf),
-        ("  Fra produsent:", from_mfr),
-        ("  Kildekonflikter:", conflict_count),
-        ("", ""),
-        ("Oppf\u00f8lging:", ""),
-        ("  Auto-fix mulig:", auto_fix),
-        ("  Manuell vurdering:", manual),
-        ("  Krever produsentkontakt:", mfr_contact),
-    ])
+        # Accordion: website description from accordion selector
+        accordion_status = "N/A"
+        if product.found_on_onemed:
+            if product.description and len(product.description) > 10:
+                accordion_status = "Yes"
+            else:
+                accordion_status = "No content found"
 
-    for idx, (label, value) in enumerate(rows, 3):
-        cell_label = ws.cell(row=idx, column=1, value=label)
-        ws.cell(row=idx, column=2, value=value)
-        if label and not label.startswith("  "):
-            cell_label.font = header_font
+        # Build suggestion source summary
+        suggestion_sources = set()
+        any_review = False
+        for es in result.enrichment_suggestions:
+            if es.source:
+                suggestion_sources.add(es.source)
+            if es.review_required:
+                any_review = True
+        for fa in result.field_analyses:
+            if fa.source and fa.suggested_value:
+                suggestion_sources.add(fa.source)
 
-    ws.column_dimensions["A"].width = 35
-    ws.column_dimensions["B"].width = 20
+        # Debug comment: explain notable findings
+        debug_parts = []
+        if not product.found_on_onemed:
+            debug_parts.append("Not found on website")
+        if not jeeves:
+            debug_parts.append("Not in Jeeves")
+
+        # Note fields where Jeeves fills gaps
+        for fa in result.field_analyses:
+            if fa.source and "Jeeves kun" in fa.source:
+                debug_parts.append(f"{fa.field_name} from Jeeves only")
+            elif fa.status == QualityStatus.MISSING:
+                debug_parts.append(f"{fa.field_name} missing in both")
+
+        # Note weak fields
+        for fa in result.field_analyses:
+            if fa.status == QualityStatus.SHOULD_IMPROVE:
+                debug_parts.append(f"{fa.field_name}: {fa.comment}")
+
+        # Raw website extraction values
+        raw_spec = product.specification or ""
+        if not raw_spec and product.technical_details:
+            raw_spec = "; ".join(f"{k}: {v}" for k, v in product.technical_details.items())
+        raw_breadcrumb = " > ".join(product.category_breadcrumb) if product.category_breadcrumb else ""
+        raw_packaging = product.packaging_info or product.packaging_unit or ""
+
+        c = 1
+        ws.cell(row=row_idx, column=c, value=result.article_number).alignment = top_align; c += 1
+        ws.cell(row=row_idx, column=c, value=product.product_url or "").alignment = top_align; c += 1
+        ws.cell(row=row_idx, column=c, value="Ja" if product.found_on_onemed else "Nei").alignment = top_align; c += 1
+        ws.cell(row=row_idx, column=c, value=accordion_status).alignment = top_align; c += 1
+        ws.cell(row=row_idx, column=c, value=product.product_name or "").alignment = top_align; c += 1
+        ws.cell(row=row_idx, column=c, value=raw_breadcrumb).alignment = top_align; c += 1
+        ws.cell(row=row_idx, column=c, value=product.description or "").alignment = wrap_align; c += 1
+        ws.cell(row=row_idx, column=c, value=raw_spec).alignment = wrap_align; c += 1
+        ws.cell(row=row_idx, column=c, value=raw_packaging).alignment = top_align; c += 1
+        ws.cell(row=row_idx, column=c, value="Ja" if product.image_url else "Nei").alignment = top_align; c += 1
+        ws.cell(row=row_idx, column=c, value=result.pdf_url or "").alignment = top_align; c += 1
+        ws.cell(row=row_idx, column=c, value=", ".join(jeeves_fields_used) if jeeves_fields_used else "None").alignment = wrap_align; c += 1
+        ws.cell(row=row_idx, column=c, value=", ".join(website_fields_used) if website_fields_used else "None").alignment = wrap_align; c += 1
+        ws.cell(row=row_idx, column=c, value=", ".join(sorted(suggestion_sources)) if suggestion_sources else "None").alignment = top_align; c += 1
+        ws.cell(row=row_idx, column=c, value="Ja" if any_review else "Nei").alignment = top_align; c += 1
+        ws.cell(row=row_idx, column=c, value=result.total_score).alignment = top_align; c += 1
+        ws.cell(row=row_idx, column=c, value="; ".join(debug_parts) if debug_parts else "No issues").alignment = wrap_align; c += 1
+
+    # Column widths
+    col_widths = {
+        1: 16, 2: 35, 3: 14, 4: 14, 5: 25, 6: 30, 7: 35,
+        8: 35, 9: 25, 10: 12, 11: 35, 12: 30, 13: 30,
+        14: 25, 15: 14, 16: 12, 17: 55,
+    }
+    for col, width in col_widths.items():
+        ws.column_dimensions[get_column_letter(col)].width = width
+
+    ws.freeze_panes = "B2"
+    if len(results) > 0:
+        ws.auto_filter.ref = f"A1:{get_column_letter(len(headers))}{len(results) + 1}"
 
 
 # --- Inriver Import colors ---
