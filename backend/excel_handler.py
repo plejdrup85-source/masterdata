@@ -580,51 +580,140 @@ def _apply_enrichment_status_style(cell, status: str) -> None:
 
 
 def _create_enrichment_sheet(ws, results: list[ProductAnalysis]) -> None:
-    """Create enrichment details sheet with one row per enriched field."""
+    """Create enrichment sheet with one row per product, paired current/suggested columns."""
     headers = [
         "Artikkelnummer",
-        "Felt",
-        "N\u00e5v\u00e6rende verdi",
-        "Foresl\u00e5tt verdi",
-        "Kildeniv\u00e5",
-        "Kildetype",
-        "Kilde-URL",
-        "Evidens",
+        "Produktnavn_eksisterende",
+        "Produktnavn_forslag",
+        "Beskrivelse_eksisterende",
+        "Beskrivelse_forslag",
+        "Spesifikasjon_eksisterende",
+        "Spesifikasjon_forslag",
+        "Kategori_eksisterende",
+        "Kategori_forslag",
+        "Pakningsinformasjon_eksisterende",
+        "Pakningsinformasjon_forslag",
+        "Produsent_eksisterende",
+        "Produsent_forslag",
+        "Produsent_artnr_eksisterende",
+        "Produsent_artnr_forslag",
+        "Datablad_URL",
+        "Kilde_for_forslag",
         "Confidence",
-        "Match-status",
-        "Gjennomgang",
+        "Review_Required",
+        "Kommentar",
     ]
 
     for col, header in enumerate(headers, 1):
         ws.cell(row=1, column=col, value=header)
     _style_header(ws, 1, len(headers))
 
+    # Define fill for suggestion cells that have a value
+    suggestion_fill = PatternFill(start_color="E2EFDA", end_color="E2EFDA", fill_type="solid")
+    review_fill = PatternFill(start_color="FFF2CC", end_color="FFF2CC", fill_type="solid")
+
     row_idx = 2
     for result in results:
-        for er in result.enrichment_results:
-            if er.match_status == "NOT_FOUND":
-                continue  # Skip empty results to keep sheet actionable
-            ws.cell(row=row_idx, column=1, value=result.article_number)
-            ws.cell(row=row_idx, column=2, value=er.field_name)
-            ws.cell(row=row_idx, column=3, value=er.current_value or "")
-            ws.cell(row=row_idx, column=4, value=er.suggested_value or "")
-            ws.cell(row=row_idx, column=5, value=er.source_level or "")
-            ws.cell(row=row_idx, column=6, value=er.source_type or "")
-            ws.cell(row=row_idx, column=7, value=er.source_url or "")
-            ws.cell(row=row_idx, column=8, value=er.evidence_snippet or "")
-            ws.cell(row=row_idx, column=9, value=round(er.confidence, 2) if er.confidence else 0)
-            status_cell = ws.cell(row=row_idx, column=10, value=er.match_status)
-            _apply_enrichment_status_style(status_cell, er.match_status)
-            ws.cell(row=row_idx, column=11, value=er.review_status)
-            row_idx += 1
+        product = result.product_data
+
+        # Build suggestion index from enrichment_suggestions
+        sugg_by_field = {}
+        for es in result.enrichment_suggestions:
+            sugg_by_field[es.field_name] = es
+
+        # Also check field_analyses for suggestions not covered by enricher
+        for fa in result.field_analyses:
+            if fa.suggested_value and fa.field_name not in sugg_by_field:
+                from backend.models import EnrichmentSuggestion
+                sugg_by_field[fa.field_name] = EnrichmentSuggestion(
+                    field_name=fa.field_name,
+                    current_value=fa.current_value,
+                    suggested_value=fa.suggested_value,
+                    source=fa.source,
+                    confidence=fa.confidence or 0.0,
+                    review_required=True,
+                )
+
+        # Skip products with no suggestions at all
+        if not sugg_by_field and not result.enrichment_results:
+            continue
+
+        # Collect sources and confidence across all suggestions
+        sources = set()
+        min_confidence = 1.0
+        any_review = False
+        comments = []
+
+        for es in sugg_by_field.values():
+            if es.source:
+                sources.add(es.source)
+            if es.confidence:
+                min_confidence = min(min_confidence, es.confidence)
+            if es.review_required:
+                any_review = True
+            if es.evidence:
+                comments.append(f"{es.field_name}: {es.evidence}")
+
+        # Category display
+        cat_display = None
+        if product.category_breadcrumb:
+            cat_display = " > ".join(product.category_breadcrumb)
+        elif product.category:
+            cat_display = product.category
+
+        # Spec display
+        spec_display = product.specification
+        if not spec_display and product.technical_details:
+            spec_display = "; ".join(f"{k}: {v}" for k, v in product.technical_details.items())
+
+        # Helper to get suggestion for a field
+        def _sugg(field_name):
+            es = sugg_by_field.get(field_name)
+            return es.suggested_value if es else None
+
+        ws.cell(row=row_idx, column=1, value=result.article_number)
+        ws.cell(row=row_idx, column=2, value=product.product_name or "")
+        ws.cell(row=row_idx, column=3, value=_sugg("Produktnavn") or "")
+        ws.cell(row=row_idx, column=4, value=product.description or "")
+        ws.cell(row=row_idx, column=5, value=_sugg("Beskrivelse") or "")
+        ws.cell(row=row_idx, column=6, value=spec_display or "")
+        ws.cell(row=row_idx, column=7, value=_sugg("Spesifikasjon") or "")
+        ws.cell(row=row_idx, column=8, value=cat_display or "")
+        ws.cell(row=row_idx, column=9, value=_sugg("Kategori") or "")
+        ws.cell(row=row_idx, column=10, value=product.packaging_info or product.packaging_unit or "")
+        ws.cell(row=row_idx, column=11, value=_sugg("Pakningsinformasjon") or "")
+        ws.cell(row=row_idx, column=12, value=product.manufacturer or "")
+        ws.cell(row=row_idx, column=13, value=_sugg("Produsent") or "")
+        ws.cell(row=row_idx, column=14, value=product.manufacturer_article_number or "")
+        ws.cell(row=row_idx, column=15, value=_sugg("Produsentens varenummer") or "")
+        ws.cell(row=row_idx, column=16, value=result.pdf_url or "")
+        ws.cell(row=row_idx, column=17, value="; ".join(sorted(sources)) if sources else "")
+        ws.cell(row=row_idx, column=18, value=round(min_confidence, 2) if sugg_by_field else "")
+        ws.cell(row=row_idx, column=19, value="Ja" if any_review else "Nei")
+        ws.cell(row=row_idx, column=20, value="; ".join(comments) if comments else "")
+
+        # Highlight suggestion columns that have values
+        for col_idx in (3, 5, 7, 9, 11, 13, 15):
+            cell = ws.cell(row=row_idx, column=col_idx)
+            if cell.value:
+                fill = review_fill if any_review else suggestion_fill
+                cell.fill = fill
+
+        row_idx += 1
 
     if row_idx == 2:
         ws.cell(row=2, column=1, value="Ingen berikelser funnet")
 
-    for col in range(1, len(headers) + 1):
-        ws.column_dimensions[get_column_letter(col)].width = max(14, len(headers[col - 1]) + 3)
+    # Column widths
+    col_widths = {
+        1: 16, 2: 25, 3: 25, 4: 40, 5: 40, 6: 40, 7: 40,
+        8: 25, 9: 25, 10: 25, 11: 25, 12: 20, 13: 20,
+        14: 20, 15: 20, 16: 35, 17: 25, 18: 12, 19: 14, 20: 50,
+    }
+    for col, width in col_widths.items():
+        ws.column_dimensions[get_column_letter(col)].width = width
 
-    ws.freeze_panes = "A2"
+    ws.freeze_panes = "B2"
     if row_idx > 2:
         ws.auto_filter.ref = f"A1:{get_column_letter(len(headers))}{row_idx - 1}"
 

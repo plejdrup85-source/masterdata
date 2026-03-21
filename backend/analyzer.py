@@ -498,6 +498,8 @@ def analyze_product(product: ProductData, image_quality: dict = None) -> Product
         analysis.total_score = 0.0
         return analysis
 
+    tag = f"[analyze:{product.article_number}]"
+
     # Run all field analyses
     field_analyses = [
         _analyze_product_name(product),
@@ -512,6 +514,13 @@ def analyze_product(product: ProductData, image_quality: dict = None) -> Product
     ]
 
     analysis.field_analyses = field_analyses
+
+    # Log per-field status with reasons for missing/weak
+    for fa in field_analyses:
+        if fa.status in (QualityStatus.MISSING, QualityStatus.PROBABLE_ERROR):
+            logger.debug(f"{tag} {fa.field_name}: {fa.status.value} — {fa.comment}")
+        elif fa.status == QualityStatus.SHOULD_IMPROVE:
+            logger.debug(f"{tag} {fa.field_name}: {fa.status.value} — {fa.comment}")
 
     # Calculate weighted score
     score_map = {
@@ -594,5 +603,13 @@ def analyze_product(product: ProductData, image_quality: dict = None) -> Product
                 f"Produsent ukjent. Manglende felt: {', '.join(missing_names)}. "
                 f"Artikkelnummer: {product.article_number}"
             )
+
+    logger.info(
+        f"{tag} DONE: score={analysis.total_score}% "
+        f"status={analysis.overall_status.value} "
+        f"mfr_contact={analysis.requires_manufacturer_contact} "
+        f"manual_review={analysis.manual_review_needed} "
+        f"auto_fix={analysis.auto_fix_possible}"
+    )
 
     return analysis

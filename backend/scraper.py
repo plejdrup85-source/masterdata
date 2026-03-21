@@ -191,27 +191,40 @@ def _extract_sku_from_html(html: str) -> Optional[str]:
 
 
 def _parse_product_page(html: str, article_number: str) -> ProductData:
-    """Parse a product page HTML into ProductData."""
+    """Parse a product page HTML into ProductData.
+
+    Includes structured debug logging for every extraction step:
+    selector matches, raw values, source attribution, and miss reasons.
+    """
+    tag = f"[parse:{article_number}]"
     soup = BeautifulSoup(html, "lxml")
 
     # Extract JSON-LD data
     json_ld = _extract_json_ld(soup)
     ld_info = _extract_product_from_json_ld(json_ld)
+    logger.debug(f"{tag} JSON-LD keys found: {list(ld_info.keys())}")
 
     product = ProductData(
         article_number=article_number,
         found_on_onemed=True,
     )
 
-    # Product name
+    # ── Product name ──
     product.product_name = ld_info.get("name")
-    if not product.product_name:
+    if product.product_name:
+        logger.debug(f"{tag} product_name: JSON-LD → {repr(product.product_name)}")
+    else:
         h1 = soup.find("h1")
         if h1:
             product.product_name = h1.get_text(strip=True)
+            logger.debug(f"{tag} product_name: <h1> fallback → {repr(product.product_name)}")
+        else:
+            logger.debug(f"{tag} product_name: MISSING — no JSON-LD name, no <h1>")
 
-    # Description
+    # ── Description ──
     product.description = ld_info.get("description")
+    if product.description:
+        logger.debug(f"{tag} description: JSON-LD → {len(product.description)} chars")
     if not product.description:
         # Fallback 1: OneMed accordion section for description
         desc_accordion = soup.find(id="accordionItem_descriptionAndDocuments")
@@ -219,44 +232,73 @@ def _parse_product_page(html: str, article_number: str) -> ProductData:
             desc_text = desc_accordion.get_text(strip=True)
             if desc_text and len(desc_text) > 10:
                 product.description = desc_text
-                logger.debug(f"[{article_number}] Description from accordion ({len(desc_text)} chars)")
+                logger.debug(
+                    f"{tag} description: #accordionItem_descriptionAndDocuments → "
+                    f"{len(desc_text)} chars"
+                )
+            else:
+                logger.debug(
+                    f"{tag} description: accordion found but too short "
+                    f"({len(desc_text) if desc_text else 0} chars)"
+                )
+        else:
+            logger.debug(f"{tag} description: accordion #accordionItem_descriptionAndDocuments not found")
     if not product.description:
         # Fallback 2: generic description class
         desc_el = soup.find("div", class_=re.compile(r"description|product-desc", re.I))
         if desc_el:
             product.description = desc_el.get_text(strip=True)
+            logger.debug(
+                f"{tag} description: div.description fallback → {len(product.description)} chars"
+            )
+        else:
+            logger.debug(f"{tag} description: MISSING — no JSON-LD, no accordion, no div.description")
 
-    # Image
+    # ── Image ──
     product.image_url = ld_info.get("image")
-    if not product.image_url:
+    if product.image_url:
+        logger.debug(f"{tag} image_url: JSON-LD → {product.image_url}")
+    else:
         product.image_url = f"{IMAGE_BASE_URL}/{article_number}.jpg"
+        logger.debug(f"{tag} image_url: CDN fallback → {product.image_url}")
 
-    # Category breadcrumbs
+    # ── Category breadcrumbs ──
     breadcrumbs = ld_info.get("breadcrumbs", [])
+    bc_source = None
+    if breadcrumbs:
+        bc_source = "JSON-LD BreadcrumbList"
     if not breadcrumbs:
         # Fallback: extract breadcrumb from HTML nav/ol element
         bc_nav = soup.find(class_=re.compile(r"breadcrumb", re.I))
         if bc_nav:
             bc_links = bc_nav.find_all("a")
             breadcrumbs = [a.get_text(strip=True) for a in bc_links if a.get_text(strip=True)]
-            # Also grab the last non-link text (current page)
-            bc_full = bc_nav.get_text(" ", strip=True)
-            # The last segment after the last ">" is the current product — skip it for category
             if breadcrumbs:
-                logger.debug(f"[{article_number}] Breadcrumb from HTML: {breadcrumbs}")
+                bc_source = f"HTML nav.breadcrumb ({bc_nav.name}.{bc_nav.get('class', [])})"
+            else:
+                logger.debug(f"{tag} breadcrumb: nav.breadcrumb found but no <a> links inside")
+        else:
+            logger.debug(f"{tag} breadcrumb: no JSON-LD BreadcrumbList, no HTML nav.breadcrumb")
     if breadcrumbs:
         product.category_breadcrumb = breadcrumbs
-        # Use the last breadcrumb link (not the product name) as category
         product.category = breadcrumbs[-1] if breadcrumbs else None
+        logger.debug(f"{tag} category: {bc_source} → {breadcrumbs}")
+    else:
+        logger.debug(f"{tag} category: MISSING — no breadcrumb source found")
 
-    # Manufacturer / brand
+    # ── Manufacturer / brand ──
     product.manufacturer = ld_info.get("brand")
+    if product.manufacturer:
+        logger.debug(f"{tag} manufacturer: JSON-LD brand → {repr(product.manufacturer)}")
+    else:
+        logger.debug(f"{tag} manufacturer: MISSING — no JSON-LD brand")
 
-    # Product URL
+    # ── Product URL ──
     product.product_url = ld_info.get("url")
 
-    # Try to extract specification from multiple sources
+    # ── Specifications ──
     specs = {}
+    spec_sources = {}  # key → source selector
 
     # Source 1: HTML tables
     spec_tables = soup.find_all("table")
@@ -269,21 +311,30 @@ def _parse_product_page(html: str, article_number: str) -> ProductData:
                 val = cells[1].get_text(strip=True)
                 if key and val and len(key) < 100:
                     specs[key] = val
+                    spec_sources[key] = "table>tr>td"
 
     # Source 2: Definition lists (dl/dt/dd)
+    dl_count = 0
     for dl in soup.find_all("dl"):
         dts = dl.find_all("dt")
         dds = dl.find_all("dd")
         for dt, dd in zip(dts, dds):
-            key = dt.get_text(strip=True).rstrip(":")
+            raw_key = dt.get_text(strip=True)
+            key = raw_key.rstrip(":")
             val = dd.get_text(strip=True)
             if key and val:
                 specs[key] = val
+                spec_sources[key] = f"dl>dt/dd (raw_key={repr(raw_key)})"
+                dl_count += 1
+    if dl_count:
+        logger.debug(f"{tag} specs: dl/dt/dd → {dl_count} key-value pairs")
 
     # Source 3: Key-value divs with common class patterns
+    kv_div_count = 0
     for el in soup.find_all(["div", "section", "ul"], class_=re.compile(
         r"spec|detail|attribute|property|feature|technical|egenskap", re.I
     )):
+        el_desc = f"{el.name}.{el.get('class', [])}"
         # Try list items
         items = el.find_all("li")
         for item in items:
@@ -292,6 +343,8 @@ def _parse_product_page(html: str, article_number: str) -> ProductData:
                 parts = text.split(":", 1)
                 if len(parts) == 2 and parts[0].strip() and parts[1].strip():
                     specs[parts[0].strip()] = parts[1].strip()
+                    spec_sources[parts[0].strip()] = f"{el_desc}>li"
+                    kv_div_count += 1
         # Try nested key-value spans/divs
         labels = el.find_all(class_=re.compile(r"label|key|name", re.I))
         values = el.find_all(class_=re.compile(r"value|data|content", re.I))
@@ -300,13 +353,20 @@ def _parse_product_page(html: str, article_number: str) -> ProductData:
             v = value.get_text(strip=True)
             if k and v:
                 specs[k] = v
+                spec_sources[k] = f"{el_desc}>.label+.value"
+                kv_div_count += 1
+    if kv_div_count:
+        logger.debug(f"{tag} specs: kv-div/ul → {kv_div_count} key-value pairs")
 
     if specs:
         product.technical_details = specs
         product.specification = "; ".join(f"{k}: {v}" for k, v in specs.items())
-
-    # Source 4: If no structured specs found, check for spec text in description-like blocks
-    if not specs and not product.specification:
+        logger.debug(
+            f"{tag} specification: {len(specs)} attrs from "
+            f"{set(spec_sources.values())}"
+        )
+    else:
+        # Source 4: If no structured specs found, check for spec text
         spec_block = soup.find(["div", "section"], class_=re.compile(
             r"spec|technical|egenskap", re.I
         ))
@@ -314,10 +374,17 @@ def _parse_product_page(html: str, article_number: str) -> ProductData:
             spec_text = spec_block.get_text(strip=True)
             if spec_text and len(spec_text) > 10:
                 product.specification = spec_text
+                logger.debug(
+                    f"{tag} specification: free-text block → {len(spec_text)} chars"
+                )
+            else:
+                logger.debug(f"{tag} specification: MISSING — spec block found but too short")
+        else:
+            logger.debug(f"{tag} specification: MISSING — no tables, dl, kv-divs, or spec blocks")
 
-    # Extract packaging info from specs or page text
-    # Priority 1: structured specs already extracted (dl/dt/dd or table)
+    # ── Packaging ──
     pkg_parts = []
+    pkg_source = None
     if specs:
         for key, val in specs.items():
             key_lower = key.lower().rstrip(":")
@@ -332,7 +399,8 @@ def _parse_product_page(html: str, article_number: str) -> ProductData:
 
     if pkg_parts:
         product.packaging_info = "; ".join(pkg_parts)
-        logger.debug(f"[{article_number}] Packaging from specs: {product.packaging_info}")
+        pkg_source = "structured specs"
+        logger.debug(f"{tag} packaging: {pkg_source} → {product.packaging_info}")
 
     # Priority 2: regex on page text (fallback)
     if not product.packaging_info:
@@ -348,6 +416,8 @@ def _parse_product_page(html: str, article_number: str) -> ProductData:
             if match:
                 product.packaging_info = match.group(0)
                 product.packaging_unit = match.group(1) + " stk"
+                pkg_source = f"regex pattern ({pattern[:30]}…)"
+                logger.debug(f"{tag} packaging: {pkg_source} → {product.packaging_info}")
                 break
 
         # Look for "Antall i transportforpakning"
@@ -359,7 +429,10 @@ def _parse_product_page(html: str, article_number: str) -> ProductData:
             if transport_match:
                 product.transport_packaging = transport_match.group(1) + " stk"
 
-    # Check for manufacturer article number patterns
+    if not product.packaging_info:
+        logger.debug(f"{tag} packaging: MISSING — no spec keys matched, no regex matched")
+
+    # ── Manufacturer article number ──
     page_text = soup.get_text()
     mfr_patterns = [
         r"(?:Produsentens?\s*(?:art\.?|varenr|artikkel)(?:nummer|nr)?|Lev\.?\s*art\.?\s*nr)[\s.:]*([A-Za-z0-9\-/]+)",
@@ -369,10 +442,32 @@ def _parse_product_page(html: str, article_number: str) -> ProductData:
         match = re.search(pattern, page_text, re.IGNORECASE)
         if match:
             product.manufacturer_article_number = match.group(1).strip()
+            logger.debug(
+                f"{tag} mfr_article_number: regex → {repr(product.manufacturer_article_number)}"
+            )
             break
+    else:
+        logger.debug(f"{tag} mfr_article_number: MISSING — no regex pattern matched")
 
-    # Image accessibility check (basic - just check if URL exists)
+    # ── Image accessibility check ──
     product.image_quality_ok = product.image_url is not None
+
+    # ── Final summary ──
+    filled = sum(1 for v in [
+        product.product_name, product.description, product.specification,
+        product.manufacturer, product.manufacturer_article_number,
+        product.category, product.packaging_info,
+    ] if v)
+    logger.info(
+        f"{tag} DONE: {filled}/7 fields filled | "
+        f"name={'Y' if product.product_name else 'N'} "
+        f"desc={'Y' if product.description else 'N'} "
+        f"spec={len(specs) if specs else 0} "
+        f"cat={'Y' if product.category else 'N'} "
+        f"pkg={'Y' if product.packaging_info else 'N'} "
+        f"mfr={'Y' if product.manufacturer else 'N'} "
+        f"mfr_art={'Y' if product.manufacturer_article_number else 'N'}"
+    )
 
     return product
 

@@ -65,25 +65,48 @@ def enrich_product(
     has a viable enrichment. Fields that are already good enough are skipped.
     """
     product = analysis.product_data
+    tag = f"[enrich:{product.article_number}]"
     suggestions: list[EnrichmentSuggestion] = []
 
     # Index enrichment results by field name for fast lookup
     er_by_field = _index_enrichment_results(enrichment_results)
+    logger.debug(
+        f"{tag} sources available: "
+        f"enrichment_results={len(enrichment_results)} "
+        f"(by_field={list(er_by_field.keys())}), "
+        f"manufacturer={'yes' if manufacturer_data and manufacturer_data.found else 'no'}"
+    )
 
     # Run each field enricher
-    for fn in [
-        _enrich_product_name,
-        _enrich_description,
-        _enrich_specification,
-        _enrich_category,
-        _enrich_packaging,
-        _enrich_manufacturer,
-        _enrich_manufacturer_article_number,
-    ]:
+    field_fns = [
+        ("Produktnavn", _enrich_product_name),
+        ("Beskrivelse", _enrich_description),
+        ("Spesifikasjon", _enrich_specification),
+        ("Kategori", _enrich_category),
+        ("Pakningsinformasjon", _enrich_packaging),
+        ("Produsent", _enrich_manufacturer),
+        ("Produsentens varenummer", _enrich_manufacturer_article_number),
+    ]
+    for field_label, fn in field_fns:
         suggestion = fn(product, analysis, er_by_field, manufacturer_data)
         if suggestion:
             suggestions.append(suggestion)
+            logger.debug(
+                f"{tag} {field_label}: ENRICHED → "
+                f"source={suggestion.source}, "
+                f"conf={suggestion.confidence:.2f}, "
+                f"review={suggestion.review_required}, "
+                f"value={repr(suggestion.suggested_value[:60]) if suggestion.suggested_value else None}"
+            )
+        else:
+            fa = _get_field_analysis(analysis, field_label)
+            status = fa.status.value if fa else "?"
+            logger.debug(f"{tag} {field_label}: skipped (status={status})")
 
+    logger.info(
+        f"{tag} DONE: {len(suggestions)} enrichment suggestion(s) "
+        f"from {len(enrichment_results)} source results"
+    )
     return suggestions
 
 
