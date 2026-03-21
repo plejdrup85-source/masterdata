@@ -1,6 +1,7 @@
 """Excel import/export handler for masterdata quality check."""
 
 import logging
+from datetime import datetime
 from io import BytesIO
 from pathlib import Path
 from typing import Optional
@@ -126,6 +127,10 @@ def create_output_excel(
     # Sheet 9: Summary Statistics
     ws_stats = wb.create_sheet("Statistikk")
     _create_stats_sheet(ws_stats, results)
+
+    # Sheet 10: Inriver Import staging
+    ws_inriver = wb.create_sheet("Inriver Import")
+    _create_inriver_import_sheet(ws_inriver, results)
 
     # Save directly to file
     wb.save(output_path)
@@ -764,3 +769,375 @@ def _create_stats_sheet(ws, results: list[ProductAnalysis]) -> None:
 
     ws.column_dimensions["A"].width = 35
     ws.column_dimensions["B"].width = 20
+
+
+# --- Inriver Import colors ---
+INRIVER_STATUS_COLORS = {
+    "Ready for Inriver": PatternFill(start_color="C6EFCE", end_color="C6EFCE", fill_type="solid"),
+    "Needs Review": PatternFill(start_color="FFEB9C", end_color="FFEB9C", fill_type="solid"),
+    "No Change": PatternFill(start_color="F2F2F2", end_color="F2F2F2", fill_type="solid"),
+    "Missing Source Data": PatternFill(start_color="FFC7CE", end_color="FFC7CE", fill_type="solid"),
+}
+
+INRIVER_STATUS_FONTS = {
+    "Ready for Inriver": Font(color="006100"),
+    "Needs Review": Font(color="9C6500"),
+    "No Change": Font(color="808080"),
+    "Missing Source Data": Font(color="9C0006"),
+}
+
+
+def _get_suggestion_for_field(result: ProductAnalysis, field_name: str) -> Optional[str]:
+    """Get the best suggestion for a field from all enrichment sources."""
+    # Priority 1: AI enrichment
+    ai = result.ai_enrichment or {}
+    ai_map = {
+        "Beskrivelse": ai.get("improved_description"),
+        "Kategori": ai.get("suggested_category"),
+        "Pakningsinformasjon": ai.get("packaging_suggestions"),
+    }
+    if field_name in ai_map and ai_map[field_name]:
+        return ai_map[field_name]
+
+    # Priority 2: Field analysis suggestions (from PDF/manufacturer enrichment)
+    for fa in result.field_analyses:
+        if fa.field_name == field_name and fa.suggested_value:
+            return fa.suggested_value
+
+    # Priority 3: Enrichment results
+    enrichment_field_map = {
+        "Produktnavn": "product_name",
+        "Beskrivelse": "description",
+        "Produsent": "manufacturer",
+        "Produsentens varenummer": "manufacturer_article_number",
+        "Pakningsinformasjon": "packaging_info",
+    }
+    er_key = enrichment_field_map.get(field_name)
+    if er_key:
+        for er in result.enrichment_results:
+            if er.field_name == er_key and er.suggested_value and er.match_status != "NOT_FOUND":
+                return er.suggested_value
+
+    return None
+
+
+def _get_suggestion_source(result: ProductAnalysis, field_name: str) -> str:
+    """Determine the source of the suggestion for a field."""
+    sources = []
+
+    # Check AI enrichment
+    ai = result.ai_enrichment or {}
+    ai_map = {
+        "Beskrivelse": ai.get("improved_description"),
+        "Kategori": ai.get("suggested_category"),
+        "Pakningsinformasjon": ai.get("packaging_suggestions"),
+    }
+    if field_name in ai_map and ai_map[field_name]:
+        sources.append("AI suggestion")
+
+    # Check field analysis suggestions
+    for fa in result.field_analyses:
+        if fa.field_name == field_name and fa.suggested_value and fa.source:
+            sources.append(fa.source)
+
+    # Check enrichment results
+    enrichment_field_map = {
+        "Produktnavn": "product_name",
+        "Beskrivelse": "description",
+        "Produsent": "manufacturer",
+        "Produsentens varenummer": "manufacturer_article_number",
+        "Pakningsinformasjon": "packaging_info",
+    }
+    er_key = enrichment_field_map.get(field_name)
+    if er_key:
+        for er in result.enrichment_results:
+            if er.field_name == er_key and er.suggested_value and er.match_status != "NOT_FOUND":
+                if er.source_level == "internal_product_sheet":
+                    sources.append("product datasheet")
+                elif er.source_level == "manufacturer_source":
+                    sources.append("manufacturer website")
+
+    if not sources:
+        if result.product_data.found_on_onemed:
+            return "onemed.no"
+        return "existing catalog"
+
+    return "; ".join(dict.fromkeys(sources))  # deduplicate preserving order
+
+
+def _determine_enrichment_status(result: ProductAnalysis) -> tuple[str, bool, str]:
+    """Determine Enrichment_Status, Review_Required, and comment for a product.
+
+    Returns (enrichment_status, review_required, comment).
+    """
+    pd = result.product_data
+    comments = []
+
+    if not pd.found_on_onemed:
+        return "Missing Source Data", True, "Produkt ikke funnet i kilde"
+
+    # Count how many fields have suggestions
+    suggestion_fields = []
+    ai_fields = []
+    for field_name in ["Produktnavn", "Beskrivelse", "Spesifikasjon", "Kategori", "Pakningsinformasjon"]:
+        suggestion = _get_suggestion_for_field(result, field_name)
+        if suggestion:
+            suggestion_fields.append(field_name)
+            source = _get_suggestion_source(result, field_name)
+            if "AI" in source:
+                ai_fields.append(field_name)
+
+    # Count missing/poor fields
+    missing_fields = [
+        fa.field_name for fa in result.field_analyses
+        if fa.status in (QualityStatus.MISSING, QualityStatus.PROBABLE_ERROR)
+        and fa.field_name not in ("Bildekvalitet", "Konsistens mellom felter")
+    ]
+    improve_fields = [
+        fa.field_name for fa in result.field_analyses
+        if fa.status == QualityStatus.SHOULD_IMPROVE
+        and fa.field_name not in ("Bildekvalitet", "Konsistens mellom felter")
+    ]
+
+    # No suggestions and no problems = No Change
+    if not suggestion_fields and not missing_fields:
+        return "No Change", False, "Produkt har akseptabel kvalitet"
+
+    # Missing source data if too many critical fields are missing with no suggestions
+    critical_missing = [f for f in missing_fields if f in ("Produktnavn", "Beskrivelse", "Spesifikasjon")]
+    if len(critical_missing) >= 2 and not suggestion_fields:
+        comments.append(f"Mangler: {', '.join(critical_missing)}")
+        return "Missing Source Data", True, "; ".join(comments)
+
+    # If AI generated content or low-confidence suggestions → Needs Review
+    if ai_fields:
+        comments.append(f"AI-generert innhold for: {', '.join(ai_fields)}")
+
+    # Check for conflicts in enrichment
+    conflicts = [
+        er for er in result.enrichment_results
+        if er.match_status == "FOUND_IN_BOTH_CONFLICT"
+    ]
+    if conflicts:
+        comments.append(f"{len(conflicts)} kildekonflikt(er)")
+
+    # Check confidence levels
+    low_confidence_fields = []
+    for fa in result.field_analyses:
+        if fa.suggested_value and fa.confidence and fa.confidence < 0.7:
+            low_confidence_fields.append(fa.field_name)
+    if low_confidence_fields:
+        comments.append(f"Lav confidence: {', '.join(low_confidence_fields)}")
+
+    needs_review = bool(ai_fields or conflicts or low_confidence_fields or missing_fields)
+
+    if suggestion_fields and not needs_review:
+        # High confidence, structured data, no AI guessing
+        comments.append(f"Forslag for: {', '.join(suggestion_fields)}")
+        return "Ready for Inriver", False, "; ".join(comments)
+
+    if suggestion_fields:
+        if missing_fields:
+            comments.append(f"Mangler fortsatt: {', '.join(missing_fields)}")
+        return "Needs Review", True, "; ".join(comments)
+
+    if missing_fields:
+        comments.append(f"Mangler: {', '.join(missing_fields)}")
+        return "Needs Review", True, "; ".join(comments)
+
+    if improve_fields:
+        comments.append(f"Bør forbedres: {', '.join(improve_fields)}")
+        return "Needs Review", True, "; ".join(comments)
+
+    return "No Change", False, "Ingen endringer nødvendig"
+
+
+def _create_inriver_import_sheet(ws, results: list[ProductAnalysis]) -> None:
+    """Create the Inriver Import staging sheet.
+
+    One row per product with existing values, suggested values, and import workflow columns.
+    Designed as a real staging layer for business users before Inriver import.
+    """
+    headers = [
+        "Artikkelnummer",
+        "Produktnavn_eksisterende",
+        "Produktnavn_forslag",
+        "Beskrivelse_eksisterende",
+        "Beskrivelse_forslag",
+        "Spesifikasjon_eksisterende",
+        "Spesifikasjon_forslag",
+        "Kategori_eksisterende",
+        "Kategori_forslag",
+        "Pakningsinformasjon_eksisterende",
+        "Pakningsinformasjon_forslag",
+        "Produsent_eksisterende",
+        "Produsent_forslag",
+        "Produsent_artnr_eksisterende",
+        "Produsent_artnr_forslag",
+        "Datablad_URL",
+        "Bilde_URL",
+        "Quality_Score",
+        "Enrichment_Status",
+        "Review_Required",
+        "Import_Approved",
+        "Import_Batch",
+        "Kommentar",
+        "Kilde",
+        "Sist_oppdatert",
+    ]
+
+    # Write headers
+    for col, header in enumerate(headers, 1):
+        ws.cell(row=1, column=col, value=header)
+    _style_header(ws, 1, len(headers))
+
+    now_str = datetime.now().strftime("%Y-%m-%d %H:%M")
+    batch_id = f"Batch_{datetime.now().strftime('%Y_%m_%d')}"
+
+    wrap_alignment = Alignment(wrap_text=True, vertical="top")
+    top_alignment = Alignment(vertical="top")
+
+    for row_idx, result in enumerate(results, 2):
+        pd = result.product_data
+
+        # Determine enrichment status
+        enrichment_status, review_required, comment = _determine_enrichment_status(result)
+
+        # Collect all sources for this product
+        sources = set()
+        if pd.found_on_onemed:
+            sources.add("onemed.no")
+        if result.pdf_available:
+            sources.add("product datasheet")
+        if result.ai_enrichment or result.ai_score:
+            sources.add("AI suggestion")
+        for er in result.enrichment_results:
+            if er.match_status != "NOT_FOUND":
+                if er.source_level == "internal_product_sheet":
+                    sources.add("product datasheet")
+                elif er.source_level == "manufacturer_source":
+                    sources.add("manufacturer website")
+        if not sources:
+            sources.add("existing catalog")
+
+        # Col 1: Artikkelnummer
+        ws.cell(row=row_idx, column=1, value=result.article_number).alignment = top_alignment
+
+        # Col 2-3: Produktnavn
+        ws.cell(row=row_idx, column=2, value=pd.product_name or "").alignment = top_alignment
+        ws.cell(row=row_idx, column=3, value=_get_suggestion_for_field(result, "Produktnavn") or "").alignment = top_alignment
+
+        # Col 4-5: Beskrivelse
+        ws.cell(row=row_idx, column=4, value=pd.description or "").alignment = wrap_alignment
+        ws.cell(row=row_idx, column=5, value=_get_suggestion_for_field(result, "Beskrivelse") or "").alignment = wrap_alignment
+
+        # Col 6-7: Spesifikasjon
+        spec_existing = pd.specification or ""
+        if not spec_existing and pd.technical_details:
+            spec_existing = "; ".join(f"{k}: {v}" for k, v in pd.technical_details.items())
+        ws.cell(row=row_idx, column=6, value=spec_existing).alignment = wrap_alignment
+
+        # Spec suggestion: combine AI missing_specifications with enrichment
+        spec_suggestion = _get_suggestion_for_field(result, "Spesifikasjon") or ""
+        ai = result.ai_enrichment or {}
+        missing_specs = ai.get("missing_specifications", [])
+        if missing_specs and not spec_suggestion:
+            spec_suggestion = "Manglende: " + ", ".join(missing_specs)
+        ws.cell(row=row_idx, column=7, value=spec_suggestion).alignment = wrap_alignment
+
+        # Col 8-9: Kategori
+        cat_existing = pd.category or ""
+        if not cat_existing and pd.category_breadcrumb:
+            cat_existing = " > ".join(pd.category_breadcrumb)
+        ws.cell(row=row_idx, column=8, value=cat_existing).alignment = top_alignment
+        ws.cell(row=row_idx, column=9, value=_get_suggestion_for_field(result, "Kategori") or "").alignment = top_alignment
+
+        # Col 10-11: Pakningsinformasjon
+        pkg_existing = pd.packaging_info or pd.packaging_unit or ""
+        ws.cell(row=row_idx, column=10, value=pkg_existing).alignment = top_alignment
+        ws.cell(row=row_idx, column=11, value=_get_suggestion_for_field(result, "Pakningsinformasjon") or "").alignment = top_alignment
+
+        # Col 12-13: Produsent
+        ws.cell(row=row_idx, column=12, value=pd.manufacturer or "").alignment = top_alignment
+        ws.cell(row=row_idx, column=13, value=_get_suggestion_for_field(result, "Produsent") or "").alignment = top_alignment
+
+        # Col 14-15: Produsent artnr
+        ws.cell(row=row_idx, column=14, value=pd.manufacturer_article_number or "").alignment = top_alignment
+        ws.cell(row=row_idx, column=15, value=_get_suggestion_for_field(result, "Produsentens varenummer") or "").alignment = top_alignment
+
+        # Col 16: Datablad URL
+        ws.cell(row=row_idx, column=16, value=result.pdf_url or "").alignment = top_alignment
+
+        # Col 17: Bilde URL
+        ws.cell(row=row_idx, column=17, value=pd.image_url or "").alignment = top_alignment
+
+        # Col 18: Quality Score
+        score = result.total_score
+        # Incorporate AI score if available
+        if result.ai_score and "overall_score" in result.ai_score:
+            ai_score = result.ai_score["overall_score"]
+            score = round(score * 0.4 + ai_score * 0.6, 1)
+        ws.cell(row=row_idx, column=18, value=score).alignment = top_alignment
+
+        # Col 19: Enrichment_Status
+        status_cell = ws.cell(row=row_idx, column=19, value=enrichment_status)
+        status_cell.alignment = top_alignment
+        if enrichment_status in INRIVER_STATUS_COLORS:
+            status_cell.fill = INRIVER_STATUS_COLORS[enrichment_status]
+            status_cell.font = INRIVER_STATUS_FONTS.get(enrichment_status, Font())
+
+        # Col 20: Review_Required
+        ws.cell(row=row_idx, column=20, value="Yes" if review_required else "No").alignment = top_alignment
+
+        # Col 21: Import_Approved (always No by default)
+        ws.cell(row=row_idx, column=21, value="No").alignment = top_alignment
+
+        # Col 22: Import_Batch
+        ws.cell(row=row_idx, column=22, value=batch_id).alignment = top_alignment
+
+        # Col 23: Kommentar
+        ws.cell(row=row_idx, column=23, value=comment).alignment = wrap_alignment
+
+        # Col 24: Kilde
+        ws.cell(row=row_idx, column=24, value="; ".join(sorted(sources))).alignment = top_alignment
+
+        # Col 25: Sist_oppdatert
+        ws.cell(row=row_idx, column=25, value=now_str).alignment = top_alignment
+
+    # Column widths - readable for business users
+    col_widths = {
+        1: 16,   # Artikkelnummer
+        2: 30,   # Produktnavn_eksisterende
+        3: 30,   # Produktnavn_forslag
+        4: 40,   # Beskrivelse_eksisterende
+        5: 40,   # Beskrivelse_forslag
+        6: 35,   # Spesifikasjon_eksisterende
+        7: 35,   # Spesifikasjon_forslag
+        8: 25,   # Kategori_eksisterende
+        9: 25,   # Kategori_forslag
+        10: 22,  # Pakningsinformasjon_eksisterende
+        11: 22,  # Pakningsinformasjon_forslag
+        12: 20,  # Produsent_eksisterende
+        13: 20,  # Produsent_forslag
+        14: 20,  # Produsent_artnr_eksisterende
+        15: 20,  # Produsent_artnr_forslag
+        16: 30,  # Datablad_URL
+        17: 30,  # Bilde_URL
+        18: 14,  # Quality_Score
+        19: 20,  # Enrichment_Status
+        20: 16,  # Review_Required
+        21: 16,  # Import_Approved
+        22: 20,  # Import_Batch
+        23: 40,  # Kommentar
+        24: 25,  # Kilde
+        25: 18,  # Sist_oppdatert
+    }
+    for col, width in col_widths.items():
+        ws.column_dimensions[get_column_letter(col)].width = width
+
+    # Freeze header row
+    ws.freeze_panes = "A2"
+
+    # Enable auto-filter on all columns
+    if len(results) > 0:
+        ws.auto_filter.ref = f"A1:{get_column_letter(len(headers))}{len(results) + 1}"
