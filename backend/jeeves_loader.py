@@ -86,7 +86,12 @@ class JeevesIndex:
             for col_idx, field_name in col_to_field.items():
                 cell_val = row[col_idx].value
                 if cell_val is not None:
-                    values[field_name] = str(cell_val).strip()
+                    # Numeric fields (e.g., Supplier Item.no): strip trailing .0
+                    # from float-formatted integers (1029975.0 → "1029975")
+                    if isinstance(cell_val, float) and cell_val == int(cell_val):
+                        values[field_name] = str(int(cell_val))
+                    else:
+                        values[field_name] = str(cell_val).strip()
 
             artnr = values.get("article_number")
             if not artnr:

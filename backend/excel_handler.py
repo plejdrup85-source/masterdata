@@ -10,7 +10,7 @@ from openpyxl import Workbook, load_workbook
 from openpyxl.styles import Alignment, Border, Font, PatternFill, Side
 from openpyxl.utils import get_column_letter
 
-from backend.models import JeevesData, ProductAnalysis, QualityStatus
+from backend.models import EnrichmentSuggestion, JeevesData, ProductAnalysis, QualityStatus
 
 logger = logging.getLogger(__name__)
 
@@ -683,7 +683,6 @@ def _create_comparison_and_enrichment_sheet(ws, results: list[ProductAnalysis]) 
             sugg_by_field[es.field_name] = es
         for fa in result.field_analyses:
             if fa.suggested_value and fa.field_name not in sugg_by_field:
-                from backend.models import EnrichmentSuggestion
                 sugg_by_field[fa.field_name] = EnrichmentSuggestion(
                     field_name=fa.field_name,
                     current_value=fa.current_value,
@@ -805,6 +804,12 @@ def _create_comparison_and_enrichment_sheet(ws, results: list[ProductAnalysis]) 
         ws.cell(row=row_idx, column=c, value=conf_val).alignment = top_align; c += 1
         ws.cell(row=row_idx, column=c, value="Ja" if any_review else "Nei").alignment = top_align; c += 1
         ws.cell(row=row_idx, column=c, value=comment_text).alignment = wrap_align; c += 1
+
+        # Verify column count matches header count
+        assert c == len(headers) + 1, (
+            f"Column count mismatch in Comparison_And_Enrichment: "
+            f"wrote {c - 1} columns, expected {len(headers)}"
+        )
 
         row_idx += 1
 

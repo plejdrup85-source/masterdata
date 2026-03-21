@@ -11,7 +11,7 @@ from datetime import datetime
 from pathlib import Path
 from typing import Optional
 
-from fastapi import FastAPI, File, HTTPException, Query, UploadFile
+from fastapi import FastAPI, File, HTTPException, Query, Request, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse, HTMLResponse
 
@@ -20,6 +20,7 @@ from backend.analyzer import analyze_product
 from backend.enricher import apply_enrichment_suggestions, enrich_product
 from backend.excel_handler import create_output_excel, read_article_numbers
 from backend.image_analyzer import analyze_product_images
+from backend.jeeves_loader import JeevesIndex, load_jeeves
 from backend.manufacturer import (
     generate_improvement_suggestions,
     search_manufacturer_info,
@@ -56,9 +57,42 @@ app.add_middleware(
 )
 
 
+def _find_jeeves_file() -> Optional[str]:
+    """Find Jeeves Excel file from env var or well-known paths."""
+    if JEEVES_FILE_PATH and Path(JEEVES_FILE_PATH).exists():
+        return JEEVES_FILE_PATH
+    # Auto-detect from common locations
+    candidates = [
+        Path("Masterdata 2103.xlsx"),
+        Path("masterdata/Masterdata 2103.xlsx"),
+        Path("/tmp/masterdata_cache/Masterdata_2103.xlsx"),
+    ]
+    for p in candidates:
+        if p.exists():
+            return str(p)
+    return None
+
+
 @app.on_event("startup")
-async def preload_sitemap():
-    """Pre-download the product sitemap on startup for faster lookups."""
+async def preload_data():
+    """Pre-load sitemap and Jeeves data on startup."""
+    global _jeeves_index
+
+    # Load Jeeves ERP data
+    jeeves_path = _find_jeeves_file()
+    if jeeves_path:
+        try:
+            _jeeves_index = load_jeeves(jeeves_path)
+            logger.info(f"Jeeves data loaded: {_jeeves_index.count} products from {jeeves_path}")
+        except Exception as e:
+            logger.warning(f"Failed to load Jeeves data from {jeeves_path}: {e}")
+    else:
+        logger.warning(
+            "Jeeves Excel file not found. Set JEEVES_FILE_PATH env var or place "
+            "'Masterdata 2103.xlsx' in the project root. Two-source comparison disabled."
+        )
+
+    # Pre-download product sitemap
     try:
         import httpx
         async with httpx.AsyncClient() as client:
@@ -76,6 +110,10 @@ _background_tasks: set[asyncio.Task] = set()
 # Output directory - use /tmp on deployed environments for reliability
 OUTPUT_DIR = Path(os.environ.get("OUTPUT_DIR", "/tmp/masterdata_output"))
 OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
+
+# Jeeves ERP data file path — auto-detected from repo or configured via env
+JEEVES_FILE_PATH = os.environ.get("JEEVES_FILE_PATH", "")
+_jeeves_index: Optional[JeevesIndex] = None
 
 # Concurrency control - be polite to onemed.no
 SCRAPE_CONCURRENCY = 3
@@ -133,8 +171,15 @@ async def root():
 
 @app.get("/api/health")
 async def health_check():
-    """Health check endpoint."""
-    return {"status": "ok", "version": "2.0.0", "active_jobs": len(jobs)}
+    """Health check endpoint with feature status."""
+    return {
+        "status": "ok",
+        "version": "2.0.0",
+        "active_jobs": len(jobs),
+        "jeeves_loaded": _jeeves_index is not None and _jeeves_index.loaded,
+        "jeeves_product_count": _jeeves_index.count if _jeeves_index else 0,
+        "ai_scoring_available": bool(os.environ.get("ANTHROPIC_API_KEY")),
+    }
 
 
 def _apply_batch_selection(
@@ -192,6 +237,7 @@ def _apply_batch_selection(
 
 @app.post("/api/upload")
 async def upload_excel(
+    request: Request,
     file: UploadFile = File(...),
     skip_cache: bool = Query(False, description="Skip cache and re-scrape all products"),
     batch_mode: str = Query(BatchMode.FULL.value, description="Batch mode: full, range, random, specific"),
@@ -205,8 +251,9 @@ async def upload_excel(
     # Cleanup old jobs first
     _cleanup_old_jobs()
 
-    # Rate limiting (simple per-upload check)
-    if not _check_rate_limit("global"):
+    # Rate limiting per client IP
+    client_ip = request.client.host if request.client else "unknown"
+    if not _check_rate_limit(client_ip):
         raise HTTPException(
             429,
             f"For mange opplastinger. Maks {RATE_LIMIT_MAX} per {RATE_LIMIT_WINDOW} sekunder."
@@ -290,13 +337,27 @@ async def upload_excel(
     _background_tasks.add(task)
     task.add_done_callback(_background_tasks.discard)
 
+    # Estimate ~5 seconds per product (scrape + image + PDF + analysis)
+    n = len(selected_articles)
+    est_seconds = n * 5 // SCRAPE_CONCURRENCY
+    if est_seconds < 60:
+        est_str = f"~{est_seconds} sekunder"
+    elif est_seconds < 3600:
+        est_str = f"~{est_seconds // 60} minutter"
+    else:
+        est_str = f"~{est_seconds // 3600} timer {(est_seconds % 3600) // 60} minutter"
+
+    jeeves_status = f", Jeeves: {_jeeves_index.count} produkter" if _jeeves_index else ", Jeeves: ikke lastet"
+
     return {
         "job_id": job_id,
         "total_products": len(selected_articles),
         "detected_column": detected_column,
         "batch_mode": batch_mode,
         "batch_info": batch_info,
-        "message": f"Analyse startet for {len(selected_articles)} produkter ({batch_info})",
+        "estimated_time": est_str,
+        "jeeves_loaded": _jeeves_index is not None and _jeeves_index.loaded,
+        "message": f"Analyse startet for {n} produkter ({batch_info}). Estimert tid: {est_str}{jeeves_status}",
     }
 
 
@@ -674,12 +735,13 @@ async def _run_analysis(
                 pdf_url = None
 
                 # Step 3: Manufacturer lookup (only if product found and data incomplete)
+                # Check Jeeves first — if Jeeves has supplier info, skip mfr lookup for that
+                jeeves_check = _jeeves_index.get(article_number) if _jeeves_index else None
                 if product_data.found_on_onemed:
-                    needs_mfr = (
-                        not product_data.manufacturer
-                        or not product_data.manufacturer_article_number
-                        or not product_data.specification and not product_data.technical_details
-                    )
+                    has_mfr = product_data.manufacturer or (jeeves_check and jeeves_check.supplier)
+                    has_mfr_num = product_data.manufacturer_article_number or (jeeves_check and jeeves_check.supplier_item_no)
+                    has_spec = product_data.specification or product_data.technical_details
+                    needs_mfr = not has_mfr or not has_mfr_num or not has_spec
                     if needs_mfr:
                         job.current_step = "manufacturer_lookup"
                         logger.info(f"[{job_id}] Manufacturer lookup for {article_number}")
@@ -692,9 +754,12 @@ async def _run_analysis(
                     article_number, product_data, manufacturer_data=mfr_data
                 )
 
-                # Step 5: Quality analysis (with all collected data)
+                # Step 5: Quality analysis (with all collected data + Jeeves)
                 job.current_step = "quality_analysis"
-                analysis = analyze_product(product_data, image_quality=image_quality_dict)
+                jeeves_data = _jeeves_index.get(article_number) if _jeeves_index else None
+                analysis = analyze_product(
+                    product_data, image_quality=image_quality_dict, jeeves=jeeves_data
+                )
                 analysis.image_quality = image_quality_dict
                 analysis.enrichment_results = enrichment_results
                 analysis.pdf_available = pdf_exists
@@ -797,6 +862,26 @@ async def _run_analysis(
         # Sort results to match input order
         order_map = {art: idx for idx, art in enumerate(article_numbers)}
         job.results.sort(key=lambda r: order_map.get(r.article_number, 999999))
+
+        # Selector health check — warn if key website fields missing in >50% of found products
+        found_results = [r for r in job.results if r.product_data.found_on_onemed]
+        if len(found_results) >= 3:
+            no_desc = sum(1 for r in found_results if not r.product_data.description)
+            no_spec = sum(1 for r in found_results if not r.product_data.specification and not r.product_data.technical_details)
+            no_cat = sum(1 for r in found_results if not r.product_data.category and not r.product_data.category_breadcrumb)
+            threshold = len(found_results) * 0.5
+            if no_desc > threshold:
+                msg = f"SELECTOR WARNING: {no_desc}/{len(found_results)} products missing description — website structure may have changed"
+                logger.error(f"[{job_id}] {msg}")
+                job.errors.append(msg)
+            if no_spec > threshold:
+                msg = f"SELECTOR WARNING: {no_spec}/{len(found_results)} products missing specification — website structure may have changed"
+                logger.error(f"[{job_id}] {msg}")
+                job.errors.append(msg)
+            if no_cat > threshold:
+                msg = f"SELECTOR WARNING: {no_cat}/{len(found_results)} products missing category — website structure may have changed"
+                logger.error(f"[{job_id}] {msg}")
+                job.errors.append(msg)
 
         # Generate output Excel
         timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")

@@ -190,6 +190,31 @@ def _extract_sku_from_html(html: str) -> Optional[str]:
     return None
 
 
+def _verify_sku_match(html: str, expected_article_number: str) -> bool:
+    """Verify that a product page actually belongs to the expected article number.
+
+    Checks JSON-LD SKU and page text for the article number to prevent
+    cross-contamination (wrong product data attributed to wrong article).
+    Returns True if match is confirmed or cannot be checked, False if mismatch detected.
+    """
+    page_sku = _extract_sku_from_html(html)
+    if page_sku:
+        # Exact match
+        if page_sku == expected_article_number:
+            return True
+        # Normalized match (strip leading N, case-insensitive)
+        norm_page = page_sku.lstrip("N").lower()
+        norm_expected = expected_article_number.lstrip("N").lower()
+        if norm_page == norm_expected:
+            return True
+        return False
+    # If no SKU in JSON-LD, check if article number appears anywhere in page text
+    if expected_article_number in html:
+        return True
+    # Cannot verify — assume OK to avoid false positives
+    return True
+
+
 def _parse_product_page(html: str, article_number: str) -> ProductData:
     """Parse a product page HTML into ProductData.
 
@@ -685,6 +710,13 @@ async def scrape_product(
             if response and response.status_code == 200:
                 product = _parse_product_page(response.text, clean_num)
                 product.product_url = str(response.url)
+                # Verify SKU matches to prevent cross-contamination
+                if not _verify_sku_match(response.text, clean_num):
+                    logger.warning(
+                        f"SKU mismatch for {clean_num} at {known_url} — "
+                        f"page SKU does not match requested article number"
+                    )
+                    product.error = "SKU-mismatch: nettside-data kan tilhøre feil produkt"
                 _save_to_cache(product)
                 return product
 
@@ -699,6 +731,12 @@ async def scrape_product(
             if response and response.status_code == 200:
                 product = _parse_product_page(response.text, clean_num)
                 product.product_url = str(response.url)
+                if not _verify_sku_match(response.text, clean_num):
+                    logger.warning(
+                        f"SKU mismatch for {clean_num} at {product_url} — "
+                        f"page SKU does not match requested article number"
+                    )
+                    product.error = "SKU-mismatch: nettside-data kan tilhøre feil produkt"
                 _save_to_cache(product)
                 return product
 
