@@ -689,6 +689,25 @@ async def _run_analysis(
     job = jobs[job_id]
     job.status = JobStatus.RUNNING
 
+    # --- Deduplicate article numbers to avoid duplicate HTTP requests ---
+    # Preserve original order and count for output mapping
+    unique_articles: list[str] = []
+    seen: set[str] = set()
+    duplicate_count = 0
+    for art in article_numbers:
+        if art not in seen:
+            seen.add(art)
+            unique_articles.append(art)
+        else:
+            duplicate_count += 1
+
+    if duplicate_count:
+        logger.info(
+            f"[{job_id}] Dedup: {len(article_numbers)} rows → "
+            f"{len(unique_articles)} unique articles "
+            f"({duplicate_count} duplicate fetches prevented)"
+        )
+
     semaphore = asyncio.Semaphore(SCRAPE_CONCURRENCY)
 
     async def process_product(article_number: str) -> Optional[ProductAnalysis]:
@@ -842,16 +861,19 @@ async def _run_analysis(
                 await asyncio.sleep(SCRAPE_DELAY)
 
     try:
-        tasks = [process_product(art) for art in article_numbers]
+        # Process only unique articles — duplicate rows reuse the same result
+        tasks = [process_product(art) for art in unique_articles]
+        result_map: dict[str, ProductAnalysis] = {}
+        cache_hits = 0
 
         for coro in asyncio.as_completed(tasks):
             result = await coro
             if result is None:
                 continue  # Job was cancelled
-            job.results.append(result)
+            result_map[result.article_number] = result
             job.processed_products += 1
             logger.info(
-                f"[{job_id}] Progress: {job.processed_products}/{job.total_products} "
+                f"[{job_id}] Progress: {job.processed_products}/{len(unique_articles)} "
                 f"({result.article_number}: {result.overall_status.value})"
             )
 
@@ -859,9 +881,22 @@ async def _run_analysis(
             logger.info(f"[{job_id}] Analysis cancelled by user")
             return
 
-        # Sort results to match input order
-        order_map = {art: idx for idx, art in enumerate(article_numbers)}
-        job.results.sort(key=lambda r: order_map.get(r.article_number, 999999))
+        # Map results back to all original rows (including duplicates)
+        for art in article_numbers:
+            if art in result_map:
+                job.results.append(result_map[art])
+
+        # Update processed count to include duplicates for progress reporting
+        job.processed_products = len(job.results)
+
+        logger.info(
+            f"[{job_id}] Fetch stats: {len(article_numbers)} rows, "
+            f"{len(unique_articles)} unique fetches, "
+            f"{duplicate_count} duplicate fetches prevented"
+        )
+
+        # Results are already in input order from the article_numbers loop above.
+        # No sort needed — duplicate rows preserve their original positions.
 
         # Selector health check — warn if key website fields missing in >50% of found products
         found_results = [r for r in job.results if r.product_data.found_on_onemed]
