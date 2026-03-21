@@ -108,6 +108,37 @@ class ProductAnalysis(BaseModel):
     enrichment_results: list[EnrichmentResult] = []
     pdf_available: bool = False
     pdf_url: Optional[str] = None
+    # AI scoring results (populated by ai_scorer)
+    ai_score: Optional[dict] = None
+    ai_enrichment: Optional[dict] = None
+
+
+class AIScoreResult(BaseModel):
+    """Result from AI-powered product quality scoring."""
+    overall_score: float = 0.0
+    field_scores: dict[str, float] = {}
+    issues: list[str] = []
+    improvement_suggestions: list[str] = []
+
+
+class AIEnrichmentResult(BaseModel):
+    """Result from AI-powered product enrichment."""
+    improved_description: Optional[str] = None
+    missing_specifications: list[str] = []
+    suggested_category: Optional[str] = None
+    packaging_suggestions: Optional[str] = None
+
+
+class BatchEvaluationItem(BaseModel):
+    """Single item in batch evaluation results."""
+    article_number: str
+    product_name: Optional[str] = None
+    rule_score: float = 0.0
+    ai_score: Optional[float] = None
+    combined_score: float = 0.0
+    flag: str = "Needs review"  # "OK", "Needs review", "Critical"
+    issues: list[str] = []
+    improvement_suggestions: list[str] = []
 
 
 class BatchMode(str, Enum):

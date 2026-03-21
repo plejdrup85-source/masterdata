@@ -234,9 +234,11 @@ def _parse_product_page(html: str, article_number: str) -> ProductData:
     # Product URL
     product.product_url = ld_info.get("url")
 
-    # Try to extract specification table
-    spec_tables = soup.find_all("table")
+    # Try to extract specification from multiple sources
     specs = {}
+
+    # Source 1: HTML tables
+    spec_tables = soup.find_all("table")
     for table in spec_tables:
         rows = table.find_all("tr")
         for row in rows:
@@ -244,11 +246,53 @@ def _parse_product_page(html: str, article_number: str) -> ProductData:
             if len(cells) >= 2:
                 key = cells[0].get_text(strip=True)
                 val = cells[1].get_text(strip=True)
-                if key and val:
+                if key and val and len(key) < 100:
                     specs[key] = val
+
+    # Source 2: Definition lists (dl/dt/dd)
+    for dl in soup.find_all("dl"):
+        dts = dl.find_all("dt")
+        dds = dl.find_all("dd")
+        for dt, dd in zip(dts, dds):
+            key = dt.get_text(strip=True)
+            val = dd.get_text(strip=True)
+            if key and val:
+                specs[key] = val
+
+    # Source 3: Key-value divs with common class patterns
+    for el in soup.find_all(["div", "section", "ul"], class_=re.compile(
+        r"spec|detail|attribute|property|feature|technical|egenskap", re.I
+    )):
+        # Try list items
+        items = el.find_all("li")
+        for item in items:
+            text = item.get_text(strip=True)
+            if ":" in text:
+                parts = text.split(":", 1)
+                if len(parts) == 2 and parts[0].strip() and parts[1].strip():
+                    specs[parts[0].strip()] = parts[1].strip()
+        # Try nested key-value spans/divs
+        labels = el.find_all(class_=re.compile(r"label|key|name", re.I))
+        values = el.find_all(class_=re.compile(r"value|data|content", re.I))
+        for label, value in zip(labels, values):
+            k = label.get_text(strip=True)
+            v = value.get_text(strip=True)
+            if k and v:
+                specs[k] = v
+
     if specs:
         product.technical_details = specs
         product.specification = "; ".join(f"{k}: {v}" for k, v in specs.items())
+
+    # Source 4: If no structured specs found, check for spec text in description-like blocks
+    if not specs and not product.specification:
+        spec_block = soup.find(["div", "section"], class_=re.compile(
+            r"spec|technical|egenskap", re.I
+        ))
+        if spec_block:
+            spec_text = spec_block.get_text(strip=True)
+            if spec_text and len(spec_text) > 10:
+                product.specification = spec_text
 
     # Extract packaging info from page text
     page_text = soup.get_text()

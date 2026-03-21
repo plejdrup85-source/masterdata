@@ -1,4 +1,8 @@
-"""Masterdata quality analysis engine."""
+"""Masterdata quality analysis engine.
+
+Validates product data quality and scores each field.
+Handles cases where data exists but in unexpected formats.
+"""
 
 import logging
 import re
@@ -27,6 +31,18 @@ FIELD_WEIGHTS = {
     "Pakningsinformasjon": 1.0,
     "Bildekvalitet": 1.5,
     "Konsistens mellom felter": 0.5,
+}
+
+# Technical/measurable keywords that indicate specification content
+SPEC_KEYWORDS = {
+    "mm", "cm", "m", "ml", "l", "g", "kg", "stk", "pk", "µm",
+    "størrelse", "size", "materiale", "material", "farge", "color",
+    "vekt", "weight", "lengde", "length", "bredde", "width",
+    "høyde", "height", "tykkelse", "thickness", "diameter",
+    "latex", "nitril", "vinyl", "polyester", "bomull", "cotton",
+    "steril", "sterile", "usteril", "non-sterile",
+    "engangs", "disposable", "flergangs", "reusable",
+    "ce-merket", "ce-marked", "iso", "en-", "astm",
 }
 
 
@@ -111,36 +127,111 @@ def _analyze_description(product: ProductData) -> FieldAnalysis:
     return analysis
 
 
+def _has_measurable_content(text: str) -> bool:
+    """Check if text contains measurable/technical information."""
+    if not text:
+        return False
+    text_lower = text.lower()
+    # Check for technical keywords
+    keyword_count = sum(1 for kw in SPEC_KEYWORDS if kw in text_lower)
+    if keyword_count >= 2:
+        return True
+    # Check for numeric patterns with units (e.g. "100 ml", "25cm", "3.5 kg")
+    unit_pattern = r'\d+[\.,]?\d*\s*(?:mm|cm|m|ml|l|g|kg|stk|pk|µm|%)'
+    if len(re.findall(unit_pattern, text_lower)) >= 1:
+        return True
+    # Check for key:value patterns (e.g. "Materiale: Nitril")
+    kv_pattern = r'[\w]+\s*[:=]\s*[\w]+'
+    if len(re.findall(kv_pattern, text)) >= 2:
+        return True
+    return False
+
+
+def _count_structured_attributes(details: dict, spec: str) -> int:
+    """Count the number of meaningful structured attributes."""
+    count = 0
+    if details:
+        count += len(details)
+    if spec and not details:
+        # Count semicolon-separated or line-separated attributes
+        separators = spec.count(";") + spec.count("\n")
+        if separators > 0:
+            count += separators + 1
+    return count
+
+
 def _analyze_specification(product: ProductData) -> FieldAnalysis:
-    """Analyze product specification quality."""
+    """Analyze product specification quality.
+
+    Valid if:
+    - At least 2 structured attributes exist in technical_details
+    - OR specification text contains measurable/technical info
+    - OR description contains substantial technical details
+    """
     spec = product.specification
     details = product.technical_details
 
+    # Build current_value from all available sources
+    display_value = spec
+    if details and not display_value:
+        display_value = "; ".join(f"{k}: {v}" for k, v in details.items())
+
     analysis = FieldAnalysis(
         field_name="Spesifikasjon",
-        current_value=spec,
+        current_value=display_value,
     )
 
+    # Count structured attributes from technical_details
+    attr_count = _count_structured_attributes(details, spec)
+
+    # Check for technical content in spec text
+    has_tech_content = _has_measurable_content(spec)
+
+    # Also check description for embedded technical info
+    has_tech_in_desc = _has_measurable_content(product.description)
+
+    # Determine status
     if not spec and not details:
-        analysis.status = QualityStatus.MISSING
-        analysis.comment = "Spesifikasjoner mangler helt. B\u00f8r innhentes fra produsent."
+        if has_tech_in_desc:
+            analysis.status = QualityStatus.SHOULD_IMPROVE
+            analysis.comment = (
+                "Spesifikasjoner mangler som eget felt, men beskrivelsen inneholder "
+                "teknisk informasjon. Bør struktureres som egne spesifikasjonsfelter."
+            )
+        else:
+            analysis.status = QualityStatus.MISSING
+            analysis.comment = "Spesifikasjoner mangler helt. Bør innhentes fra produsent."
         return analysis
 
     issues = []
 
-    if details and len(details) < 2:
-        issues.append("F\u00e5 spesifikasjonsfelter (kun {})".format(len(details)))
+    if attr_count < 2 and not has_tech_content:
+        issues.append(f"Få spesifikasjonsfelter (kun {attr_count})")
 
-    expected_fields = {"st\u00f8rrelse", "size", "materiale", "material", "farge", "color", "vekt", "weight"}
+    # Check if spec just repeats the product name or description
+    if spec and product.product_name:
+        if spec.strip().lower() == product.product_name.strip().lower():
+            issues.append("Spesifikasjon er identisk med produktnavn")
+    if spec and product.description:
+        if spec.strip().lower() == product.description.strip().lower():
+            issues.append("Spesifikasjon er identisk med beskrivelse")
+
+    expected_fields = {
+        "størrelse", "size", "materiale", "material", "farge", "color",
+        "vekt", "weight", "lengde", "length", "bredde", "width",
+    }
     if details:
         detail_keys_lower = {k.lower() for k in details.keys()}
         matching = expected_fields & detail_keys_lower
-        if not matching:
-            issues.append("Mangler vanlige spesifikasjoner (st\u00f8rrelse, materiale, farge, vekt)")
+        if not matching and attr_count < 3:
+            issues.append("Mangler vanlige spesifikasjoner (størrelse, materiale, farge, vekt)")
 
     if not issues:
         analysis.status = QualityStatus.OK
-        analysis.comment = "Spesifikasjoner OK"
+        if attr_count >= 2:
+            analysis.comment = f"Spesifikasjoner OK ({attr_count} attributter)"
+        else:
+            analysis.comment = "Spesifikasjoner OK (teknisk innhold funnet)"
     else:
         analysis.status = QualityStatus.SHOULD_IMPROVE
         analysis.comment = "; ".join(issues)
@@ -202,33 +293,71 @@ def _analyze_manufacturer_article_number(product: ProductData) -> FieldAnalysis:
 
 
 def _analyze_category(product: ProductData) -> FieldAnalysis:
-    """Analyze product categorization."""
+    """Analyze product categorization.
+
+    Valid if:
+    - Breadcrumb hierarchy exists (any depth)
+    - OR category field exists with meaningful content
+    - OR product URL contains category path segments
+    """
     cat = product.category
     breadcrumbs = product.category_breadcrumb
 
+    # Build display value from all available sources
+    display_value = None
+    if breadcrumbs and len(breadcrumbs) > 0:
+        display_value = " > ".join(breadcrumbs)
+    elif cat:
+        display_value = cat
+
+    # Try to extract category from product URL if nothing else exists
+    url_category = None
+    if not cat and not breadcrumbs and product.product_url:
+        # URLs like /nb-no/products/i0016351/category-slug
+        url_parts = [
+            p for p in product.product_url.split("/")
+            if p and p not in ("nb-no", "products", "https:", "http:", "www.onemed.no")
+            and not p.startswith("i00")  # internal ID
+        ]
+        if url_parts:
+            url_category = url_parts[-1].replace("-", " ").title()
+
     analysis = FieldAnalysis(
         field_name="Kategori",
-        current_value=cat if cat else (
-            " > ".join(breadcrumbs) if breadcrumbs else None
-        ),
+        current_value=display_value or url_category,
     )
 
-    if not cat and not breadcrumbs:
-        analysis.status = QualityStatus.MISSING
-        analysis.comment = "Kategori mangler helt"
+    # Determine if we have any category information at all
+    has_category = bool(cat) or bool(breadcrumbs and len(breadcrumbs) > 0)
+
+    if not has_category:
+        if url_category:
+            analysis.status = QualityStatus.SHOULD_IMPROVE
+            analysis.comment = f"Kategori mangler, men URL antyder: {url_category}"
+        else:
+            analysis.status = QualityStatus.MISSING
+            analysis.comment = "Kategori mangler helt"
         return analysis
 
     issues = []
 
     if breadcrumbs and len(breadcrumbs) < 2:
-        issues.append("Kategorihierarki er grunt (kun 1 niv\u00e5)")
+        issues.append("Kategorihierarki er grunt (kun 1 nivå)")
 
-    if cat and len(cat) < 3:
+    if cat and len(cat.strip()) < 3:
         issues.append("Kategorinavn er for kort/generisk")
+
+    # Check for placeholder categories
+    placeholders = {"ukjent", "annet", "diverse", "other", "uncategorized"}
+    if cat and cat.lower().strip() in placeholders:
+        issues.append("Kategori er en placeholder-verdi")
 
     if not issues:
         analysis.status = QualityStatus.OK
-        analysis.comment = "Kategorisering OK"
+        if breadcrumbs and len(breadcrumbs) >= 2:
+            analysis.comment = f"Kategorisering OK ({len(breadcrumbs)} nivåer)"
+        else:
+            analysis.comment = "Kategorisering OK"
     else:
         analysis.status = QualityStatus.SHOULD_IMPROVE
         analysis.comment = "; ".join(issues)

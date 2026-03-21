@@ -15,6 +15,7 @@ from fastapi import FastAPI, File, HTTPException, Query, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse, HTMLResponse
 
+from backend.ai_scorer import enrich_product_async, score_product_async
 from backend.analyzer import analyze_product
 from backend.excel_handler import create_output_excel, read_article_numbers
 from backend.image_analyzer import analyze_product_images
@@ -36,7 +37,7 @@ logger = logging.getLogger(__name__)
 app = FastAPI(
     title="Masterdata Kvalitetssjekk",
     description="Kvalitetsanalyse av produktkatalog mot onemed.no",
-    version="1.2.0",
+    version="2.0.0",
 )
 
 # CORS - allow Render domain and localhost for dev
@@ -132,7 +133,7 @@ async def root():
 @app.get("/api/health")
 async def health_check():
     """Health check endpoint."""
-    return {"status": "ok", "version": "1.2.0", "active_jobs": len(jobs)}
+    return {"status": "ok", "version": "2.0.0", "active_jobs": len(jobs)}
 
 
 def _apply_batch_selection(
@@ -400,6 +401,8 @@ async def get_results(job_id: str):
                     e for e in r.enrichment_results
                     if e.match_status == "FOUND_IN_BOTH_CONFLICT"
                 ]),
+                "ai_score": r.ai_score,
+                "ai_enrichment": r.ai_enrichment,
                 "field_analyses": [
                     {
                         "field_name": fa.field_name,
@@ -416,6 +419,125 @@ async def get_results(job_id: str):
             for r in job.results
         ],
     }
+
+
+@app.post("/api/score-product")
+async def score_product_endpoint(data: dict):
+    """Score a single product using Claude AI.
+
+    Input: {product_name, description, specification, category, packaging}
+    Returns: {overall_score, field_scores, issues, improvement_suggestions}
+    """
+    result = await score_product_async(
+        product_name=data.get("product_name"),
+        description=data.get("description"),
+        specification=data.get("specification"),
+        category=data.get("category"),
+        packaging=data.get("packaging"),
+    )
+    if result is None:
+        raise HTTPException(
+            503,
+            "AI-scoring er ikke tilgjengelig. Sjekk at ANTHROPIC_API_KEY er satt."
+        )
+    return result
+
+
+@app.post("/api/enrich-product")
+async def enrich_product_endpoint(data: dict):
+    """Get AI-powered enrichment suggestions for a product.
+
+    Input: {product_name, description, specification, category, packaging}
+    Returns: {improved_description, missing_specifications, suggested_category, packaging_suggestions}
+    """
+    result = await enrich_product_async(
+        product_name=data.get("product_name"),
+        description=data.get("description"),
+        specification=data.get("specification"),
+        category=data.get("category"),
+        packaging=data.get("packaging"),
+    )
+    if result is None:
+        raise HTTPException(
+            503,
+            "AI-berikelse er ikke tilgjengelig. Sjekk at ANTHROPIC_API_KEY er satt."
+        )
+    return result
+
+
+@app.post("/api/batch-evaluate")
+async def batch_evaluate_endpoint(data: dict):
+    """Evaluate a batch of products and return scores + flags.
+
+    Input: {products: [{product_name, description, specification, category, packaging}, ...]}
+    Returns: {results: [{article_number, score, flag, issues, ...}, ...]}
+    """
+    products = data.get("products", [])
+    if not products:
+        raise HTTPException(400, "Ingen produkter å evaluere")
+    if len(products) > 50:
+        raise HTTPException(400, "Maks 50 produkter per batch-evaluering")
+
+    results = []
+    for product in products:
+        # Rule-based score (from analyzer)
+        rule_score = 0.0
+        issues = []
+
+        # Quick rule-based checks
+        if not product.get("product_name"):
+            issues.append("Produktnavn mangler")
+        if not product.get("description"):
+            issues.append("Beskrivelse mangler")
+        if not product.get("specification"):
+            issues.append("Spesifikasjon mangler")
+        if not product.get("category"):
+            issues.append("Kategori mangler")
+        if not product.get("packaging"):
+            issues.append("Pakningsinfo mangler")
+
+        fields_present = 5 - len(issues)
+        rule_score = fields_present / 5 * 100
+
+        # AI score (if available)
+        ai_result = await score_product_async(
+            product_name=product.get("product_name"),
+            description=product.get("description"),
+            specification=product.get("specification"),
+            category=product.get("category"),
+            packaging=product.get("packaging"),
+        )
+
+        ai_score = ai_result["overall_score"] if ai_result else None
+        ai_issues = ai_result.get("issues", []) if ai_result else []
+        ai_suggestions = ai_result.get("improvement_suggestions", []) if ai_result else []
+
+        # Combined score: weight rule-based 40%, AI 60% (if available)
+        if ai_score is not None:
+            combined = rule_score * 0.4 + ai_score * 0.6
+        else:
+            combined = rule_score
+
+        # Flag
+        if combined >= 70:
+            flag = "OK"
+        elif combined >= 40:
+            flag = "Needs review"
+        else:
+            flag = "Critical"
+
+        results.append({
+            "article_number": product.get("article_number", ""),
+            "product_name": product.get("product_name"),
+            "rule_score": round(rule_score, 1),
+            "ai_score": round(ai_score, 1) if ai_score is not None else None,
+            "combined_score": round(combined, 1),
+            "flag": flag,
+            "issues": issues + ai_issues,
+            "improvement_suggestions": ai_suggestions,
+        })
+
+    return {"results": results}
 
 
 def _apply_enrichment_to_analysis(analysis: ProductAnalysis) -> None:
@@ -579,6 +701,35 @@ async def _run_analysis(
 
                 # Apply enrichment suggestions to field_analyses (PDF takes priority)
                 _apply_enrichment_to_analysis(analysis)
+
+                # Step 6: AI scoring and enrichment (if API key configured)
+                job.current_step = "ai_scoring"
+                try:
+                    ai_score_result = await score_product_async(
+                        product_name=product_data.product_name,
+                        description=product_data.description,
+                        specification=product_data.specification,
+                        category=product_data.category,
+                        packaging=product_data.packaging_info or product_data.packaging_unit,
+                    )
+                    if ai_score_result:
+                        analysis.ai_score = ai_score_result
+                        logger.info(
+                            f"[{job_id}] AI score for {article_number}: "
+                            f"{ai_score_result.get('overall_score', 'N/A')}"
+                        )
+
+                    ai_enrich_result = await enrich_product_async(
+                        product_name=product_data.product_name,
+                        description=product_data.description,
+                        specification=product_data.specification,
+                        category=product_data.category,
+                        packaging=product_data.packaging_info or product_data.packaging_unit,
+                    )
+                    if ai_enrich_result:
+                        analysis.ai_enrichment = ai_enrich_result
+                except Exception as e:
+                    logger.warning(f"[{job_id}] AI scoring failed for {article_number}: {e}")
 
                 return analysis
 

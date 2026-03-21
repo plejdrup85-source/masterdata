@@ -11,4 +11,5 @@ Pillow>=11.0.0
 numpy>=2.0.0
 opencv-python-headless>=4.10.0
 pdfplumber>=0.11.0
+anthropic>=0.43.0
 # playwright==1.49.1  # Optional: install locally for dynamic content support

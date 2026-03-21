@@ -549,6 +549,7 @@
                                 <th>Artikkelnr</th>
                                 <th>Produktnavn</th>
                                 <th>Score</th>
+                                <th>AI Score</th>
                                 <th>Bilde</th>
                                 <th>Status</th>
                                 <th>Produsent</th>
@@ -633,6 +634,7 @@
             'manufacturer_lookup': 'Produsentoppslag',
             'pdf_enrichment': 'PDF-berikelse',
             'quality_analysis': 'Kvalitetsanalyse',
+            'ai_scoring': 'AI-vurdering (Claude)',
         };
 
         // File selection
@@ -876,6 +878,19 @@
                     </div>
                 `;
 
+                // AI score stats
+                const aiScores = results.filter(r => r.ai_score && r.ai_score.overall_score !== undefined).map(r => r.ai_score.overall_score);
+                const avgAiScore = aiScores.length > 0 ? (aiScores.reduce((a,b) => a+b, 0) / aiScores.length).toFixed(0) : null;
+
+                if (avgAiScore !== null) {
+                    statsGrid.innerHTML += `
+                        <div class="stat-card ${parseFloat(avgAiScore) >= 70 ? 'success' : parseFloat(avgAiScore) >= 40 ? 'warning' : 'danger'}">
+                            <div class="value">${avgAiScore}</div>
+                            <div class="label">Snitt AI-score</div>
+                        </div>
+                    `;
+                }
+
                 // Enrichment stats
                 const pdfCount = results.filter(r => r.pdf_available).length;
                 const enrichedCount = results.filter(r => r.enrichment_count > 0).length;
@@ -951,18 +966,66 @@
                         `;
                     }
 
+                    // AI score display
+                    const aiScore = r.ai_score ? r.ai_score.overall_score : null;
+                    const aiScoreDisplay = aiScore !== null ? Math.round(aiScore) : '-';
+                    const aiScoreClass = aiScore !== null ? (aiScore >= 70 ? 'status-ok' : aiScore >= 40 ? 'status-improve' : 'status-missing') : '';
+
+                    // AI enrichment detail section
+                    let aiDetailHtml = '';
+                    if (r.ai_score || r.ai_enrichment) {
+                        aiDetailHtml = '<div style="margin-top:0.75rem"><h4 style="font-size:0.85rem;font-weight:600;margin-bottom:0.5rem">AI-vurdering (Claude)</h4>';
+
+                        if (r.ai_score) {
+                            const fs = r.ai_score.field_scores || {};
+                            aiDetailHtml += '<div class="field-grid">';
+                            for (const [key, val] of Object.entries(fs)) {
+                                const labels = {name:'Navn',description:'Beskrivelse',specification:'Spesifikasjon',category:'Kategori',packaging:'Pakning'};
+                                const label = labels[key] || key;
+                                const sc = Math.round(val);
+                                const cls = sc >= 70 ? 'ok' : sc >= 40 ? 'improve' : 'missing';
+                                aiDetailHtml += `<div class="field-item"><span class="field-status ${cls}"></span><span class="field-name">${label}</span><span class="field-comment">${sc}/100</span></div>`;
+                            }
+                            aiDetailHtml += '</div>';
+
+                            if (r.ai_score.issues && r.ai_score.issues.length > 0) {
+                                aiDetailHtml += '<div style="margin-top:0.5rem;font-size:0.8rem;color:var(--danger)"><strong>Problemer:</strong> ' + r.ai_score.issues.map(i => escapeHtml(i)).join('; ') + '</div>';
+                            }
+                            if (r.ai_score.improvement_suggestions && r.ai_score.improvement_suggestions.length > 0) {
+                                aiDetailHtml += '<div style="margin-top:0.3rem;font-size:0.8rem;color:var(--primary)"><strong>Forslag:</strong> ' + r.ai_score.improvement_suggestions.map(s => escapeHtml(s)).join('; ') + '</div>';
+                            }
+                        }
+
+                        if (r.ai_enrichment) {
+                            aiDetailHtml += '<div style="margin-top:0.5rem;font-size:0.8rem">';
+                            if (r.ai_enrichment.improved_description) {
+                                aiDetailHtml += '<div style="margin-top:0.3rem"><strong>Forbedret beskrivelse:</strong> <span style="color:var(--text-muted)">' + escapeHtml(r.ai_enrichment.improved_description.substring(0, 200)) + (r.ai_enrichment.improved_description.length > 200 ? '...' : '') + '</span></div>';
+                            }
+                            if (r.ai_enrichment.missing_specifications && r.ai_enrichment.missing_specifications.length > 0) {
+                                aiDetailHtml += '<div style="margin-top:0.3rem"><strong>Manglende spesifikasjoner:</strong> ' + r.ai_enrichment.missing_specifications.map(s => escapeHtml(s)).join(', ') + '</div>';
+                            }
+                            if (r.ai_enrichment.suggested_category) {
+                                aiDetailHtml += '<div style="margin-top:0.3rem"><strong>Foreslått kategori:</strong> ' + escapeHtml(r.ai_enrichment.suggested_category) + '</div>';
+                            }
+                            aiDetailHtml += '</div>';
+                        }
+
+                        aiDetailHtml += '</div>';
+                    }
+
                     return `
                         <tr class="expandable" data-idx="${idx}" onclick="toggleDetail(${idx})">
                             <td>${escapeHtml(r.article_number)}</td>
                             <td title="${escapeHtml(r.product_name || '')}">${escapeHtml(r.product_name || '-')}</td>
                             <td>${r.score}%</td>
+                            <td>${aiScore !== null ? `<span class="status-badge ${aiScoreClass}">${aiScoreDisplay}</span>` : '<span style="color:var(--text-muted)">-</span>'}</td>
                             <td><span class="status-badge ${imgClass}" title="${imgStatus}: ${imgCount} bilde(r)">${imgLabel}</span></td>
                             <td><span class="status-badge ${getStatusClass(r.status)}">${escapeHtml(r.status)}</span></td>
                             <td>${escapeHtml(r.manufacturer || '-')}</td>
                             <td title="${escapeHtml(r.comment || '')}">${escapeHtml(r.comment || '-')}</td>
                         </tr>
                         <tr class="detail-row" id="detail-${idx}">
-                            <td colspan="7">
+                            <td colspan="8">
                                 <div class="detail-content">
                                     <h4>Feltanalyse for ${escapeHtml(r.article_number)}</h4>
                                     <div class="field-grid">
@@ -991,6 +1054,7 @@
                                             </div>` : ''}
                                         </div>
                                     </div>` : ''}
+                                    ${aiDetailHtml}
                                 </div>
                             </td>
                         </tr>
