@@ -24,7 +24,7 @@ from backend.manufacturer import (
 )
 from backend.models import AnalysisJob, BatchMode, JobStatus, ProductAnalysis, ProductData, QualityStatus
 from backend.pdf_enricher import run_enrichment_pipeline
-from backend.scraper import scrape_product
+from backend.scraper import scrape_product, _load_sitemap, _sitemap_loaded
 
 # Configure logging
 logging.basicConfig(
@@ -36,7 +36,7 @@ logger = logging.getLogger(__name__)
 app = FastAPI(
     title="Masterdata Kvalitetssjekk",
     description="Kvalitetsanalyse av produktkatalog mot onemed.no",
-    version="1.1.0",
+    version="1.2.0",
 )
 
 # CORS - allow Render domain and localhost for dev
@@ -52,6 +52,18 @@ app.add_middleware(
     allow_methods=["GET", "POST", "DELETE"],
     allow_headers=["*"],
 )
+
+
+@app.on_event("startup")
+async def preload_sitemap():
+    """Pre-download the product sitemap on startup for faster lookups."""
+    try:
+        import httpx
+        async with httpx.AsyncClient() as client:
+            await _load_sitemap(client)
+        logger.info("Sitemap pre-loaded on startup")
+    except Exception as e:
+        logger.warning(f"Failed to pre-load sitemap on startup: {e}")
 
 # In-memory job storage
 jobs: dict[str, AnalysisJob] = {}
@@ -120,7 +132,7 @@ async def root():
 @app.get("/api/health")
 async def health_check():
     """Health check endpoint."""
-    return {"status": "ok", "version": "1.1.0", "active_jobs": len(jobs)}
+    return {"status": "ok", "version": "1.2.0", "active_jobs": len(jobs)}
 
 
 def _apply_batch_selection(
@@ -498,27 +510,33 @@ async def _run_analysis(
                     article_number, use_cache=not skip_cache
                 )
 
-                # Step 2: Analyze product images with CV (only if product found)
+                # Step 2: Analyze product images with CV
+                # Always run - CDN URLs use article numbers directly, no scraping needed
                 image_quality_dict = None
-                if product_data.found_on_onemed:
-                    job.current_step = "image_analysis"
-                    logger.info(f"[{job_id}] Image analysis for {article_number}")
-                    image_summary = await analyze_product_images(article_number)
-                    image_quality_dict = image_summary.to_dict()
+                job.current_step = "image_analysis"
+                logger.info(f"[{job_id}] Image analysis for {article_number}")
+                image_summary = await analyze_product_images(article_number)
+                image_quality_dict = image_summary.to_dict()
 
-                    # Update product_data with image info from CV analysis
-                    product_data.image_quality_ok = image_summary.main_image_exists
-                    if image_summary.main_image_exists and image_summary.image_analyses:
-                        product_data.image_url = image_summary.image_analyses[0].image_url
+                # Update product_data with image info from CV analysis
+                product_data.image_quality_ok = image_summary.main_image_exists
+                if image_summary.main_image_exists and image_summary.image_analyses:
+                    product_data.image_url = image_summary.image_analyses[0].image_url
 
-                # Step 3-5 only run if product was found on OneMed
+                # If scraper failed but images exist on CDN, mark product as found
+                if not product_data.found_on_onemed and image_summary.main_image_exists:
+                    product_data.found_on_onemed = True
+                    product_data.error = None
+                    logger.info(f"[{job_id}] {article_number} confirmed via CDN image")
+
+                # Step 3-5: enrichment pipeline
                 mfr_data = None
                 enrichment_results = []
                 pdf_exists = False
                 pdf_url = None
 
+                # Step 3: Manufacturer lookup (only if product found and data incomplete)
                 if product_data.found_on_onemed:
-                    # Step 3: Check if manufacturer lookup is needed (lightweight check, no full analysis)
                     needs_mfr = (
                         not product_data.manufacturer
                         or not product_data.manufacturer_article_number
@@ -529,12 +547,12 @@ async def _run_analysis(
                         logger.info(f"[{job_id}] Manufacturer lookup for {article_number}")
                         mfr_data = await search_manufacturer_info(product_data)
 
-                    # Step 4: PDF enrichment pipeline (primary: internal PDF, fallback: manufacturer)
-                    job.current_step = "pdf_enrichment"
-                    logger.info(f"[{job_id}] Enrichment pipeline for {article_number}")
-                    pdf_exists, pdf_url, enrichment_results = await run_enrichment_pipeline(
-                        article_number, product_data, manufacturer_data=mfr_data
-                    )
+                # Step 4: PDF enrichment - always try (PDF CDN uses article numbers directly)
+                job.current_step = "pdf_enrichment"
+                logger.info(f"[{job_id}] Enrichment pipeline for {article_number}")
+                pdf_exists, pdf_url, enrichment_results = await run_enrichment_pipeline(
+                    article_number, product_data, manufacturer_data=mfr_data
+                )
 
                 # Step 5: Quality analysis (with all collected data)
                 job.current_step = "quality_analysis"
