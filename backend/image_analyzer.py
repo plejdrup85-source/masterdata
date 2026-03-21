@@ -448,7 +448,7 @@ async def analyze_product_images(
                         continue
 
                     # Analyze the image
-                    result = await asyncio.get_event_loop().run_in_executor(
+                    result = await asyncio.get_running_loop().run_in_executor(
                         None,
                         analyze_image_data,
                         response.content,

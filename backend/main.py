@@ -191,6 +191,13 @@ async def upload_excel(
     # Cleanup old jobs first
     _cleanup_old_jobs()
 
+    # Rate limiting (simple per-upload check)
+    if not _check_rate_limit("global"):
+        raise HTTPException(
+            429,
+            f"For mange opplastinger. Maks {RATE_LIMIT_MAX} per {RATE_LIMIT_WINDOW} sekunder."
+        )
+
     if not file.filename:
         raise HTTPException(400, "Ingen fil valgt")
 
@@ -491,35 +498,45 @@ async def _run_analysis(
                     article_number, use_cache=not skip_cache
                 )
 
-                # Step 2: Analyze product images with CV
-                job.current_step = "image_analysis"
-                logger.info(f"[{job_id}] Image analysis for {article_number}")
-                image_summary = await analyze_product_images(article_number)
-                image_quality_dict = image_summary.to_dict()
-
-                # Update product_data with image info from CV analysis
-                product_data.image_quality_ok = image_summary.main_image_exists
-                if image_summary.main_image_exists and image_summary.image_analyses:
-                    product_data.image_url = image_summary.image_analyses[0].image_url
-
-                # Step 3: Search manufacturer if data is insufficient
-                mfr_data = None
+                # Step 2: Analyze product images with CV (only if product found)
+                image_quality_dict = None
                 if product_data.found_on_onemed:
-                    # Preliminary quality check to decide if manufacturer lookup is needed
-                    preliminary = analyze_product(product_data, image_quality=image_quality_dict)
-                    if preliminary.requires_manufacturer_contact or preliminary.total_score < 60:
+                    job.current_step = "image_analysis"
+                    logger.info(f"[{job_id}] Image analysis for {article_number}")
+                    image_summary = await analyze_product_images(article_number)
+                    image_quality_dict = image_summary.to_dict()
+
+                    # Update product_data with image info from CV analysis
+                    product_data.image_quality_ok = image_summary.main_image_exists
+                    if image_summary.main_image_exists and image_summary.image_analyses:
+                        product_data.image_url = image_summary.image_analyses[0].image_url
+
+                # Step 3-5 only run if product was found on OneMed
+                mfr_data = None
+                enrichment_results = []
+                pdf_exists = False
+                pdf_url = None
+
+                if product_data.found_on_onemed:
+                    # Step 3: Check if manufacturer lookup is needed (lightweight check, no full analysis)
+                    needs_mfr = (
+                        not product_data.manufacturer
+                        or not product_data.manufacturer_article_number
+                        or not product_data.specification and not product_data.technical_details
+                    )
+                    if needs_mfr:
                         job.current_step = "manufacturer_lookup"
                         logger.info(f"[{job_id}] Manufacturer lookup for {article_number}")
                         mfr_data = await search_manufacturer_info(product_data)
 
-                # Step 4: PDF enrichment pipeline (primary: internal PDF, fallback: manufacturer)
-                job.current_step = "pdf_enrichment"
-                logger.info(f"[{job_id}] Enrichment pipeline for {article_number}")
-                pdf_exists, pdf_url, enrichment_results = await run_enrichment_pipeline(
-                    article_number, product_data, manufacturer_data=mfr_data
-                )
+                    # Step 4: PDF enrichment pipeline (primary: internal PDF, fallback: manufacturer)
+                    job.current_step = "pdf_enrichment"
+                    logger.info(f"[{job_id}] Enrichment pipeline for {article_number}")
+                    pdf_exists, pdf_url, enrichment_results = await run_enrichment_pipeline(
+                        article_number, product_data, manufacturer_data=mfr_data
+                    )
 
-                # Step 5: Final quality analysis (with all enrichment data)
+                # Step 5: Quality analysis (with all collected data)
                 job.current_step = "quality_analysis"
                 analysis = analyze_product(product_data, image_quality=image_quality_dict)
                 analysis.image_quality = image_quality_dict

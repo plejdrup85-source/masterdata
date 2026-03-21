@@ -573,7 +573,6 @@
         let pollInterval = null;
         let selectedFile = null;
         let pollErrorCount = 0;
-        let fullResults = null;
 
         // DOM elements
         const fileInput = document.getElementById('fileInput');
@@ -826,7 +825,7 @@
             try {
                 const resp = await fetch(`${API_BASE}/api/results/${currentJobId}`);
                 const data = await resp.json();
-                fullResults = data.results;
+
 
                 const results = data.results;
                 const total = results.length;
@@ -1078,7 +1077,6 @@
             }
             currentJobId = null;
             selectedFile = null;
-            fullResults = null;
             fileInput.value = '';
             fileName.classList.add('hidden');
             fileInfo.textContent = '';
