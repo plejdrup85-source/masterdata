@@ -15,6 +15,35 @@ class QualityStatus(str, Enum):
     REQUIRES_MANUFACTURER = "Krever produsent"
 
 
+class EnrichmentSourceLevel(str, Enum):
+    INTERNAL_PRODUCT_SHEET = "internal_product_sheet"
+    MANUFACTURER_SOURCE = "manufacturer_source"
+
+
+class EnrichmentMatchStatus(str, Enum):
+    FOUND_IN_INTERNAL_PDF = "FOUND_IN_INTERNAL_PDF"
+    FOUND_IN_MANUFACTURER_SOURCE = "FOUND_IN_MANUFACTURER_SOURCE"
+    FOUND_IN_BOTH_MATCH = "FOUND_IN_BOTH_MATCH"
+    FOUND_IN_BOTH_CONFLICT = "FOUND_IN_BOTH_CONFLICT"
+    NOT_FOUND = "NOT_FOUND"
+    REVIEW_REQUIRED = "REVIEW_REQUIRED"
+
+
+class EnrichmentResult(BaseModel):
+    """Enrichment result for a single field from the source-priority pipeline."""
+    artnr: str
+    field_name: str
+    current_value: Optional[str] = None
+    suggested_value: Optional[str] = None
+    source_level: Optional[str] = None  # EnrichmentSourceLevel value
+    source_url: Optional[str] = None
+    source_type: Optional[str] = None  # "PDF", "website", etc.
+    evidence_snippet: Optional[str] = None
+    confidence: float = 0.0
+    match_status: str = EnrichmentMatchStatus.NOT_FOUND.value
+    review_status: str = "auto"  # "auto", "needs_review", "conflict"
+
+
 class FieldAnalysis(BaseModel):
     field_name: str
     current_value: Optional[str] = None
@@ -75,6 +104,17 @@ class ProductAnalysis(BaseModel):
     suggested_manufacturer_message: Optional[str] = None
     # Image quality analysis (populated by image_analyzer)
     image_quality: Optional[dict] = None
+    # Enrichment results (populated by pdf_enricher pipeline)
+    enrichment_results: list[EnrichmentResult] = []
+    pdf_available: bool = False
+    pdf_url: Optional[str] = None
+
+
+class BatchMode(str, Enum):
+    FULL = "full"
+    RANGE = "range"
+    RANDOM = "random"
+    SPECIFIC = "specific"
 
 
 class JobStatus(str, Enum):
@@ -91,8 +131,12 @@ class AnalysisJob(BaseModel):
     total_products: int = 0
     processed_products: int = 0
     current_product: Optional[str] = None
+    current_step: Optional[str] = None  # e.g. "scraping", "image_analysis", "pdf_enrichment"
     results: list[ProductAnalysis] = []
     errors: list[str] = []
     output_file: Optional[str] = None
     created_at: float = Field(default_factory=time.time)
     cancelled: bool = False
+    # Batch selection metadata
+    batch_mode: str = BatchMode.FULL.value
+    batch_info: Optional[str] = None  # e.g. "Rader 1-200", "Random 100 (seed=42)"

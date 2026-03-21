@@ -10,4 +10,5 @@ aiofiles==24.1.0
 Pillow>=11.0.0
 numpy>=2.0.0
 opencv-python-headless>=4.10.0
+pdfplumber>=0.11.0
 # playwright==1.49.1  # Optional: install locally for dynamic content support

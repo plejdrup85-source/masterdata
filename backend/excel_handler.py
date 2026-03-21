@@ -115,7 +115,15 @@ def create_output_excel(
     ws_img_issues = wb.create_sheet("Bildeproblemer")
     _create_image_issues_sheet(ws_img_issues, results)
 
-    # Sheet 7: Summary Statistics
+    # Sheet 7: Enrichment Details
+    ws_enrichment = wb.create_sheet("Berikelse")
+    _create_enrichment_sheet(ws_enrichment, results)
+
+    # Sheet 8: Source Conflicts
+    ws_conflicts = wb.create_sheet("Kildekonflikter")
+    _create_conflicts_sheet(ws_conflicts, results)
+
+    # Sheet 9: Summary Statistics
     ws_stats = wb.create_sheet("Statistikk")
     _create_stats_sheet(ws_stats, results)
 
@@ -189,10 +197,14 @@ def _create_overview_sheet(ws, results: list[ProductAnalysis]) -> None:
         "Bildescore",
         "Bildestatus",
         "Antall bilder",
+        "PDF tilgjengelig",
+        "Berikelser funnet",
+        "Kildekonflikter",
         "Auto-fix",
         "Manuell vurdering",
         "Krever produsentkontakt",
         "Produkt-URL",
+        "PDF-URL",
     ]
 
     for col, header in enumerate(headers, 1):
@@ -202,6 +214,8 @@ def _create_overview_sheet(ws, results: list[ProductAnalysis]) -> None:
     for row_idx, result in enumerate(results, 2):
         pd = result.product_data
         iq = result.image_quality or {}
+        enriched = [e for e in result.enrichment_results if e.match_status != "NOT_FOUND"]
+        conflicts = [e for e in result.enrichment_results if e.match_status == "FOUND_IN_BOTH_CONFLICT"]
         ws.cell(row=row_idx, column=1, value=result.article_number)
         ws.cell(row=row_idx, column=2, value=pd.product_name or "")
         ws.cell(row=row_idx, column=3, value="Ja" if pd.found_on_onemed else "Nei")
@@ -219,10 +233,18 @@ def _create_overview_sheet(ws, results: list[ProductAnalysis]) -> None:
         img_status_cell = ws.cell(row=row_idx, column=10, value=img_status)
         _apply_image_status_style(img_status_cell, img_status)
         ws.cell(row=row_idx, column=11, value=img_count)
-        ws.cell(row=row_idx, column=12, value="Ja" if result.auto_fix_possible else "Nei")
-        ws.cell(row=row_idx, column=13, value="Ja" if result.manual_review_needed else "Nei")
-        ws.cell(row=row_idx, column=14, value="Ja" if result.requires_manufacturer_contact else "Nei")
-        ws.cell(row=row_idx, column=15, value=pd.product_url or "")
+        # Enrichment columns
+        ws.cell(row=row_idx, column=12, value="Ja" if result.pdf_available else "Nei")
+        ws.cell(row=row_idx, column=13, value=len(enriched))
+        conflict_cell = ws.cell(row=row_idx, column=14, value=len(conflicts))
+        if conflicts:
+            conflict_cell.fill = PatternFill(start_color="FFEB9C", end_color="FFEB9C", fill_type="solid")
+            conflict_cell.font = Font(color="9C6500")
+        ws.cell(row=row_idx, column=15, value="Ja" if result.auto_fix_possible else "Nei")
+        ws.cell(row=row_idx, column=16, value="Ja" if result.manual_review_needed else "Nei")
+        ws.cell(row=row_idx, column=17, value="Ja" if result.requires_manufacturer_contact else "Nei")
+        ws.cell(row=row_idx, column=18, value=pd.product_url or "")
+        ws.cell(row=row_idx, column=19, value=result.pdf_url or "")
 
     for col in range(1, len(headers) + 1):
         ws.column_dimensions[get_column_letter(col)].width = max(15, len(headers[col - 1]) + 5)
@@ -509,6 +531,126 @@ def _create_image_issues_sheet(ws, results: list[ProductAnalysis]) -> None:
     ws.freeze_panes = "A2"
 
 
+ENRICHMENT_STATUS_COLORS = {
+    "FOUND_IN_INTERNAL_PDF": "C6EFCE",
+    "FOUND_IN_MANUFACTURER_SOURCE": "D9E2F3",
+    "FOUND_IN_BOTH_MATCH": "C6EFCE",
+    "FOUND_IN_BOTH_CONFLICT": "FFEB9C",
+    "NOT_FOUND": "F2F2F2",
+    "REVIEW_REQUIRED": "FFC7CE",
+}
+
+
+def _apply_enrichment_status_style(cell, status: str) -> None:
+    fill_color = ENRICHMENT_STATUS_COLORS.get(status, "FFFFFF")
+    cell.fill = PatternFill(start_color=fill_color, end_color=fill_color, fill_type="solid")
+
+
+def _create_enrichment_sheet(ws, results: list[ProductAnalysis]) -> None:
+    """Create enrichment details sheet with one row per enriched field."""
+    headers = [
+        "Artikkelnummer",
+        "Felt",
+        "N\u00e5v\u00e6rende verdi",
+        "Foresl\u00e5tt verdi",
+        "Kildeniv\u00e5",
+        "Kildetype",
+        "Kilde-URL",
+        "Evidens",
+        "Confidence",
+        "Match-status",
+        "Gjennomgang",
+    ]
+
+    for col, header in enumerate(headers, 1):
+        ws.cell(row=1, column=col, value=header)
+    _style_header(ws, 1, len(headers))
+
+    row_idx = 2
+    for result in results:
+        for er in result.enrichment_results:
+            if er.match_status == "NOT_FOUND":
+                continue  # Skip empty results to keep sheet actionable
+            ws.cell(row=row_idx, column=1, value=result.article_number)
+            ws.cell(row=row_idx, column=2, value=er.field_name)
+            ws.cell(row=row_idx, column=3, value=er.current_value or "")
+            ws.cell(row=row_idx, column=4, value=er.suggested_value or "")
+            ws.cell(row=row_idx, column=5, value=er.source_level or "")
+            ws.cell(row=row_idx, column=6, value=er.source_type or "")
+            ws.cell(row=row_idx, column=7, value=er.source_url or "")
+            ws.cell(row=row_idx, column=8, value=er.evidence_snippet or "")
+            ws.cell(row=row_idx, column=9, value=round(er.confidence, 2) if er.confidence else 0)
+            status_cell = ws.cell(row=row_idx, column=10, value=er.match_status)
+            _apply_enrichment_status_style(status_cell, er.match_status)
+            ws.cell(row=row_idx, column=11, value=er.review_status)
+            row_idx += 1
+
+    if row_idx == 2:
+        ws.cell(row=2, column=1, value="Ingen berikelser funnet")
+
+    for col in range(1, len(headers) + 1):
+        ws.column_dimensions[get_column_letter(col)].width = max(14, len(headers[col - 1]) + 3)
+
+    ws.freeze_panes = "A2"
+    if row_idx > 2:
+        ws.auto_filter.ref = f"A1:{get_column_letter(len(headers))}{row_idx - 1}"
+
+
+def _create_conflicts_sheet(ws, results: list[ProductAnalysis]) -> None:
+    """Create source conflict sheet - shows fields where PDF and manufacturer disagree."""
+    headers = [
+        "Artikkelnummer",
+        "Produktnavn",
+        "Felt",
+        "N\u00e5v\u00e6rende verdi",
+        "PDF-verdi",
+        "Produsent-verdi",
+        "Evidens",
+        "Anbefaling",
+    ]
+
+    for col, header in enumerate(headers, 1):
+        ws.cell(row=1, column=col, value=header)
+    _style_header(ws, 1, len(headers))
+
+    row_idx = 2
+    for result in results:
+        for er in result.enrichment_results:
+            if er.match_status != "FOUND_IN_BOTH_CONFLICT":
+                continue
+            ws.cell(row=row_idx, column=1, value=result.article_number)
+            ws.cell(row=row_idx, column=2, value=result.product_data.product_name or "")
+            ws.cell(row=row_idx, column=3, value=er.field_name)
+            ws.cell(row=row_idx, column=4, value=er.current_value or "")
+            # Parse the evidence snippet to extract both values
+            evidence = er.evidence_snippet or ""
+            pdf_val = ""
+            mfr_val = ""
+            if "KONFLIKT" in evidence:
+                parts = evidence.split(" vs ")
+                if len(parts) == 2:
+                    pdf_val = parts[0].replace("KONFLIKT - PDF: ", "").strip("'")
+                    mfr_val = parts[1].replace("Produsent: ", "").strip("'")
+            ws.cell(row=row_idx, column=5, value=pdf_val)
+            ws.cell(row=row_idx, column=6, value=mfr_val)
+            ws.cell(row=row_idx, column=7, value=evidence)
+            ws.cell(row=row_idx, column=8, value="Manuell vurdering p\u00e5krevd")
+            # Color the row
+            for col in range(1, len(headers) + 1):
+                ws.cell(row=row_idx, column=col).fill = PatternFill(
+                    start_color="FFF2CC", end_color="FFF2CC", fill_type="solid"
+                )
+            row_idx += 1
+
+    if row_idx == 2:
+        ws.cell(row=2, column=1, value="Ingen kildekonflikter funnet")
+
+    for col in range(1, len(headers) + 1):
+        ws.column_dimensions[get_column_letter(col)].width = max(16, len(headers[col - 1]) + 4)
+
+    ws.freeze_panes = "A2"
+
+
 def _create_stats_sheet(ws, results: list[ProductAnalysis]) -> None:
     """Create summary statistics sheet."""
     title_font = Font(bold=True, size=14)
@@ -574,6 +716,39 @@ def _create_stats_sheet(ws, results: list[ProductAnalysis]) -> None:
         ("  Trenger gjennomgang:", img_review),
         ("  Feiler:", img_fail),
         ("  Mangler bilde:", img_missing),
+    ])
+
+    # Enrichment stats
+    pdf_found = sum(1 for r in results if r.pdf_available)
+    enriched_products = sum(1 for r in results if any(
+        e.match_status != "NOT_FOUND" for e in r.enrichment_results
+    ))
+    total_enrichments = sum(
+        1 for r in results for e in r.enrichment_results
+        if e.match_status != "NOT_FOUND"
+    )
+    from_pdf = sum(
+        1 for r in results for e in r.enrichment_results
+        if e.match_status in ("FOUND_IN_INTERNAL_PDF", "FOUND_IN_BOTH_MATCH")
+    )
+    from_mfr = sum(
+        1 for r in results for e in r.enrichment_results
+        if e.match_status == "FOUND_IN_MANUFACTURER_SOURCE"
+    )
+    conflict_count = sum(
+        1 for r in results for e in r.enrichment_results
+        if e.match_status == "FOUND_IN_BOTH_CONFLICT"
+    )
+
+    rows.extend([
+        ("", ""),
+        ("Berikelse:", ""),
+        ("  Produktdatablad funnet:", pdf_found),
+        ("  Produkter med berikelse:", enriched_products),
+        ("  Totalt berikede felt:", total_enrichments),
+        ("  Fra internt datablad:", from_pdf),
+        ("  Fra produsent:", from_mfr),
+        ("  Kildekonflikter:", conflict_count),
         ("", ""),
         ("Oppf\u00f8lging:", ""),
         ("  Auto-fix mulig:", auto_fix),

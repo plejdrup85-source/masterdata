@@ -3,6 +3,7 @@
 import asyncio
 import logging
 import os
+import random
 import time
 import uuid
 from collections import defaultdict
@@ -16,12 +17,13 @@ from fastapi.responses import FileResponse, HTMLResponse
 
 from backend.analyzer import analyze_product
 from backend.excel_handler import create_output_excel, read_article_numbers
+from backend.image_analyzer import analyze_product_images
 from backend.manufacturer import (
     generate_improvement_suggestions,
     search_manufacturer_info,
 )
-from backend.image_analyzer import analyze_product_images
-from backend.models import AnalysisJob, JobStatus, ProductAnalysis, ProductData
+from backend.models import AnalysisJob, BatchMode, JobStatus, ProductAnalysis, ProductData, QualityStatus
+from backend.pdf_enricher import run_enrichment_pipeline
 from backend.scraper import scrape_product
 
 # Configure logging
@@ -121,12 +123,71 @@ async def health_check():
     return {"status": "ok", "version": "1.1.0", "active_jobs": len(jobs)}
 
 
+def _apply_batch_selection(
+    articles: list[str],
+    batch_mode: str,
+    range_start: Optional[int],
+    range_end: Optional[int],
+    sample_size: Optional[int],
+    sample_seed: Optional[int],
+    specific_articles: Optional[str],
+) -> tuple[list[str], str]:
+    """Apply batch selection to article list.
+
+    Returns (selected_articles, batch_info_description).
+    """
+    total = len(articles)
+
+    if batch_mode == BatchMode.RANGE.value:
+        # 1-based row indices
+        start = max(1, range_start or 1) - 1  # convert to 0-based
+        end = min(total, range_end or total)
+        selected = articles[start:end]
+        info = f"Rader {start + 1}\u2013{end} av {total} (utvalg: {len(selected)})"
+        return selected, info
+
+    elif batch_mode == BatchMode.RANDOM.value:
+        n = min(sample_size or 100, total)
+        seed = sample_seed if sample_seed is not None else int(time.time())
+        rng = random.Random(seed)
+        selected = rng.sample(articles, n)
+        info = f"Tilfeldig utvalg: {n} av {total} (seed={seed})"
+        return selected, info
+
+    elif batch_mode == BatchMode.SPECIFIC.value:
+        if specific_articles:
+            # Parse comma or newline separated list
+            requested = {
+                a.strip()
+                for a in specific_articles.replace("\n", ",").split(",")
+                if a.strip()
+            }
+            # Keep only articles that exist in the uploaded file
+            selected = [a for a in articles if a in requested]
+            # Also add any specified articles not in the file (user might want to check them anyway)
+            in_file = set(articles)
+            extra = [a for a in requested if a not in in_file]
+            selected.extend(extra)
+            info = f"Spesifikke artikler: {len(selected)} valgt ({len(extra)} ikke i fil)"
+            return selected, info
+        return articles, f"Alle {total} artikler (ingen spesifikke angitt)"
+
+    # FULL mode (default)
+    return articles, f"Alle {total} artikler"
+
+
 @app.post("/api/upload")
 async def upload_excel(
     file: UploadFile = File(...),
     skip_cache: bool = Query(False, description="Skip cache and re-scrape all products"),
+    batch_mode: str = Query(BatchMode.FULL.value, description="Batch mode: full, range, random, specific"),
+    range_start: Optional[int] = Query(None, description="Start row (1-based) for range mode"),
+    range_end: Optional[int] = Query(None, description="End row (inclusive) for range mode"),
+    sample_size: Optional[int] = Query(None, description="Number of random samples"),
+    sample_seed: Optional[int] = Query(None, description="Random seed for reproducible sampling"),
+    specific_articles: Optional[str] = Query(None, description="Comma-separated article numbers for specific mode"),
 ):
-    """Upload an Excel file and start analysis."""
+    """Upload an Excel file and start analysis with batch selection support."""
     # Cleanup old jobs first
     _cleanup_old_jobs()
 
@@ -182,26 +243,39 @@ async def upload_excel(
             seen.add(a)
             unique_articles.append(a)
 
+    # Apply batch selection
+    selected_articles, batch_info = _apply_batch_selection(
+        unique_articles, batch_mode, range_start, range_end,
+        sample_size, sample_seed, specific_articles,
+    )
+
+    if not selected_articles:
+        raise HTTPException(400, "Ingen artikler valgt etter batch-filtrering")
+
     # Create job
     job_id = str(uuid.uuid4())[:8]
     job = AnalysisJob(
         job_id=job_id,
         status=JobStatus.PENDING,
-        total_products=len(unique_articles),
+        total_products=len(selected_articles),
         created_at=time.time(),
+        batch_mode=batch_mode,
+        batch_info=batch_info,
     )
     jobs[job_id] = job
 
     # Start analysis in background - store task reference to prevent GC
-    task = asyncio.create_task(_run_analysis(job_id, unique_articles, skip_cache))
+    task = asyncio.create_task(_run_analysis(job_id, selected_articles, skip_cache))
     _background_tasks.add(task)
     task.add_done_callback(_background_tasks.discard)
 
     return {
         "job_id": job_id,
-        "total_products": len(unique_articles),
+        "total_products": len(selected_articles),
         "detected_column": detected_column,
-        "message": f"Analyse startet for {len(unique_articles)} produkter",
+        "batch_mode": batch_mode,
+        "batch_info": batch_info,
+        "message": f"Analyse startet for {len(selected_articles)} produkter ({batch_info})",
     }
 
 
@@ -218,11 +292,14 @@ async def get_status(job_id: str):
         "total_products": job.total_products,
         "processed_products": job.processed_products,
         "current_product": job.current_product,
+        "current_step": job.current_step,
         "progress_percent": round(
             job.processed_products / job.total_products * 100, 1
         ) if job.total_products > 0 else 0,
         "errors": job.errors[-10:],
         "output_file": job.output_file,
+        "batch_mode": job.batch_mode,
+        "batch_info": job.batch_info,
     }
 
 
@@ -294,6 +371,16 @@ async def get_results(job_id: str):
                 "manual_review": r.manual_review_needed,
                 "auto_fix": r.auto_fix_possible,
                 "image_quality": _format_image_quality(r.image_quality),
+                "pdf_available": r.pdf_available,
+                "pdf_url": r.pdf_url,
+                "enrichment_count": len([
+                    e for e in r.enrichment_results
+                    if e.match_status != "NOT_FOUND"
+                ]),
+                "enrichment_conflicts": len([
+                    e for e in r.enrichment_results
+                    if e.match_status == "FOUND_IN_BOTH_CONFLICT"
+                ]),
                 "field_analyses": [
                     {
                         "field_name": fa.field_name,
@@ -310,6 +397,56 @@ async def get_results(job_id: str):
             for r in job.results
         ],
     }
+
+
+def _apply_enrichment_to_analysis(analysis: ProductAnalysis) -> None:
+    """Apply enrichment results to field analyses.
+
+    Enrichment from internal PDF takes priority over manufacturer sources.
+    Only applies suggestions where confidence is sufficient and no conflict.
+    """
+    if not analysis.enrichment_results:
+        return
+
+    # Map enrichment field names to FieldAnalysis field names
+    field_map = {
+        "product_name": "Produktnavn",
+        "description": "Beskrivelse",
+        "manufacturer": "Produsent",
+        "manufacturer_article_number": "Produsentens varenummer",
+        "packaging_info": "Pakningsinformasjon",
+    }
+
+    for er in analysis.enrichment_results:
+        if not er.suggested_value or er.match_status == "NOT_FOUND":
+            continue
+
+        fa_name = field_map.get(er.field_name)
+        if not fa_name:
+            continue
+
+        # Only apply if confidence >= 0.6 and not a conflict requiring review
+        if er.confidence < 0.6 or er.review_status == "conflict":
+            continue
+
+        # Find matching field analysis
+        for fa in analysis.field_analyses:
+            if fa.field_name == fa_name:
+                # Only suggest if field is currently missing/poor and enrichment has value
+                if fa.status in (QualityStatus.MISSING, QualityStatus.SHOULD_IMPROVE, QualityStatus.PROBABLE_ERROR):
+                    # Don't overwrite existing manufacturer suggestion with lower-confidence PDF
+                    if fa.suggested_value and fa.confidence and fa.confidence > er.confidence:
+                        continue
+                    # PDF source takes priority
+                    if er.source_level == "internal_product_sheet":
+                        fa.suggested_value = er.suggested_value
+                        fa.source = f"Produktdatablad ({er.source_url})"
+                        fa.confidence = er.confidence
+                    elif not fa.suggested_value:
+                        fa.suggested_value = er.suggested_value
+                        fa.source = f"Produsent ({er.source_url})"
+                        fa.confidence = er.confidence
+                break
 
 
 def _format_image_quality(iq: Optional[dict]) -> dict:
@@ -348,12 +485,14 @@ async def _run_analysis(
             job.current_product = article_number
             try:
                 # Step 1: Scrape from onemed.no
+                job.current_step = "scraping"
                 logger.info(f"[{job_id}] Scraping {article_number}")
                 product_data = await scrape_product(
                     article_number, use_cache=not skip_cache
                 )
 
-                # Step 1b: Analyze product images with CV
+                # Step 2: Analyze product images with CV
+                job.current_step = "image_analysis"
                 logger.info(f"[{job_id}] Image analysis for {article_number}")
                 image_summary = await analyze_product_images(article_number)
                 image_quality_dict = image_summary.to_dict()
@@ -363,17 +502,34 @@ async def _run_analysis(
                 if image_summary.main_image_exists and image_summary.image_analyses:
                     product_data.image_url = image_summary.image_analyses[0].image_url
 
-                # Step 2: Analyze quality (with image CV data)
+                # Step 3: Search manufacturer if data is insufficient
+                mfr_data = None
+                if product_data.found_on_onemed:
+                    # Preliminary quality check to decide if manufacturer lookup is needed
+                    preliminary = analyze_product(product_data, image_quality=image_quality_dict)
+                    if preliminary.requires_manufacturer_contact or preliminary.total_score < 60:
+                        job.current_step = "manufacturer_lookup"
+                        logger.info(f"[{job_id}] Manufacturer lookup for {article_number}")
+                        mfr_data = await search_manufacturer_info(product_data)
+
+                # Step 4: PDF enrichment pipeline (primary: internal PDF, fallback: manufacturer)
+                job.current_step = "pdf_enrichment"
+                logger.info(f"[{job_id}] Enrichment pipeline for {article_number}")
+                pdf_exists, pdf_url, enrichment_results = await run_enrichment_pipeline(
+                    article_number, product_data, manufacturer_data=mfr_data
+                )
+
+                # Step 5: Final quality analysis (with all enrichment data)
+                job.current_step = "quality_analysis"
                 analysis = analyze_product(product_data, image_quality=image_quality_dict)
                 analysis.image_quality = image_quality_dict
+                analysis.enrichment_results = enrichment_results
+                analysis.pdf_available = pdf_exists
+                analysis.pdf_url = pdf_url
 
-                # Step 3: Search manufacturer if data is insufficient
-                if analysis.requires_manufacturer_contact or analysis.total_score < 60:
-                    logger.info(f"[{job_id}] Manufacturer lookup for {article_number}")
-                    mfr_data = await search_manufacturer_info(product_data)
+                # Apply manufacturer data if found
+                if mfr_data:
                     analysis.manufacturer_lookup = mfr_data
-
-                    # Generate improvement suggestions from manufacturer data
                     if mfr_data.found:
                         suggestions = generate_improvement_suggestions(
                             product_data, mfr_data
@@ -385,6 +541,9 @@ async def _run_analysis(
                                     fa.source = suggestion["source"]
                                     fa.confidence = suggestion["confidence"]
                                     break
+
+                # Apply enrichment suggestions to field_analyses (PDF takes priority)
+                _apply_enrichment_to_analysis(analysis)
 
                 return analysis
 

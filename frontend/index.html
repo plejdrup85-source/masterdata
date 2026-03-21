@@ -472,7 +472,39 @@
                     Ignorer cache (hent ferske data fra onemed.no)
                 </label>
             </div>
+
+            <!-- Batch Selection Controls -->
+            <div style="margin-top:1rem;padding:1rem;background:var(--bg);border-radius:8px;border:1px solid var(--border)">
+                <div style="font-size:0.9rem;font-weight:600;margin-bottom:0.5rem">Batch-modus</div>
+                <div style="display:flex;gap:0.5rem;flex-wrap:wrap;font-size:0.85rem">
+                    <label style="display:flex;align-items:center;gap:0.3rem;cursor:pointer">
+                        <input type="radio" name="batchMode" value="full" checked> Alle
+                    </label>
+                    <label style="display:flex;align-items:center;gap:0.3rem;cursor:pointer">
+                        <input type="radio" name="batchMode" value="range"> Radutvalg
+                    </label>
+                    <label style="display:flex;align-items:center;gap:0.3rem;cursor:pointer">
+                        <input type="radio" name="batchMode" value="random"> Tilfeldig utvalg
+                    </label>
+                    <label style="display:flex;align-items:center;gap:0.3rem;cursor:pointer">
+                        <input type="radio" name="batchMode" value="specific"> Spesifikke artikler
+                    </label>
+                </div>
+                <div id="batchRangeOpts" class="hidden" style="margin-top:0.5rem;display:flex;gap:0.5rem;align-items:center;font-size:0.85rem">
+                    <label>Fra rad: <input type="number" id="rangeStart" min="1" value="1" style="width:70px;padding:0.25rem;border:1px solid var(--border);border-radius:4px"></label>
+                    <label>Til rad: <input type="number" id="rangeEnd" min="1" value="200" style="width:70px;padding:0.25rem;border:1px solid var(--border);border-radius:4px"></label>
+                </div>
+                <div id="batchRandomOpts" class="hidden" style="margin-top:0.5rem;display:flex;gap:0.5rem;align-items:center;font-size:0.85rem">
+                    <label>Antall: <input type="number" id="sampleSize" min="1" value="100" style="width:70px;padding:0.25rem;border:1px solid var(--border);border-radius:4px"></label>
+                    <label>Seed: <input type="number" id="sampleSeed" placeholder="auto" style="width:80px;padding:0.25rem;border:1px solid var(--border);border-radius:4px"></label>
+                </div>
+                <div id="batchSpecificOpts" class="hidden" style="margin-top:0.5rem;font-size:0.85rem">
+                    <textarea id="specificArticles" rows="3" placeholder="Skriv artikkelnumre separert med komma eller linjeskift" style="width:100%;padding:0.5rem;border:1px solid var(--border);border-radius:4px;font-size:0.85rem;resize:vertical"></textarea>
+                </div>
+            </div>
+
             <div class="column-info hidden" id="columnInfo"></div>
+            <div class="column-info hidden" id="batchInfo"></div>
             <div class="actions">
                 <button class="btn btn-primary" id="startBtn" disabled>Start analyse</button>
                 <span id="fileInfo" style="color:var(--text-muted);font-size:0.9rem"></span>
@@ -490,6 +522,7 @@
                 <span id="progressPercent">0%</span>
             </div>
             <div class="progress-detail" id="progressDetail">Starter...</div>
+            <div class="progress-detail" id="progressStep" style="color:var(--primary)"></div>
             <div class="progress-warning" id="progressWarning"></div>
             <div class="actions">
                 <button class="btn btn-danger" id="cancelBtn">Avbryt analyse</button>
@@ -565,6 +598,43 @@
         const newAnalysisBtn = document.getElementById('newAnalysisBtn');
         const errorsCard = document.getElementById('errorsCard');
         const errorLog = document.getElementById('errorLog');
+        const progressStep = document.getElementById('progressStep');
+        const batchInfoEl = document.getElementById('batchInfo');
+
+        // Batch mode toggling
+        document.querySelectorAll('input[name="batchMode"]').forEach(radio => {
+            radio.addEventListener('change', () => {
+                document.getElementById('batchRangeOpts').classList.toggle('hidden', radio.value !== 'range');
+                document.getElementById('batchRandomOpts').classList.toggle('hidden', radio.value !== 'random');
+                document.getElementById('batchSpecificOpts').classList.toggle('hidden', radio.value !== 'specific');
+            });
+        });
+
+        function getBatchParams() {
+            const mode = document.querySelector('input[name="batchMode"]:checked').value;
+            const params = new URLSearchParams();
+            params.set('batch_mode', mode);
+            if (mode === 'range') {
+                params.set('range_start', document.getElementById('rangeStart').value);
+                params.set('range_end', document.getElementById('rangeEnd').value);
+            } else if (mode === 'random') {
+                params.set('sample_size', document.getElementById('sampleSize').value);
+                const seed = document.getElementById('sampleSeed').value;
+                if (seed) params.set('sample_seed', seed);
+            } else if (mode === 'specific') {
+                const arts = document.getElementById('specificArticles').value.trim();
+                if (arts) params.set('specific_articles', arts);
+            }
+            return params;
+        }
+
+        const STEP_LABELS = {
+            'scraping': 'Henter produktdata',
+            'image_analysis': 'Bildeanalyse',
+            'manufacturer_lookup': 'Produsentoppslag',
+            'pdf_enrichment': 'PDF-berikelse',
+            'quality_analysis': 'Kvalitetsanalyse',
+        };
 
         // File selection
         fileInput.addEventListener('change', (e) => {
@@ -634,7 +704,9 @@
             formData.append('file', selectedFile);
 
             const skipCache = skipCacheCheckbox.checked;
-            const url = `${API_BASE}/api/upload${skipCache ? '?skip_cache=true' : ''}`;
+            const batchParams = getBatchParams();
+            if (skipCache) batchParams.set('skip_cache', 'true');
+            const url = `${API_BASE}/api/upload?${batchParams.toString()}`;
 
             try {
                 const resp = await fetch(url, {
@@ -652,12 +724,17 @@
 
                 const data = await resp.json();
                 currentJobId = data.job_id;
-                fileInfo.textContent = `${data.total_products} produkter funnet`;
+                fileInfo.textContent = `${data.total_products} produkter`;
 
                 // Show detected column
                 if (data.detected_column) {
-                    columnInfo.textContent = `Artikkelnumre leses fra kolonne: "${data.detected_column}"`;
+                    columnInfo.textContent = `Artikkelnumre fra kolonne: "${data.detected_column}"`;
                     columnInfo.classList.remove('hidden');
+                }
+                // Show batch info
+                if (data.batch_info) {
+                    batchInfoEl.textContent = data.batch_info;
+                    batchInfoEl.classList.remove('hidden');
                 }
 
                 // Show progress
@@ -700,6 +777,9 @@
 
                 if (data.current_product) {
                     progressDetail.textContent = `Analyserer: ${data.current_product}`;
+                }
+                if (data.current_step) {
+                    progressStep.textContent = STEP_LABELS[data.current_step] || data.current_step;
                 }
 
                 if (data.status === 'completed' || data.status === 'failed') {
@@ -797,6 +877,27 @@
                     </div>
                 `;
 
+                // Enrichment stats
+                const pdfCount = results.filter(r => r.pdf_available).length;
+                const enrichedCount = results.filter(r => r.enrichment_count > 0).length;
+                const conflictCount = results.filter(r => r.enrichment_conflicts > 0).length;
+
+                statsGrid.innerHTML += `
+                    <div class="stat-card ${pdfCount > 0 ? 'success' : ''}">
+                        <div class="value">${pdfCount}</div>
+                        <div class="label">PDF funnet</div>
+                    </div>
+                    <div class="stat-card ${enrichedCount > 0 ? 'success' : ''}">
+                        <div class="value">${enrichedCount}</div>
+                        <div class="label">Beriket</div>
+                    </div>
+                    ${conflictCount > 0 ? `
+                    <div class="stat-card warning">
+                        <div class="value">${conflictCount}</div>
+                        <div class="label">Kildekonflikter</div>
+                    </div>` : ''}
+                `;
+
                 // Render results table with expandable rows
                 resultsBody.innerHTML = results.map((r, idx) => {
                     const fieldHtml = (r.field_analyses || []).map(fa => {
@@ -869,6 +970,28 @@
                                         ${fieldHtml || '<p style="color:var(--text-muted)">Ingen feltanalyse tilgjengelig</p>'}
                                     </div>
                                     ${imageDetailHtml}
+                                    ${r.pdf_available !== undefined ? `
+                                    <div style="margin-top:0.75rem">
+                                        <h4 style="font-size:0.85rem;font-weight:600;margin-bottom:0.5rem">Berikelse</h4>
+                                        <div class="field-grid">
+                                            <div class="field-item">
+                                                <span class="field-status ${r.pdf_available ? 'ok' : 'missing'}"></span>
+                                                <span class="field-name">Produktdatablad</span>
+                                                <span class="field-comment">${r.pdf_available ? 'Funnet' : 'Ikke funnet'}</span>
+                                            </div>
+                                            <div class="field-item">
+                                                <span class="field-status ${(r.enrichment_count || 0) > 0 ? 'ok' : 'missing'}"></span>
+                                                <span class="field-name">Berikede felt</span>
+                                                <span class="field-comment">${r.enrichment_count || 0}</span>
+                                            </div>
+                                            ${(r.enrichment_conflicts || 0) > 0 ? `
+                                            <div class="field-item">
+                                                <span class="field-status improve"></span>
+                                                <span class="field-name">Kildekonflikter</span>
+                                                <span class="field-comment">${r.enrichment_conflicts}</span>
+                                            </div>` : ''}
+                                        </div>
+                                    </div>` : ''}
                                 </div>
                             </td>
                         </tr>
@@ -968,6 +1091,11 @@
             progressBar.style.width = '0%';
             progressWarning.style.display = 'none';
             skipCacheCheckbox.checked = false;
+            batchInfoEl.classList.add('hidden');
+            document.querySelector('input[name="batchMode"][value="full"]').checked = true;
+            document.getElementById('batchRangeOpts').classList.add('hidden');
+            document.getElementById('batchRandomOpts').classList.add('hidden');
+            document.getElementById('batchSpecificOpts').classList.add('hidden');
         });
     </script>
 </body>
