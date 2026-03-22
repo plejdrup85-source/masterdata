@@ -1,9 +1,11 @@
 """FastAPI application for masterdata quality check."""
 
 import asyncio
+import json
 import logging
 import os
 import random
+import shutil
 import time
 import uuid
 from collections import defaultdict
@@ -122,6 +124,92 @@ _background_tasks: set[asyncio.Task] = set()
 # Output directory - use /tmp on deployed environments for reliability
 OUTPUT_DIR = Path(os.environ.get("OUTPUT_DIR", "/tmp/masterdata_output"))
 OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
+
+# Persistent history directory — survives job cleanup
+HISTORY_DIR = Path(os.environ.get("HISTORY_DIR", "data/history"))
+HISTORY_DIR.mkdir(parents=True, exist_ok=True)
+HISTORY_EXCEL_DIR = HISTORY_DIR / "exports"
+HISTORY_EXCEL_DIR.mkdir(parents=True, exist_ok=True)
+HISTORY_INDEX_FILE = HISTORY_DIR / "index.json"
+HISTORY_MAX_ENTRIES = 100
+
+
+def _load_history() -> list[dict]:
+    """Load job history index from disk."""
+    if not HISTORY_INDEX_FILE.exists():
+        return []
+    try:
+        return json.loads(HISTORY_INDEX_FILE.read_text(encoding="utf-8"))
+    except (json.JSONDecodeError, OSError) as e:
+        logger.warning(f"Failed to load history index: {e}")
+        return []
+
+
+def _save_history(entries: list[dict]) -> None:
+    """Save job history index to disk (FIFO, max HISTORY_MAX_ENTRIES)."""
+    entries = entries[-HISTORY_MAX_ENTRIES:]
+    try:
+        HISTORY_INDEX_FILE.write_text(
+            json.dumps(entries, ensure_ascii=False, indent=2),
+            encoding="utf-8",
+        )
+    except OSError as e:
+        logger.error(f"Failed to save history index: {e}")
+
+
+def _add_to_history(job: "AnalysisJob", source_filename: str = "") -> None:
+    """Add a completed job to the persistent history.
+
+    Copies the Excel file to the history directory and writes a metadata entry.
+    """
+    if job.status != JobStatus.COMPLETED or not job.output_file:
+        return
+
+    src = Path(job.output_file)
+    if not src.exists():
+        return
+
+    # Copy Excel to persistent history directory
+    history_filename = f"kvalitetssjekk_{job.job_id}.xlsx"
+    dest = HISTORY_EXCEL_DIR / history_filename
+    try:
+        shutil.copy2(str(src), str(dest))
+    except OSError as e:
+        logger.error(f"Failed to copy Excel to history: {e}")
+        return
+
+    # Compute summary stats
+    total = len(job.results)
+    avg_score = 0.0
+    critical_count = 0
+    if total > 0:
+        scores = []
+        for r in job.results:
+            s = r.total_score
+            if r.ai_score and "overall_score" in r.ai_score:
+                s = r.ai_score["overall_score"]
+            scores.append(s)
+            if s < 40:
+                critical_count += 1
+        avg_score = round(sum(scores) / len(scores), 1)
+
+    entry = {
+        "job_id": job.job_id,
+        "timestamp": datetime.fromtimestamp(job.created_at).isoformat(),
+        "created_at": job.created_at,
+        "source_filename": source_filename,
+        "excel_filename": history_filename,
+        "product_count": total,
+        "analysis_mode": job.analysis_mode,
+        "focus_areas": job.focus_areas,
+        "batch_info": job.batch_info or "",
+        "avg_score": avg_score,
+        "critical_count": critical_count,
+    }
+
+    entries = _load_history()
+    entries.append(entry)
+    _save_history(entries)
 
 # Jeeves ERP data file path — auto-detected from repo or configured via env
 JEEVES_FILE_PATH = os.environ.get("JEEVES_FILE_PATH", "")
@@ -379,6 +467,7 @@ async def upload_excel(
         batch_info=batch_info,
         analysis_mode=analysis_mode,
         focus_areas=parsed_focus_areas,
+        source_filename=file.filename or "",
     )
     jobs[job_id] = job
 
@@ -621,6 +710,62 @@ async def get_results(job_id: str):
             for r in job.results
         ],
     }
+
+
+# ── Job History API ──
+
+
+@app.get("/api/history")
+async def get_history():
+    """Return list of past completed jobs (newest first)."""
+    entries = _load_history()
+    entries.reverse()
+    return {"entries": entries}
+
+
+@app.get("/api/history/{job_id}/download")
+async def download_history_file(job_id: str):
+    """Download an Excel file from job history."""
+    entries = _load_history()
+    entry = next((e for e in entries if e["job_id"] == job_id), None)
+    if not entry:
+        raise HTTPException(404, "Jobb ikke funnet i historikk")
+
+    filepath = HISTORY_EXCEL_DIR / entry["excel_filename"]
+    if not filepath.exists():
+        raise HTTPException(404, "Excel-filen er ikke lenger tilgjengelig")
+
+    download_name = entry.get("source_filename", "")
+    if download_name:
+        stem = Path(download_name).stem
+        download_name = f"{stem}_kvalitetssjekk_{job_id}.xlsx"
+    else:
+        download_name = f"kvalitetssjekk_{job_id}.xlsx"
+
+    return FileResponse(
+        str(filepath),
+        filename=download_name,
+        media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+    )
+
+
+@app.delete("/api/history/{job_id}")
+async def delete_history_entry(job_id: str):
+    """Delete a single job from history."""
+    entries = _load_history()
+    entry = next((e for e in entries if e["job_id"] == job_id), None)
+    if not entry:
+        raise HTTPException(404, "Jobb ikke funnet i historikk")
+
+    # Delete Excel file
+    filepath = HISTORY_EXCEL_DIR / entry["excel_filename"]
+    filepath.unlink(missing_ok=True)
+
+    # Remove from index
+    entries = [e for e in entries if e["job_id"] != job_id]
+    _save_history(entries)
+
+    return {"message": "Historikkoppføring slettet", "job_id": job_id}
 
 
 # ── Family / Relationship Analysis API ──
@@ -2249,6 +2394,9 @@ async def _run_analysis(
         job.output_file = output_path
         job.status = JobStatus.COMPLETED
         job.current_product = None
+
+        # Persist to history for later retrieval
+        _add_to_history(job, source_filename=job.source_filename)
 
         logger.info(f"[{job_id}] Analysis completed. Output: {output_path}")
 

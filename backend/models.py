@@ -273,3 +273,4 @@ class AnalysisJob(BaseModel):
     # Analysis mode metadata
     analysis_mode: str = AnalysisMode.FULL_ENRICHMENT.value
     focus_areas: list[str] = []  # Only used when analysis_mode == "focused_scan"
+    source_filename: str = ""  # Original uploaded filename

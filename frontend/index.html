@@ -695,6 +695,9 @@
             <button class="module-tab" id="tabRelations" onclick="switchModule('relations')">
                 Produktfamilier
             </button>
+            <button class="module-tab" id="tabHistory" onclick="switchModule('history')">
+                Historikk
+            </button>
         </div>
 
         <!-- ═══════════════════════════════════════════════════════ -->
@@ -1042,6 +1045,22 @@
 
         </div><!-- /moduleRelations -->
 
+        <!-- ═══════════════════════════════════════════════════════ -->
+        <!-- MODULE: HISTORIKK                                       -->
+        <!-- ═══════════════════════════════════════════════════════ -->
+        <div id="moduleHistory" style="display:none">
+            <div class="card">
+                <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:1rem">
+                    <h2 style="margin:0">Jobbhistorikk</h2>
+                    <button class="btn btn-primary" style="font-size:0.8rem;padding:0.3rem 0.8rem" onclick="loadHistory()">Oppdater</button>
+                </div>
+                <p style="color:var(--text-muted);font-size:0.85rem;margin-bottom:1rem">
+                    Tidligere analyser med nedlastbare Excel-filer. Maks 100 oppforinger lagres.
+                </p>
+                <div id="historyList" style="font-size:0.85rem;color:var(--text-muted)">Laster historikk...</div>
+            </div>
+        </div><!-- /moduleHistory -->
+
         <!-- Move member modal -->
         <div id="moveMemberModal" style="display:none;position:fixed;inset:0;background:rgba(0,0,0,0.4);z-index:1000;align-items:center;justify-content:center">
             <div style="background:#fff;border-radius:12px;padding:1.5rem;max-width:450px;width:90%;box-shadow:0 8px 32px rgba(0,0,0,0.2)">
@@ -1106,9 +1125,12 @@
             currentModule = mod;
             document.getElementById('moduleMasterdata').style.display = mod === 'masterdata' ? '' : 'none';
             document.getElementById('moduleRelations').style.display = mod === 'relations' ? '' : 'none';
+            document.getElementById('moduleHistory').style.display = mod === 'history' ? '' : 'none';
             document.querySelectorAll('.module-tab').forEach(t => t.classList.remove('active'));
-            document.getElementById(mod === 'masterdata' ? 'tabMasterdata' : 'tabRelations').classList.add('active');
+            const tabMap = {masterdata: 'tabMasterdata', relations: 'tabRelations', history: 'tabHistory'};
+            document.getElementById(tabMap[mod])?.classList.add('active');
             if (mod === 'relations') initRelModule();
+            if (mod === 'history') loadHistory();
         }
 
         // ── Cross-module handoff (Task 3: uses data model, not DOM) ──
@@ -2903,7 +2925,7 @@
 
         // New analysis with confirmation
         newAnalysisBtn.addEventListener('click', () => {
-            if (!confirm('Start ny analyse? Gjeldende resultater vil ikke lenger v\u00e6re tilgjengelig i nettleseren.\n\n(Excel-rapporten kan fortsatt lastes ned hvis du har lagret den.)')) {
+            if (!confirm('Start ny analyse? Gjeldende resultater vil ikke lenger v\u00e6re tilgjengelig i nettleseren.\n\nTidligere Excel-rapporter er tilgjengelige under Historikk-fanen.')) {
                 return;
             }
             currentJobId = null;
@@ -2929,6 +2951,81 @@
             document.getElementById('batchRandomOpts').classList.add('hidden');
             document.getElementById('batchSpecificOpts').classList.add('hidden');
         });
+
+        // ── History Module ──
+        let historyLoaded = false;
+
+        async function loadHistory() {
+            const container = document.getElementById('historyList');
+            try {
+                const resp = await fetch(`${API_BASE}/api/history`);
+                if (!resp.ok) throw new Error(`HTTP ${resp.status}`);
+                const data = await resp.json();
+                historyLoaded = true;
+
+                if (!data.entries || data.entries.length === 0) {
+                    container.innerHTML = '<p style="color:var(--text-muted)">Ingen tidligere analyser funnet.</p>';
+                    return;
+                }
+
+                const modeLabels = {
+                    full_enrichment: 'Full berikelse',
+                    audit_only: 'Kvalitetsrevisjon',
+                    focused_scan: 'Fokusert sjekk',
+                };
+
+                let html = '<table style="width:100%;border-collapse:collapse;font-size:0.85rem">';
+                html += '<thead><tr style="border-bottom:2px solid var(--border);text-align:left">';
+                html += '<th style="padding:0.5rem">Dato</th>';
+                html += '<th style="padding:0.5rem">Kildefil</th>';
+                html += '<th style="padding:0.5rem">Modus</th>';
+                html += '<th style="padding:0.5rem;text-align:center">Produkter</th>';
+                html += '<th style="padding:0.5rem;text-align:center">Snitt</th>';
+                html += '<th style="padding:0.5rem;text-align:center">Kritisk</th>';
+                html += '<th style="padding:0.5rem"></th>';
+                html += '</tr></thead><tbody>';
+
+                for (const e of data.entries) {
+                    const d = new Date(e.timestamp);
+                    const dateStr = d.toLocaleDateString('nb-NO', {day:'2-digit',month:'2-digit',year:'numeric'})
+                        + ' ' + d.toLocaleTimeString('nb-NO', {hour:'2-digit',minute:'2-digit'});
+                    const mode = modeLabels[e.analysis_mode] || e.analysis_mode;
+                    const src = e.source_filename || '-';
+                    const scoreColor = e.avg_score < 40 ? '#dc2626' : e.avg_score < 70 ? '#d97706' : '#16a34a';
+
+                    html += `<tr style="border-bottom:1px solid var(--border)">`;
+                    html += `<td style="padding:0.5rem;white-space:nowrap">${dateStr}</td>`;
+                    html += `<td style="padding:0.5rem;max-width:200px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap" title="${src}">${src}</td>`;
+                    html += `<td style="padding:0.5rem">${mode}</td>`;
+                    html += `<td style="padding:0.5rem;text-align:center">${e.product_count}</td>`;
+                    html += `<td style="padding:0.5rem;text-align:center;font-weight:600;color:${scoreColor}">${e.avg_score}</td>`;
+                    html += `<td style="padding:0.5rem;text-align:center">${e.critical_count > 0 ? '<span style="color:#dc2626;font-weight:600">' + e.critical_count + '</span>' : '0'}</td>`;
+                    html += `<td style="padding:0.5rem;text-align:right">`;
+                    html += `<button class="btn btn-primary" style="font-size:0.75rem;padding:0.25rem 0.6rem" onclick="downloadHistoryFile('${e.job_id}')">Last ned</button>`;
+                    html += `<button class="btn" style="font-size:0.75rem;padding:0.25rem 0.5rem;margin-left:0.3rem;background:#fee2e2;color:#dc2626;border:none;cursor:pointer" onclick="deleteHistoryEntry('${e.job_id}')">Slett</button>`;
+                    html += `</td></tr>`;
+                }
+                html += '</tbody></table>';
+                container.innerHTML = html;
+            } catch (err) {
+                container.innerHTML = `<p style="color:#dc2626">Kunne ikke laste historikk: ${err.message}</p>`;
+            }
+        }
+
+        function downloadHistoryFile(jobId) {
+            window.location.href = `${API_BASE}/api/history/${jobId}/download`;
+        }
+
+        async function deleteHistoryEntry(jobId) {
+            if (!confirm('Slett denne oppforingen og Excel-filen permanent?')) return;
+            try {
+                const resp = await fetch(`${API_BASE}/api/history/${jobId}`, {method: 'DELETE'});
+                if (!resp.ok) throw new Error(`HTTP ${resp.status}`);
+                loadHistory();
+            } catch (err) {
+                alert('Kunne ikke slette: ' + err.message);
+            }
+        }
     </script>
 </body>
 </html>
