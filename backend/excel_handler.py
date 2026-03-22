@@ -1167,21 +1167,74 @@ INRIVER_STATUS_FONTS = {
 
 
 def _get_suggestion_for_field(result: ProductAnalysis, field_name: str) -> Optional[str]:
-    """Get the best suggestion for a field from all enrichment sources."""
-    # Priority 1: AI enrichment
+    """Get the best suggestion for a field from all enrichment sources.
+
+    Priority order (source-grounded first, AI as fallback):
+    1. Enrichment suggestions (AI-reviewed, source-grounded, quality-gated)
+    2. Field analysis suggestions (from PDF/manufacturer enrichment)
+    3. Enrichment results (raw source data)
+    4. AI enrichment (independent AI suggestions — used only as last resort)
+
+    AI enrichment is demoted to Priority 4 because it operates on raw product
+    data without source evidence, making it less reliable than source-grounded
+    suggestions that have been through the quality gate.
+    """
+    # Priority 1: Enrichment suggestions (AI-reviewed, quality-gated)
+    for es in result.enrichment_suggestions:
+        if es.field_name == field_name and es.suggested_value:
+            return es.suggested_value
+
+    # Priority 2: Field analysis suggestions (from PDF/manufacturer enrichment)
+    for fa in result.field_analyses:
+        if fa.field_name == field_name and fa.suggested_value:
+            return fa.suggested_value
+
+    # Priority 3: Enrichment results (raw source extractions)
+    enrichment_field_map = {
+        "Produktnavn": "product_name",
+        "Beskrivelse": "description",
+        "Produsent": "manufacturer",
+        "Produsentens varenummer": "manufacturer_article_number",
+        "Pakningsinformasjon": "packaging_info",
+    }
+    er_key = enrichment_field_map.get(field_name)
+    if er_key:
+        for er in result.enrichment_results:
+            if er.field_name == er_key and er.suggested_value and er.match_status != "NOT_FOUND":
+                # Only use if confidence is sufficient
+                if er.confidence >= 0.5:
+                    return er.suggested_value
+
+    # Priority 4 (LAST RESORT): AI enrichment — independent AI suggestions
+    # These are not source-grounded so require more caution
     ai = result.ai_enrichment or {}
     ai_map = {
         "Beskrivelse": ai.get("improved_description"),
         "Kategori": ai.get("suggested_category"),
         "Pakningsinformasjon": ai.get("packaging_suggestions"),
     }
-    if field_name in ai_map and ai_map[field_name]:
-        return ai_map[field_name]
+    ai_val = ai_map.get(field_name)
+    if ai_val and isinstance(ai_val, str) and len(ai_val.strip()) > 5:
+        return ai_val
 
-    # Priority 2: Field analysis suggestions (from PDF/manufacturer enrichment)
+    return None
+
+
+def _get_suggestion_source(result: ProductAnalysis, field_name: str) -> str:
+    """Determine the source of the suggestion for a field.
+
+    Matches the priority order in _get_suggestion_for_field().
+    Returns the source of whichever suggestion would actually be used.
+    """
+    # Priority 1: Enrichment suggestions (AI-reviewed, quality-gated)
+    for es in result.enrichment_suggestions:
+        if es.field_name == field_name and es.suggested_value:
+            return es.source or "enrichment"
+
+    # Priority 2: Field analysis suggestions
     for fa in result.field_analyses:
-        if fa.field_name == field_name and fa.suggested_value:
-            return fa.suggested_value
+        if fa.field_name == field_name and fa.suggested_value and fa.source:
+            return fa.source
 
     # Priority 3: Enrichment results
     enrichment_field_map = {
@@ -1195,16 +1248,13 @@ def _get_suggestion_for_field(result: ProductAnalysis, field_name: str) -> Optio
     if er_key:
         for er in result.enrichment_results:
             if er.field_name == er_key and er.suggested_value and er.match_status != "NOT_FOUND":
-                return er.suggested_value
+                if er.confidence >= 0.5:
+                    if er.source_level == "internal_product_sheet":
+                        return "product datasheet"
+                    elif er.source_level == "manufacturer_source":
+                        return "manufacturer website"
 
-    return None
-
-
-def _get_suggestion_source(result: ProductAnalysis, field_name: str) -> str:
-    """Determine the source of the suggestion for a field."""
-    sources = []
-
-    # Check AI enrichment
+    # Priority 4: AI enrichment
     ai = result.ai_enrichment or {}
     ai_map = {
         "Beskrivelse": ai.get("improved_description"),
@@ -1212,36 +1262,11 @@ def _get_suggestion_source(result: ProductAnalysis, field_name: str) -> str:
         "Pakningsinformasjon": ai.get("packaging_suggestions"),
     }
     if field_name in ai_map and ai_map[field_name]:
-        sources.append("AI suggestion")
+        return "AI suggestion (verifiser manuelt)"
 
-    # Check field analysis suggestions
-    for fa in result.field_analyses:
-        if fa.field_name == field_name and fa.suggested_value and fa.source:
-            sources.append(fa.source)
-
-    # Check enrichment results
-    enrichment_field_map = {
-        "Produktnavn": "product_name",
-        "Beskrivelse": "description",
-        "Produsent": "manufacturer",
-        "Produsentens varenummer": "manufacturer_article_number",
-        "Pakningsinformasjon": "packaging_info",
-    }
-    er_key = enrichment_field_map.get(field_name)
-    if er_key:
-        for er in result.enrichment_results:
-            if er.field_name == er_key and er.suggested_value and er.match_status != "NOT_FOUND":
-                if er.source_level == "internal_product_sheet":
-                    sources.append("product datasheet")
-                elif er.source_level == "manufacturer_source":
-                    sources.append("manufacturer website")
-
-    if not sources:
-        if result.product_data.found_on_onemed:
-            return "onemed.no"
-        return "existing catalog"
-
-    return "; ".join(dict.fromkeys(sources))  # deduplicate preserving order
+    if result.product_data.found_on_onemed:
+        return "onemed.no"
+    return "existing catalog"
 
 
 def _determine_enrichment_status(result: ProductAnalysis) -> tuple[str, bool, str]:

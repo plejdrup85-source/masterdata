@@ -775,3 +775,116 @@ def _infer_manufacturer_from_url(url: str) -> Optional[str]:
         if domain_part in url_lower:
             return name
     return None
+
+
+# ── Final Quality Gate ──
+
+
+def apply_ai_review_to_suggestions(
+    suggestions: list[EnrichmentSuggestion],
+    ai_reviews: list[dict],
+) -> list[EnrichmentSuggestion]:
+    """Apply AI editorial review results to enrichment suggestions.
+
+    AI reviews can:
+    - Polish the suggested_value (better Norwegian, complete sentences)
+    - Reject a suggestion entirely (sets suggested_value=None)
+    - Adjust confidence up/down
+    - Set review_required
+
+    Returns filtered list with only non-rejected suggestions.
+    """
+    if not ai_reviews:
+        return suggestions
+
+    # Index reviews by field_name
+    reviews_by_field = {}
+    for r in ai_reviews:
+        fname = r.get("field_name")
+        if fname:
+            reviews_by_field[fname] = r
+
+    result = []
+    for suggestion in suggestions:
+        review = reviews_by_field.get(suggestion.field_name)
+
+        if not review:
+            # No review for this field — keep as-is
+            result.append(suggestion)
+            continue
+
+        if review.get("rejected"):
+            reason = review.get("reject_reason", "Avvist av kvalitetskontroll")
+            logger.info(
+                f"[quality-gate] {suggestion.field_name} REJECTED: {reason}"
+            )
+            continue
+
+        # Apply polished value
+        reviewed_value = review.get("reviewed_value")
+        if reviewed_value and reviewed_value.strip():
+            suggestion.suggested_value = reviewed_value.strip()
+
+        # Apply confidence adjustment
+        conf_adj = review.get("confidence_adjustment", 0)
+        if isinstance(conf_adj, (int, float)):
+            suggestion.confidence = max(0.0, min(1.0, suggestion.confidence + conf_adj))
+
+        # Apply review_required
+        if review.get("review_required") is not None:
+            suggestion.review_required = bool(review["review_required"])
+
+        # Add rationale
+        rationale = review.get("rationale")
+        if rationale:
+            suggestion = _add_rationale(suggestion, f"AI: {rationale}")
+
+        result.append(suggestion)
+
+    logger.info(
+        f"[quality-gate] {len(suggestions)} suggestions → "
+        f"{len(result)} after AI review "
+        f"({len(suggestions) - len(result)} rejected)"
+    )
+    return result
+
+
+def final_quality_gate(suggestions: list[EnrichmentSuggestion]) -> list[EnrichmentSuggestion]:
+    """Rule-based final quality gate — catches issues AI might miss.
+
+    Runs AFTER AI review. Removes any remaining suggestions that:
+    - Have empty/whitespace-only values
+    - Are too short to be useful for their field
+    - Contain obvious extraction artifacts
+    - Have very low confidence
+    """
+    result = []
+    for s in suggestions:
+        if not s.suggested_value or not s.suggested_value.strip():
+            continue
+
+        val = s.suggested_value.strip()
+
+        # Reject suggestions with very low confidence
+        if s.confidence < MIN_CONFIDENCE_SUGGEST:
+            logger.debug(
+                f"[quality-gate] {s.field_name} dropped: confidence {s.confidence:.2f} "
+                f"< {MIN_CONFIDENCE_SUGGEST}"
+            )
+            continue
+
+        # Reject if value is identical to current (no improvement)
+        if s.current_value and val.strip().lower() == s.current_value.strip().lower():
+            continue
+
+        # Run field validation one more time
+        is_valid, reason = _validate_suggestion_value(val, s.field_name)
+        if not is_valid:
+            logger.info(
+                f"[quality-gate] {s.field_name} dropped at final gate: {reason}"
+            )
+            continue
+
+        result.append(s)
+
+    return result

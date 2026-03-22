@@ -15,9 +15,14 @@ from fastapi import FastAPI, File, HTTPException, Query, Request, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse, HTMLResponse
 
-from backend.ai_scorer import enrich_product_async, score_product_async
+from backend.ai_scorer import enrich_product_async, review_suggestions_async, score_product_async
 from backend.analyzer import analyze_product
-from backend.enricher import apply_enrichment_suggestions, enrich_product
+from backend.enricher import (
+    apply_ai_review_to_suggestions,
+    apply_enrichment_suggestions,
+    enrich_product,
+    final_quality_gate,
+)
 from backend.excel_handler import create_output_excel, read_article_numbers
 from backend.image_analyzer import analyze_product_images
 from backend.jeeves_loader import JeevesIndex, load_jeeves
@@ -934,17 +939,11 @@ async def _run_analysis(
                 enrichment_suggestions = enrich_product(
                     analysis, enrichment_results, manufacturer_data=mfr_data
                 )
-                if enrichment_suggestions:
-                    analysis.enrichment_suggestions = enrichment_suggestions
-                    apply_enrichment_suggestions(analysis, enrichment_suggestions)
-                    logger.info(
-                        f"[{job_id}] {article_number}: "
-                        f"{len(enrichment_suggestions)} enrichment suggestion(s)"
-                    )
 
-                # Step 6: AI scoring and enrichment (if API key configured)
+                # Step 6: AI quality layer (if API key configured)
                 job.current_step = "ai_scoring"
                 try:
+                    # 6a: AI scoring (quality evaluation)
                     ai_score_result = await score_product_async(
                         product_name=product_data.product_name,
                         description=product_data.description,
@@ -959,6 +958,31 @@ async def _run_analysis(
                             f"{ai_score_result.get('overall_score', 'N/A')}"
                         )
 
+                    # 6b: AI editorial review of enrichment suggestions
+                    # Pass source-grounded suggestions through AI for polish/rejection
+                    if enrichment_suggestions:
+                        suggestions_for_review = [
+                            {
+                                "field_name": s.field_name,
+                                "current_value": s.current_value,
+                                "suggested_value": s.suggested_value,
+                                "source": s.source,
+                                "evidence": s.evidence,
+                            }
+                            for s in enrichment_suggestions
+                        ]
+                        ai_reviews = await review_suggestions_async(
+                            article_number=article_number,
+                            product_name=product_data.product_name,
+                            suggestions=suggestions_for_review,
+                        )
+                        if ai_reviews:
+                            enrichment_suggestions = apply_ai_review_to_suggestions(
+                                enrichment_suggestions, ai_reviews
+                            )
+
+                    # 6c: Legacy AI enrichment (generates independent suggestions)
+                    # Kept for fields not covered by source-grounded enrichment
                     ai_enrich_result = await enrich_product_async(
                         product_name=product_data.product_name,
                         description=product_data.description,
@@ -968,8 +992,22 @@ async def _run_analysis(
                     )
                     if ai_enrich_result:
                         analysis.ai_enrichment = ai_enrich_result
+
                 except Exception as e:
-                    logger.warning(f"[{job_id}] AI scoring failed for {article_number}: {e}")
+                    logger.warning(f"[{job_id}] AI scoring/review failed for {article_number}: {e}")
+
+                # Step 7: Final quality gate — rule-based rejection of remaining bad suggestions
+                if enrichment_suggestions:
+                    enrichment_suggestions = final_quality_gate(enrichment_suggestions)
+
+                # Apply surviving suggestions
+                if enrichment_suggestions:
+                    analysis.enrichment_suggestions = enrichment_suggestions
+                    apply_enrichment_suggestions(analysis, enrichment_suggestions)
+                    logger.info(
+                        f"[{job_id}] {article_number}: "
+                        f"{len(enrichment_suggestions)} enrichment suggestion(s) after quality gate"
+                    )
 
                 return analysis
 

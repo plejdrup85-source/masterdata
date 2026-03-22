@@ -2,6 +2,13 @@
 
 Uses Claude to evaluate product data quality and suggest improvements
 for medical/healthcare products in the OneMed catalog.
+
+Two AI roles:
+1. SCORING: Evaluate current product data quality (score_product_async)
+2. REVIEW: Polish and quality-check enrichment suggestions (review_suggestions_async)
+
+The REVIEW step acts as an editorial quality gate — it does NOT invent facts,
+only improves language, rejects unusable fragments, and ensures output quality.
 """
 
 import json
@@ -387,4 +394,170 @@ async def enrich_product_async(
         return None
     except Exception as e:
         logger.error(f"Unexpected error during async AI enrichment: {e}")
+        return None
+
+
+# ── AI REVIEW / QUALITY GATE ──
+# This is the editorial quality layer. It receives source-grounded suggestions
+# and polishes them into production-quality Norwegian masterdata.
+
+REVIEW_SYSTEM_PROMPT = """Du er en redaktør for medisinsk produktmasterdata på norsk.
+
+Du mottar forslag til forbedringer for produktdata-felt. Hvert forslag har:
+- felt (field_name): hvilket felt forslaget gjelder
+- nåværende verdi (current_value): hva som står i dag
+- foreslått verdi (suggested_value): forslaget fra kilden
+- kilde (source): hvor forslaget kommer fra
+- kildeutdrag (evidence): utdrag fra kilden som støtter forslaget
+
+Din oppgave er å KVALITETSSIKRE og FORBEDRE hvert forslag:
+
+## REGLER PER FELT
+
+### Produktnavn
+- Kort, tydelig produkttittel
+- Normaliser store/små bokstaver
+- Fjern unødvendige tillegg
+- ALDRI lag en setning — kun tittel
+
+### Beskrivelse
+- Fullstendige, profesjonelle setninger på norsk
+- Forklar produktets bruksområde og egenskaper
+- Hvis kildeteksten er på engelsk, oversett til godt norsk
+- Behold all faktuell informasjon fra kilden
+- Gjør teksten lesbar og strukturert
+- ALDRI legg til informasjon som ikke finnes i kilden
+
+### Spesifikasjon
+- Strukturert format: "Egenskap: Verdi; Egenskap: Verdi"
+- Kun faktiske tekniske data
+- Fjern markedsføringsspråk
+- Behold alle verdier fra kilden
+
+### Pakningsinformasjon
+- KUN pakningsrelatert informasjon
+- Format: "X stk per eske, Y esker per kartong"
+- AVVIS hvis innholdet er lagringsinfo, bruksinstruksjoner eller markedsføring
+
+### Produsent / Produsentens varenummer
+- Kort, presis verdi
+- Fjern overflødig tekst
+
+### Kategori
+- Hierarkisk format når mulig: "Hovedkategori > Underkategori"
+
+## KRITISKE REGLER
+- ALDRI finn opp fakta
+- ALDRI legg til medisinsk informasjon som ikke finnes i kilden
+- Hvis forslaget er for dårlig til å rettes, sett "rejected": true
+- Forklar kort hvorfor i "reject_reason"
+- Behold kildeinformasjon nøyaktig
+- Skriv profesjonelt norsk
+
+## RESPONS
+Svar ALLTID med gyldig JSON — en liste med ett objekt per forslag."""
+
+REVIEW_USER_TEMPLATE = """Kvalitetssikre følgende forslag for produktet "{product_name}" (art.nr: {article_number}):
+
+{suggestions_json}
+
+Svar med denne JSON-strukturen (INGEN annen tekst, kun JSON):
+[
+  {{
+    "field_name": "<feltnavn>",
+    "reviewed_value": "<forbedret verdi eller null hvis avvist>",
+    "rejected": <true/false>,
+    "reject_reason": "<grunn hvis avvist, ellers null>",
+    "confidence_adjustment": <-0.2 til +0.1>,
+    "review_required": <true/false>,
+    "rationale": "<kort forklaring av endring>"
+  }}
+]"""
+
+
+async def review_suggestions_async(
+    article_number: str,
+    product_name: Optional[str],
+    suggestions: list[dict],
+) -> Optional[list[dict]]:
+    """AI editorial review of enrichment suggestions.
+
+    Takes source-grounded suggestions and returns polished versions.
+    Acts as a quality gate — rejects unusable suggestions, improves language,
+    ensures field-correctness.
+
+    Each suggestion dict should have:
+      field_name, current_value, suggested_value, source, evidence
+
+    Returns list of reviewed suggestions or None if AI unavailable.
+    """
+    api_key = ANTHROPIC_API_KEY
+    if not api_key:
+        return None
+
+    if not suggestions:
+        return []
+
+    client = anthropic.AsyncAnthropic(api_key=api_key)
+
+    # Build the suggestions JSON for the prompt
+    suggestions_for_prompt = []
+    for s in suggestions:
+        suggestions_for_prompt.append({
+            "field_name": s.get("field_name", ""),
+            "current_value": s.get("current_value") or "(mangler)",
+            "suggested_value": s.get("suggested_value", ""),
+            "source": s.get("source", ""),
+            "evidence": (s.get("evidence") or "")[:300],  # Limit evidence length
+        })
+
+    user_prompt = REVIEW_USER_TEMPLATE.format(
+        product_name=_safe_str(product_name),
+        article_number=article_number,
+        suggestions_json=json.dumps(suggestions_for_prompt, ensure_ascii=False, indent=2),
+    )
+
+    try:
+        response = await client.messages.create(
+            model=AI_MODEL,
+            max_tokens=3000,
+            system=REVIEW_SYSTEM_PROMPT,
+            messages=[{"role": "user", "content": user_prompt}],
+        )
+
+        text = next(
+            (b.text for b in response.content if b.type == "text"), ""
+        )
+        result = _parse_json_response(text)
+        if not result:
+            # Try parsing as a list
+            text = text.strip()
+            if text.startswith("["):
+                try:
+                    result = json.loads(text)
+                except json.JSONDecodeError:
+                    pass
+        if not result:
+            logger.error(f"Failed to parse AI review response: {text[:200]}")
+            return None
+
+        # Ensure it's a list
+        if isinstance(result, dict):
+            result = [result]
+        if not isinstance(result, list):
+            logger.error(f"AI review response is not a list: {type(result)}")
+            return None
+
+        logger.info(
+            f"AI review for {article_number}: "
+            f"{len(result)} suggestions reviewed, "
+            f"{sum(1 for r in result if r.get('rejected'))} rejected"
+        )
+        return result
+
+    except anthropic.APIError as e:
+        logger.error(f"Claude API error during review: {e}")
+        return None
+    except Exception as e:
+        logger.error(f"Unexpected error during AI review: {e}")
         return None
