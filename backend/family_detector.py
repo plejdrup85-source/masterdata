@@ -32,6 +32,7 @@ Variant dimensions (what differs between children):
   - sidevalg / laterality (left/right)
 """
 
+import hashlib
 import logging
 import re
 from collections import defaultdict
@@ -629,6 +630,17 @@ def _build_family_name(members: list[_ProductRecord]) -> str:
     return ""
 
 
+def _stable_family_id(group_key: str) -> str:
+    """Generate a stable, deterministic family ID from the group key.
+
+    Uses a content-based hash of the group key (brand||base_name) so the same
+    logical family gets the same ID across independent re-runs, regardless of
+    processing order.  Format: FAM-<8-char hex hash>.
+    """
+    digest = hashlib.sha256(group_key.encode("utf-8")).hexdigest()[:8]
+    return f"FAM-{digest}"
+
+
 # ── Main API ──
 
 
@@ -669,7 +681,6 @@ def detect_families(
     # Step 3: Score and build families
     families: list[ProductFamily] = []
     member_lookup: dict[str, FamilyMember] = {}  # article_number → member
-    family_counter = 0
 
     for group_key, group_records in sorted(multi_groups.items(), key=lambda x: -len(x[1])):
         confidence, reason, signals = _score_family(group_records)
@@ -691,8 +702,9 @@ def detect_families(
                 )
             continue
 
-        family_counter += 1
-        family_id = f"FAM-{family_counter:04d}"
+        # Stable family ID: content-based hash from group key (brand+base_name)
+        # This ensures the same logical family gets the same ID across re-runs
+        family_id = _stable_family_id(group_key)
         family_name = _build_family_name(group_records)
         variant_dim_names = _determine_variant_dimensions_for_family(group_records)
         mother_article = _choose_mother(group_records)

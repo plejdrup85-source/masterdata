@@ -607,6 +607,20 @@
         .badge-rejected { background: #fecaca; color: #991b1b; }
         .badge-needs_review { background: #fef3c7; color: #92400e; }
         .badge-pending { background: #e2e8f0; color: #475569; }
+        .badge-manual { background: #e0e7ff; color: #3730a3; font-size: 0.72rem; }
+        .family-checkbox { margin-right: 0.4rem; cursor: pointer; }
+        .move-btn {
+            padding: 0.15rem 0.4rem;
+            font-size: 0.72rem;
+            border: 1px solid #cbd5e1;
+            border-radius: 4px;
+            background: #f8fafc;
+            cursor: pointer;
+            color: #475569;
+            white-space: nowrap;
+        }
+        .move-btn:hover { background: #e2e8f0; }
+        .standalone-table .move-btn { font-size: 0.72rem; }
         .family-filter-bar select, .family-filter-bar input {
             padding: 0.4rem 0.6rem;
             border: 1px solid var(--border);
@@ -791,14 +805,48 @@
                     <span id="familyCount" style="color:var(--text-muted)"></span>
                 </div>
 
+                <!-- Bulk review bar -->
+                <div id="bulkReviewBar" style="display:none;padding:0.6rem;background:#f8fafc;border:1px solid var(--border);border-radius:8px;margin-bottom:0.75rem;align-items:center;gap:0.5rem;flex-wrap:wrap">
+                    <label style="font-size:0.82rem;cursor:pointer;user-select:none">
+                        <input type="checkbox" id="selectAllFamilies" style="margin-right:0.3rem">Velg alle synlige
+                    </label>
+                    <span id="bulkSelectedCount" style="font-size:0.82rem;color:var(--text-muted)"></span>
+                    <div style="margin-left:auto;display:flex;gap:0.35rem;flex-wrap:wrap">
+                        <button class="review-btn" onclick="bulkReviewAction('accepted')">Godkjenn valgte</button>
+                        <button class="review-btn" onclick="bulkReviewAction('rejected')">Avvis valgte</button>
+                        <button class="review-btn" onclick="bulkReviewAction('needs_review')">Manuell vurdering</button>
+                    </div>
+                </div>
+
                 <div id="familyList"></div>
 
                 <!-- Standalone products section -->
                 <div id="standaloneSection" style="margin-top:2rem">
-                    <h3 style="font-size:1rem;margin-bottom:0.75rem;cursor:pointer" onclick="document.getElementById('standaloneBody').classList.toggle('hidden');this.querySelector('span').textContent=document.getElementById('standaloneBody').classList.contains('hidden')?'▶':'▼'">
+                    <h3 style="font-size:1rem;margin-bottom:0.75rem;cursor:pointer" id="standaloneToggle">
                         <span>▶</span> Frittstående produkter <span id="standaloneCount" style="color:var(--text-muted);font-weight:400;font-size:0.85rem"></span>
                     </h3>
-                    <div id="standaloneBody" class="hidden"></div>
+                    <div id="standaloneBody" class="hidden">
+                        <div style="display:flex;gap:0.5rem;margin-bottom:0.5rem;align-items:center;flex-wrap:wrap">
+                            <input type="text" id="standaloneSearch" placeholder="Søk artikkelnr / produktnavn..." style="padding:0.35rem 0.6rem;border:1px solid var(--border);border-radius:6px;font-size:0.82rem;min-width:200px">
+                            <span id="standalonePageInfo" style="font-size:0.8rem;color:var(--text-muted)"></span>
+                        </div>
+                        <div id="standaloneTable"></div>
+                        <div style="display:flex;gap:0.5rem;margin-top:0.5rem;align-items:center" id="standalonePagination"></div>
+                    </div>
+                </div>
+            </div>
+        </div>
+
+        <!-- Move member modal -->
+        <div id="moveMemberModal" style="display:none;position:fixed;inset:0;background:rgba(0,0,0,0.4);z-index:1000;align-items:center;justify-content:center">
+            <div style="background:#fff;border-radius:12px;padding:1.5rem;max-width:450px;width:90%;box-shadow:0 8px 32px rgba(0,0,0,0.2)">
+                <h3 style="margin:0 0 0.75rem;font-size:1rem" id="moveModalTitle">Flytt produkt</h3>
+                <p style="font-size:0.85rem;color:var(--text-muted);margin:0 0 1rem" id="moveModalDesc"></p>
+                <label style="font-size:0.85rem;display:block;margin-bottom:0.5rem">Flytt til:</label>
+                <select id="moveTargetSelect" style="width:100%;padding:0.4rem;border:1px solid var(--border);border-radius:6px;font-size:0.85rem;margin-bottom:1rem"></select>
+                <div style="display:flex;gap:0.5rem;justify-content:flex-end">
+                    <button class="btn" style="background:#e2e8f0;color:#475569;font-size:0.85rem;padding:0.4rem 1rem" onclick="closeMoveModal()">Avbryt</button>
+                    <button class="btn btn-primary" style="font-size:0.85rem;padding:0.4rem 1rem" id="moveConfirmBtn">Flytt</button>
                 </div>
             </div>
         </div>
@@ -1382,11 +1430,22 @@
         const familyCount = document.getElementById('familyCount');
         const exportFamiliesBtn = document.getElementById('exportFamiliesBtn');
         const closeFamiliesBtn = document.getElementById('closeFamiliesBtn');
-        const standaloneBody = document.getElementById('standaloneBody');
         const standaloneCount = document.getElementById('standaloneCount');
+        const standaloneTable = document.getElementById('standaloneTable');
+        const standalonePagination = document.getElementById('standalonePagination');
+        const standaloneSearch = document.getElementById('standaloneSearch');
+        const standalonePageInfo = document.getElementById('standalonePageInfo');
+        const bulkReviewBar = document.getElementById('bulkReviewBar');
+        const selectAllFamilies = document.getElementById('selectAllFamilies');
+        const bulkSelectedCount = document.getElementById('bulkSelectedCount');
+        const moveMemberModal = document.getElementById('moveMemberModal');
 
         let familyData = null;
         let familySourceId = null;
+        let selectedFamilyIds = new Set();
+        let currentFilteredFamilyIds = [];
+        let standaloneOffset = 0;
+        const STANDALONE_PAGE_SIZE = 50;
 
         // Enable family-only button when file is selected
         fileInput.addEventListener('change', () => { familyOnlyBtn.disabled = !fileInput.files.length; });
@@ -1402,6 +1461,7 @@
                 }
                 familyData = await resp.json();
                 familySourceId = familyData.source_id;
+                selectedFamilyIds.clear();
                 renderFamilyResults(familyData);
                 familiesSection.classList.add('active');
                 familiesSection.scrollIntoView({ behavior: 'smooth', block: 'start' });
@@ -1410,13 +1470,11 @@
             }
         }
 
-        // Lim 1: From quality analysis results
         familyBtn.addEventListener('click', () => {
             if (!currentJobId) return;
             loadFamilies(`${API_BASE}/api/families/${currentJobId}`);
         });
 
-        // Lim 4: Independent analysis — uploaded file
         familyOnlyBtn.addEventListener('click', async () => {
             if (!selectedFile) return;
             familyOnlyBtn.disabled = true;
@@ -1428,7 +1486,6 @@
             familyOnlyBtn.textContent = 'Kun familieanalyse';
         });
 
-        // Lim 4: Independent analysis — full Jeeves catalog
         jeevesDirectBtn.addEventListener('click', async () => {
             jeevesDirectBtn.disabled = true;
             jeevesDirectBtn.textContent = 'Analyserer hele katalogen...';
@@ -1437,7 +1494,6 @@
             jeevesDirectBtn.textContent = 'Analyser hele Jeeves-katalogen';
         });
 
-        // Lim 5: Export
         exportFamiliesBtn.addEventListener('click', async () => {
             if (!familySourceId) return;
             try {
@@ -1452,8 +1508,17 @@
             } catch (e) { alert(`Eksport feilet: ${e.message}`); }
         });
 
-        closeFamiliesBtn.addEventListener('click', () => {
-            familiesSection.classList.remove('active');
+        closeFamiliesBtn.addEventListener('click', () => { familiesSection.classList.remove('active'); });
+
+        // Standalone section toggle
+        document.getElementById('standaloneToggle').addEventListener('click', function() {
+            const body = document.getElementById('standaloneBody');
+            body.classList.toggle('hidden');
+            this.querySelector('span').textContent = body.classList.contains('hidden') ? '▶' : '▼';
+            if (!body.classList.contains('hidden') && familySourceId) {
+                standaloneOffset = 0;
+                loadStandalonePage();
+            }
         });
 
         function renderFamilyResults(data) {
@@ -1469,7 +1534,7 @@
                 ${rejected ? `<div class="stat-card danger"><div class="value">${rejected}</div><div class="label">Avvist</div></div>` : ''}
             `;
             renderFamilyList(data.families);
-            renderStandalone(data.standalone || []);
+            standaloneCount.textContent = `(${data.standalone_products} produkter)`;
         }
 
         function renderFamilyList(families) {
@@ -1492,7 +1557,13 @@
                 );
             }
 
+            currentFilteredFamilyIds = filtered.map(f => f.family_id);
             familyCount.textContent = `${filtered.length} av ${families.length} familier`;
+
+            // Show/hide bulk review bar
+            bulkReviewBar.style.display = filtered.length > 0 ? 'flex' : 'none';
+            updateBulkCount();
+
             if (!filtered.length) {
                 familyList.innerHTML = '<p style="color:var(--text-muted);padding:1rem">Ingen familier matcher filteret.</p>';
                 return;
@@ -1511,28 +1582,33 @@
                 const membersHtml = f.members.map(m => {
                     const roleClass = m.role === 'mother' ? 'role-mother' : 'role-child';
                     const roleLabel = m.role === 'mother' ? 'Mor' : 'Barn';
+                    const manualBadge = m.manually_moved ? ' <span class="badge badge-manual">manuelt</span>' : '';
                     const dimsStr = m.variant_dimensions.map(d =>
                         `<span class="dim-tag">${escHtml(d.name)}: ${escHtml(d.value)}</span>`
                     ).join('');
                     return `<tr>
-                        <td class="${roleClass}">${roleLabel}</td>
+                        <td class="${roleClass}">${roleLabel}${manualBadge}</td>
                         <td style="font-family:monospace;font-size:0.8rem">${escHtml(m.article_number)}</td>
                         <td>${escHtml(m.specification || '')}</td>
                         <td>${dimsStr || '<span style="color:#aaa">—</span>'}</td>
+                        <td>
+                            <button class="move-btn" onclick="event.stopPropagation();openMoveModal('${escHtml(m.article_number)}','${f.family_id}','${escHtml(m.product_name||m.article_number)}')">Flytt</button>
+                        </td>
                     </tr>`;
                 }).join('');
 
-                // Lim 1: Review actions
                 const curStatus = f.review_status || 'pending';
+                const isChecked = selectedFamilyIds.has(f.family_id) ? 'checked' : '';
                 const reviewBar = `<div class="family-review-bar">
-                    <button class="review-btn ${curStatus==='accepted'?'active-accept':''}" onclick="setFamilyReview('${f.family_id}','accepted',this)">Godkjenn</button>
-                    <button class="review-btn ${curStatus==='rejected'?'active-reject':''}" onclick="setFamilyReview('${f.family_id}','rejected',this)">Avvis</button>
-                    <button class="review-btn ${curStatus==='needs_review'?'active-needs_review':''}" onclick="setFamilyReview('${f.family_id}','needs_review',this)">Manuell vurdering</button>
+                    <button class="review-btn ${curStatus==='accepted'?'active-accept':''}" onclick="setFamilyReview('${f.family_id}','accepted')">Godkjenn</button>
+                    <button class="review-btn ${curStatus==='rejected'?'active-reject':''}" onclick="setFamilyReview('${f.family_id}','rejected')">Avvis</button>
+                    <button class="review-btn ${curStatus==='needs_review'?'active-needs_review':''}" onclick="setFamilyReview('${f.family_id}','needs_review')">Manuell vurdering</button>
                     <input class="review-comment" placeholder="Kommentar..." value="${escHtml(f.review_comment||'')}" onchange="setFamilyComment('${f.family_id}',this.value)">
                 </div>`;
 
                 return `<div class="family-card" data-id="${f.family_id}">
                     <div class="family-header" onclick="this.parentElement.classList.toggle('open')">
+                        <input type="checkbox" class="family-checkbox" ${isChecked} onclick="event.stopPropagation();toggleFamilySelect('${f.family_id}',this.checked)">
                         <span class="family-chevron">▶</span>
                         <span class="family-name" title="${escHtml(f.family_name)}">${escHtml(f.family_name)}</span>
                         <div class="family-meta">
@@ -1548,7 +1624,7 @@
                             ${f.mother_article ? ` · Mor: <strong>${escHtml(f.mother_article)}</strong>` : ' · Mor: <em>(abstrakt)</em>'}
                         </div>
                         <table class="member-table">
-                            <thead><tr><th>Rolle</th><th>Artikkelnr</th><th>Spesifikasjon</th><th>Varianter</th></tr></thead>
+                            <thead><tr><th>Rolle</th><th>Artikkelnr</th><th>Spesifikasjon</th><th>Varianter</th><th></th></tr></thead>
                             <tbody>${membersHtml}</tbody>
                         </table>
                         ${reviewBar}
@@ -1557,27 +1633,162 @@
             }).join('');
         }
 
-        // Lim 2: Standalone products
-        function renderStandalone(standalone) {
-            standaloneCount.textContent = `(${standalone.length} produkter)`;
-            if (!standalone.length) {
-                standaloneBody.innerHTML = '<p style="color:var(--text-muted)">Ingen frittstående produkter.</p>';
-                return;
-            }
-            const rows = standalone.slice(0, 200).map(s => `<tr>
-                <td style="font-family:monospace;font-size:0.8rem">${escHtml(s.article_number)}</td>
-                <td>${escHtml(s.product_name || '')}</td>
-                <td>${escHtml(s.specification || '')}</td>
-                <td style="font-size:0.78rem;color:var(--text-muted)">${escHtml(s.grouping_reason || '')}</td>
-            </tr>`).join('');
-            standaloneBody.innerHTML = `<table class="standalone-table">
-                <thead><tr><th>Artikkelnr</th><th>Produktnavn</th><th>Spesifikasjon</th><th>Årsak</th></tr></thead>
-                <tbody>${rows}</tbody>
-            </table>${standalone.length > 200 ? `<p style="color:var(--text-muted);font-size:0.82rem;margin-top:0.5rem">Viser 200 av ${standalone.length}. Last ned Excel for komplett liste.</p>` : ''}`;
+        // ── Bulk review ──
+        function toggleFamilySelect(familyId, checked) {
+            if (checked) selectedFamilyIds.add(familyId);
+            else selectedFamilyIds.delete(familyId);
+            updateBulkCount();
         }
 
-        // Lim 1: Review action handlers
-        async function setFamilyReview(familyId, status, btn) {
+        function updateBulkCount() {
+            const visibleSelected = [...selectedFamilyIds].filter(id => currentFilteredFamilyIds.includes(id)).length;
+            bulkSelectedCount.textContent = visibleSelected > 0 ? `${visibleSelected} valgt` : '';
+            selectAllFamilies.checked = currentFilteredFamilyIds.length > 0 && currentFilteredFamilyIds.every(id => selectedFamilyIds.has(id));
+        }
+
+        selectAllFamilies.addEventListener('change', (e) => {
+            currentFilteredFamilyIds.forEach(id => {
+                if (e.target.checked) selectedFamilyIds.add(id);
+                else selectedFamilyIds.delete(id);
+            });
+            // Update checkboxes in DOM
+            document.querySelectorAll('.family-checkbox').forEach(cb => { cb.checked = e.target.checked; });
+            updateBulkCount();
+        });
+
+        async function bulkReviewAction(status) {
+            const ids = [...selectedFamilyIds].filter(id => currentFilteredFamilyIds.includes(id));
+            if (!ids.length) { alert('Ingen familier valgt.'); return; }
+            const labels = {accepted:'godkjenne',rejected:'avvise',needs_review:'merke for vurdering'};
+            if (!confirm(`Er du sikker på at du vil ${labels[status]} ${ids.length} ${ids.length===1?'familie':'familier'}?`)) return;
+            try {
+                const resp = await fetch(`${API_BASE}/api/families/${familySourceId}/bulk-review`, {
+                    method: 'PUT',
+                    headers: {'Content-Type': 'application/json'},
+                    body: JSON.stringify({family_ids: ids, review_status: status}),
+                });
+                if (!resp.ok) throw new Error(`HTTP ${resp.status}`);
+                // Update local data
+                familyData.families.forEach(f => { if (ids.includes(f.family_id)) f.review_status = status; });
+                selectedFamilyIds.clear();
+                renderFamilyResults(familyData);
+            } catch (e) { alert(`Bulk-oppdatering feilet: ${e.message}`); }
+        }
+
+        // ── Move member modal ──
+        let moveState = { article: '', fromFamily: '', productName: '' };
+
+        function openMoveModal(article, fromFamilyId, productName) {
+            moveState = { article, fromFamily: fromFamilyId, productName };
+            document.getElementById('moveModalTitle').textContent = `Flytt ${productName}`;
+            document.getElementById('moveModalDesc').textContent = `Artikkelnr: ${article}`;
+            const sel = document.getElementById('moveTargetSelect');
+            sel.innerHTML = '<option value="standalone">Frittstående (standalone)</option>';
+            familyData.families.forEach(f => {
+                if (f.family_id !== fromFamilyId) {
+                    sel.innerHTML += `<option value="${f.family_id}">${escHtml(f.family_name)} (${f.member_count} stk)</option>`;
+                }
+            });
+            moveMemberModal.style.display = 'flex';
+        }
+
+        function closeMoveModal() { moveMemberModal.style.display = 'none'; }
+
+        document.getElementById('moveConfirmBtn').addEventListener('click', async () => {
+            const toId = document.getElementById('moveTargetSelect').value;
+            if (!toId) return;
+            try {
+                const resp = await fetch(`${API_BASE}/api/families/${familySourceId}/move-member`, {
+                    method: 'PUT',
+                    headers: {'Content-Type': 'application/json'},
+                    body: JSON.stringify({
+                        article_number: moveState.article,
+                        from_family_id: moveState.fromFamily,
+                        to_family_id: toId,
+                    }),
+                });
+                if (!resp.ok) {
+                    const err = await resp.json().catch(() => ({}));
+                    throw new Error(err.detail || `HTTP ${resp.status}`);
+                }
+                closeMoveModal();
+                // Reload full data to reflect move
+                await loadFamilies(`${API_BASE}/api/families/${familySourceId}`);
+            } catch (e) { alert(`Flytting feilet: ${e.message}`); }
+        });
+
+        // ── Standalone products with server-side pagination ──
+        let standaloneSearchTimeout = null;
+        standaloneSearch.addEventListener('input', () => {
+            clearTimeout(standaloneSearchTimeout);
+            standaloneSearchTimeout = setTimeout(() => { standaloneOffset = 0; loadStandalonePage(); }, 300);
+        });
+
+        async function loadStandalonePage() {
+            if (!familySourceId) return;
+            const q = standaloneSearch.value.trim();
+            const params = new URLSearchParams({offset: standaloneOffset, limit: STANDALONE_PAGE_SIZE});
+            if (q) params.set('search', q);
+            try {
+                const resp = await fetch(`${API_BASE}/api/families/${familySourceId}/standalone?${params}`);
+                if (!resp.ok) throw new Error(`HTTP ${resp.status}`);
+                const data = await resp.json();
+                renderStandalonePage(data);
+            } catch (e) {
+                standaloneTable.innerHTML = `<p style="color:var(--danger)">Feil: ${escHtml(e.message)}</p>`;
+            }
+        }
+
+        function renderStandalonePage(data) {
+            const { total, offset, limit, items } = data;
+            standalonePageInfo.textContent = total > 0 ? `Viser ${offset+1}–${Math.min(offset+limit,total)} av ${total}` : 'Ingen treff';
+            if (!items.length) {
+                standaloneTable.innerHTML = '<p style="color:var(--text-muted)">Ingen frittstående produkter.</p>';
+                standalonePagination.innerHTML = '';
+                return;
+            }
+            const rows = items.map(s => {
+                const manualBadge = s.manually_moved ? '<span class="badge badge-manual">manuelt</span> ' : '';
+                return `<tr>
+                    <td style="font-family:monospace;font-size:0.8rem">${escHtml(s.article_number)}</td>
+                    <td>${escHtml(s.product_name || '')}</td>
+                    <td>${escHtml(s.specification || '')}</td>
+                    <td style="font-size:0.78rem;color:var(--text-muted)">${manualBadge}${escHtml(s.grouping_reason || '')}</td>
+                    <td><button class="move-btn" onclick="openMoveFromStandalone('${escHtml(s.article_number)}','${escHtml(s.product_name||s.article_number)}')">Til familie</button></td>
+                </tr>`;
+            }).join('');
+            standaloneTable.innerHTML = `<table class="standalone-table">
+                <thead><tr><th>Artikkelnr</th><th>Produktnavn</th><th>Spesifikasjon</th><th>Årsak</th><th></th></tr></thead>
+                <tbody>${rows}</tbody>
+            </table>`;
+
+            // Pagination buttons
+            const totalPages = Math.ceil(total / limit);
+            const currentPage = Math.floor(offset / limit) + 1;
+            let pagHtml = '';
+            if (currentPage > 1)
+                pagHtml += `<button class="review-btn" onclick="standaloneOffset=${offset-limit};loadStandalonePage()">Forrige</button>`;
+            pagHtml += `<span style="font-size:0.82rem;color:var(--text-muted)">Side ${currentPage} av ${totalPages}</span>`;
+            if (currentPage < totalPages)
+                pagHtml += `<button class="review-btn" onclick="standaloneOffset=${offset+limit};loadStandalonePage()">Neste</button>`;
+            standalonePagination.innerHTML = pagHtml;
+        }
+
+        function openMoveFromStandalone(article, productName) {
+            moveState = { article, fromFamily: 'standalone', productName };
+            document.getElementById('moveModalTitle').textContent = `Flytt ${productName} til en familie`;
+            document.getElementById('moveModalDesc').textContent = `Artikkelnr: ${article} (frittstående)`;
+            const sel = document.getElementById('moveTargetSelect');
+            sel.innerHTML = '';
+            familyData.families.forEach(f => {
+                sel.innerHTML += `<option value="${f.family_id}">${escHtml(f.family_name)} (${f.member_count} stk)</option>`;
+            });
+            if (!familyData.families.length) sel.innerHTML = '<option disabled>Ingen familier tilgjengelig</option>';
+            moveMemberModal.style.display = 'flex';
+        }
+
+        // ── Single review action handlers ──
+        async function setFamilyReview(familyId, status) {
             if (!familySourceId) return;
             try {
                 const resp = await fetch(`${API_BASE}/api/families/${familySourceId}/review/${familyId}`, {
@@ -1586,7 +1797,6 @@
                     body: JSON.stringify({review_status: status}),
                 });
                 if (!resp.ok) throw new Error(`HTTP ${resp.status}`);
-                // Update local data
                 const fam = familyData.families.find(f => f.family_id === familyId);
                 if (fam) fam.review_status = status;
                 renderFamilyResults(familyData);
@@ -1608,10 +1818,10 @@
 
         function escHtml(s) {
             if (!s) return '';
-            return s.replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;');
+            return s.replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;').replace(/'/g,'&#39;');
         }
 
-        familyFilter.addEventListener('change', () => { if (familyData) renderFamilyList(familyData.families); });
+        familyFilter.addEventListener('change', () => { selectedFamilyIds.clear(); if (familyData) renderFamilyList(familyData.families); });
         familySearch.addEventListener('input', () => { if (familyData) renderFamilyList(familyData.families); });
 
         // New analysis with confirmation

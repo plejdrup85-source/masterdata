@@ -696,16 +696,7 @@ async def update_family_review(source_id: str, family_id: str, data: dict):
            "review_comment": "optional note",
            "family_name": "optional edited name"}
     """
-    if source_id not in _family_results:
-        # Try loading from disk
-        import json
-        disk_path = FAMILY_OUTPUT_DIR / f"{source_id}.json"
-        if disk_path.exists():
-            _family_results[source_id] = json.loads(disk_path.read_text(encoding="utf-8"))
-        else:
-            raise HTTPException(404, "Familieresultater ikke funnet")
-
-    result = _family_results[source_id]
+    result = _load_family_results(source_id)
     family = next((f for f in result["families"] if f["family_id"] == family_id), None)
     if not family:
         raise HTTPException(404, f"Familie {family_id} ikke funnet")
@@ -722,32 +713,17 @@ async def update_family_review(source_id: str, family_id: str, data: dict):
     if "family_name" in data and data["family_name"]:
         family["family_name"] = data["family_name"]
 
-    # Persist to disk
-    import json
-    try:
-        disk_path = FAMILY_OUTPUT_DIR / f"{source_id}.json"
-        disk_path.write_text(json.dumps(result, ensure_ascii=False, indent=2), encoding="utf-8")
-    except Exception as e:
-        logger.warning(f"Failed to persist review update: {e}")
-
+    _persist_family_to_disk(source_id)
     return {"status": "ok", "family_id": family_id, "review_status": family.get("review_status")}
 
 
 @app.get("/api/families/{source_id}/export")
 async def export_families(source_id: str):
     """Export family results as an Excel file."""
-    import json
     from openpyxl import Workbook
     from openpyxl.styles import Font, PatternFill, Alignment
 
-    if source_id not in _family_results:
-        disk_path = FAMILY_OUTPUT_DIR / f"{source_id}.json"
-        if disk_path.exists():
-            _family_results[source_id] = json.loads(disk_path.read_text(encoding="utf-8"))
-        else:
-            raise HTTPException(404, "Familieresultater ikke funnet")
-
-    data = _family_results[source_id]
+    data = _load_family_results(source_id)
     wb = Workbook()
 
     # Sheet 1: Families
@@ -828,6 +804,184 @@ async def export_families(source_id: str):
         media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
         headers={"Content-Disposition": f"attachment; filename=produktfamilier_{source_id}.xlsx"},
     )
+
+
+def _load_family_results(source_id: str) -> dict:
+    """Load family results from memory or disk. Raises HTTPException(404) if not found."""
+    import json
+    if source_id not in _family_results:
+        disk_path = FAMILY_OUTPUT_DIR / f"{source_id}.json"
+        if disk_path.exists():
+            _family_results[source_id] = json.loads(disk_path.read_text(encoding="utf-8"))
+        else:
+            raise HTTPException(404, "Familieresultater ikke funnet")
+    return _family_results[source_id]
+
+
+def _persist_family_to_disk(source_id: str):
+    """Write current in-memory family results to disk."""
+    import json
+    if source_id not in _family_results:
+        return
+    try:
+        disk_path = FAMILY_OUTPUT_DIR / f"{source_id}.json"
+        disk_path.write_text(
+            json.dumps(_family_results[source_id], ensure_ascii=False, indent=2),
+            encoding="utf-8",
+        )
+    except Exception as e:
+        logger.warning(f"Failed to persist family results: {e}")
+
+
+@app.put("/api/families/{source_id}/bulk-review")
+async def bulk_review_families(source_id: str, data: dict):
+    """Bulk update review status for multiple families at once.
+
+    Body: {"family_ids": ["FAM-abc12345", ...],
+           "review_status": "accepted"|"rejected"|"needs_review"|"pending",
+           "review_comment": "optional shared comment"}
+    """
+    result = _load_family_results(source_id)
+
+    family_ids = data.get("family_ids", [])
+    if not family_ids:
+        raise HTTPException(400, "Ingen familie-IDer oppgitt")
+
+    valid_statuses = {"pending", "accepted", "rejected", "needs_review"}
+    new_status = data.get("review_status")
+    if not new_status or new_status not in valid_statuses:
+        raise HTTPException(400, f"Ugyldig status: {new_status}. Gyldige: {valid_statuses}")
+
+    comment = data.get("review_comment")
+    updated = 0
+    for fam in result["families"]:
+        if fam["family_id"] in family_ids:
+            fam["review_status"] = new_status
+            if comment is not None:
+                fam["review_comment"] = comment
+            updated += 1
+
+    _persist_family_to_disk(source_id)
+    return {"status": "ok", "updated": updated, "review_status": new_status}
+
+
+@app.put("/api/families/{source_id}/move-member")
+async def move_family_member(source_id: str, data: dict):
+    """Move a product between families or to/from standalone.
+
+    Body: {"article_number": "12345",
+           "from_family_id": "FAM-xxx" or "standalone",
+           "to_family_id": "FAM-yyy" or "standalone"}
+
+    Records the move as a manual override for traceability.
+    """
+    result = _load_family_results(source_id)
+
+    article = data.get("article_number")
+    from_id = data.get("from_family_id")
+    to_id = data.get("to_family_id")
+    if not article or not from_id or not to_id:
+        raise HTTPException(400, "article_number, from_family_id og to_family_id er påkrevd")
+    if from_id == to_id:
+        raise HTTPException(400, "Kilde og mål kan ikke være like")
+
+    # Find the member to move
+    member = None
+    if from_id == "standalone":
+        idx = next((i for i, s in enumerate(result.get("standalone", [])) if s["article_number"] == article), None)
+        if idx is None:
+            raise HTTPException(404, f"Produkt {article} ikke funnet i frittstående")
+        s = result["standalone"].pop(idx)
+        member = {
+            "article_number": s["article_number"],
+            "role": "child",
+            "product_name": s.get("product_name", ""),
+            "specification": s.get("specification", ""),
+            "child_specific_title": "",
+            "variant_dimensions": [],
+            "manually_moved": True,
+        }
+    else:
+        src_family = next((f for f in result["families"] if f["family_id"] == from_id), None)
+        if not src_family:
+            raise HTTPException(404, f"Kildefamilie {from_id} ikke funnet")
+        midx = next((i for i, m in enumerate(src_family["members"]) if m["article_number"] == article), None)
+        if midx is None:
+            raise HTTPException(404, f"Produkt {article} ikke funnet i familie {from_id}")
+        member = src_family["members"].pop(midx)
+        member["manually_moved"] = True
+        member["role"] = "child"  # reset role when moving
+        src_family["member_count"] = len(src_family["members"])
+        # If source family is now empty, remove it
+        if len(src_family["members"]) == 0:
+            result["families"] = [f for f in result["families"] if f["family_id"] != from_id]
+
+    # Place the member in destination
+    if to_id == "standalone":
+        result.setdefault("standalone", []).append({
+            "article_number": member["article_number"],
+            "product_name": member.get("product_name", ""),
+            "specification": member.get("specification", ""),
+            "grouping_reason": "Manuelt flyttet til frittstående",
+            "confidence": 0,
+            "manually_moved": True,
+        })
+    else:
+        dst_family = next((f for f in result["families"] if f["family_id"] == to_id), None)
+        if not dst_family:
+            raise HTTPException(404, f"Målfamilie {to_id} ikke funnet")
+        dst_family["members"].append(member)
+        dst_family["member_count"] = len(dst_family["members"])
+
+    # Update standalone count
+    result["standalone_products"] = len(result.get("standalone", []))
+    result["total_families"] = len(result["families"])
+
+    # Track manual overrides
+    result.setdefault("manual_overrides", []).append({
+        "article_number": article,
+        "from": from_id,
+        "to": to_id,
+        "action": "move_member",
+    })
+
+    _persist_family_to_disk(source_id)
+    return {
+        "status": "ok",
+        "article_number": article,
+        "moved_from": from_id,
+        "moved_to": to_id,
+    }
+
+
+@app.get("/api/families/{source_id}/standalone")
+async def get_standalone_page(
+    source_id: str,
+    offset: int = Query(0, ge=0),
+    limit: int = Query(50, ge=1, le=200),
+    search: str = Query("", description="Search in article_number or product_name"),
+):
+    """Paginated standalone products with optional search."""
+    result = _load_family_results(source_id)
+    standalone = result.get("standalone", [])
+
+    if search:
+        q = search.lower()
+        standalone = [
+            s for s in standalone
+            if q in s.get("article_number", "").lower()
+            or q in s.get("product_name", "").lower()
+            or q in s.get("specification", "").lower()
+        ]
+
+    total = len(standalone)
+    page = standalone[offset:offset + limit]
+    return {
+        "total": total,
+        "offset": offset,
+        "limit": limit,
+        "items": page,
+    }
 
 
 @app.post("/api/score-product")
