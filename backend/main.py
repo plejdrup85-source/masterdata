@@ -507,6 +507,72 @@ async def get_results(job_id: str):
     }
 
 
+@app.get("/api/families/{job_id}")
+async def get_families(job_id: str):
+    """Run family/variant detection on completed analysis results.
+
+    Returns product families with Mother/Child structure, variant dimensions,
+    and confidence scoring for Inriver/webshop review.
+    """
+    from backend.family_detector import detect_families, products_from_analyses
+
+    job = jobs.get(job_id)
+    if not job:
+        raise HTTPException(404, "Jobb ikke funnet")
+    if job.status != JobStatus.COMPLETED:
+        raise HTTPException(400, "Analyse ikke fullført ennå")
+    if not job.results:
+        raise HTTPException(400, "Ingen resultater tilgjengelig")
+
+    # Build product dicts from analysis results and run family detection
+    product_dicts = products_from_analyses(job.results)
+    families, all_members = detect_families(product_dicts)
+
+    # Serialize families for JSON response
+    family_list = []
+    for f in sorted(families, key=lambda x: (-x.confidence, -len(x.members))):
+        family_list.append({
+            "family_id": f.family_id,
+            "family_name": f.family_name,
+            "member_count": len(f.members),
+            "variant_dimensions": f.variant_dimension_names,
+            "mother_article": f.mother_article,
+            "confidence": f.confidence,
+            "review_required": f.review_required,
+            "grouping_reason": f.grouping_reason,
+            "members": [
+                {
+                    "article_number": m.article_number,
+                    "role": m.role,
+                    "product_name": m.product_name,
+                    "specification": m.specification,
+                    "child_specific_title": m.child_specific_title,
+                    "variant_dimensions": [
+                        {"name": d.dimension_name, "value": d.value, "source": d.source}
+                        for d in m.variant_dimensions
+                    ],
+                }
+                for m in f.members
+            ],
+        })
+
+    # Summary stats
+    families_with_dims = sum(1 for f in families if f.variant_dimension_names)
+    strong = sum(1 for f in families if f.confidence >= 0.65)
+    standalone_count = sum(1 for m in all_members if m.role == "standalone")
+
+    return {
+        "job_id": job_id,
+        "total_products": len(all_members),
+        "total_families": len(families),
+        "strong_families": strong,
+        "families_with_dimensions": families_with_dims,
+        "families_without_dimensions": len(families) - families_with_dims,
+        "standalone_products": standalone_count,
+        "families": family_list,
+    }
+
+
 @app.post("/api/score-product")
 async def score_product_endpoint(data: dict):
     """Score a single product using Claude AI.

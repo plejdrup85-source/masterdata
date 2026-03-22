@@ -436,6 +436,133 @@
 
         .hidden { display: none !important; }
 
+        /* ── Product Family / Relationship Tab ── */
+        .tab-bar {
+            display: flex;
+            gap: 0;
+            border-bottom: 2px solid var(--border);
+            margin-bottom: 1.5rem;
+        }
+        .tab-btn {
+            padding: 0.7rem 1.5rem;
+            border: none;
+            background: none;
+            font-size: 0.95rem;
+            font-weight: 600;
+            color: var(--text-muted);
+            cursor: pointer;
+            border-bottom: 2px solid transparent;
+            margin-bottom: -2px;
+            transition: all 0.15s;
+        }
+        .tab-btn:hover { color: var(--text); }
+        .tab-btn.active {
+            color: var(--primary);
+            border-bottom-color: var(--primary);
+        }
+
+        .family-card {
+            background: var(--card-bg);
+            border: 1px solid var(--border);
+            border-radius: var(--radius);
+            margin-bottom: 0.75rem;
+            overflow: hidden;
+        }
+        .family-header {
+            display: flex;
+            align-items: center;
+            gap: 1rem;
+            padding: 0.75rem 1rem;
+            cursor: pointer;
+            transition: background 0.1s;
+        }
+        .family-header:hover { background: #f1f5f9; }
+        .family-header .family-name {
+            font-weight: 600;
+            flex: 1;
+            min-width: 0;
+            white-space: nowrap;
+            overflow: hidden;
+            text-overflow: ellipsis;
+        }
+        .family-meta {
+            display: flex;
+            gap: 0.75rem;
+            align-items: center;
+            flex-shrink: 0;
+            font-size: 0.82rem;
+        }
+        .family-meta .badge {
+            display: inline-block;
+            padding: 0.15rem 0.5rem;
+            border-radius: 10px;
+            font-size: 0.75rem;
+            font-weight: 600;
+        }
+        .badge-strong { background: #dcfce7; color: #166534; }
+        .badge-weak { background: #fef3c7; color: #92400e; }
+        .badge-review { background: #fecaca; color: #991b1b; }
+        .badge-dims { background: #dbeafe; color: #1e40af; }
+
+        .family-body {
+            display: none;
+            border-top: 1px solid var(--border);
+            padding: 0.75rem 1rem;
+            background: #fafbfd;
+        }
+        .family-card.open .family-body { display: block; }
+        .family-card.open .family-chevron { transform: rotate(90deg); }
+        .family-chevron {
+            transition: transform 0.15s;
+            color: var(--text-muted);
+            font-size: 0.8rem;
+        }
+
+        .member-table {
+            width: 100%;
+            border-collapse: collapse;
+            font-size: 0.82rem;
+        }
+        .member-table th {
+            text-align: left;
+            padding: 0.35rem 0.5rem;
+            border-bottom: 1px solid var(--border);
+            color: var(--text-muted);
+            font-weight: 600;
+        }
+        .member-table td {
+            padding: 0.35rem 0.5rem;
+            border-bottom: 1px solid #f1f5f9;
+            vertical-align: top;
+        }
+        .member-table .role-mother { font-weight: 600; color: #166534; }
+        .member-table .role-child { color: var(--text); }
+        .dim-tag {
+            display: inline-block;
+            padding: 0.1rem 0.4rem;
+            background: #eff6ff;
+            border: 1px solid #bfdbfe;
+            border-radius: 4px;
+            font-size: 0.75rem;
+            margin: 0.1rem 0.15rem;
+            white-space: nowrap;
+        }
+
+        .family-filter-bar {
+            display: flex;
+            gap: 0.75rem;
+            flex-wrap: wrap;
+            margin-bottom: 1rem;
+            align-items: center;
+            font-size: 0.85rem;
+        }
+        .family-filter-bar select, .family-filter-bar input {
+            padding: 0.4rem 0.6rem;
+            border: 1px solid var(--border);
+            border-radius: 6px;
+            font-size: 0.85rem;
+        }
+
         @media (max-width: 640px) {
             .container { padding: 1rem; }
             .card { padding: 1.25rem; }
@@ -536,6 +663,7 @@
                 <div class="stats-grid" id="statsGrid"></div>
                 <div class="actions">
                     <button class="btn btn-success" id="downloadBtn">Last ned Excel-rapport</button>
+                    <button class="btn btn-primary" id="familyBtn" style="background:#7c3aed">Vis produktfamilier</button>
                     <button class="btn btn-primary" id="newAnalysisBtn">Ny analyse</button>
                 </div>
             </div>
@@ -564,6 +692,36 @@
             <div class="card hidden" id="errorsCard">
                 <h2>Feillogg</h2>
                 <div class="error-log" id="errorLog"></div>
+            </div>
+        </div>
+
+        <!-- Product Families Section (appears after analysis completes) -->
+        <div class="results-section" id="familiesSection">
+            <div class="card">
+                <h2>Produktfamilier / Variantstruktur</h2>
+                <p style="color:var(--text-muted);font-size:0.9rem;margin-bottom:1rem">
+                    Foreslått Mor/Barn-struktur for Inriver og webshop.
+                    Klikk på en familie for å se medlemmer og variantdimensjoner.
+                </p>
+                <div class="stats-grid" id="familyStatsGrid"></div>
+
+                <div class="family-filter-bar" id="familyFilterBar">
+                    <label>Vis:
+                        <select id="familyFilter">
+                            <option value="all">Alle familier</option>
+                            <option value="strong">Sterke familier (konf. ≥ 0.65)</option>
+                            <option value="review">Krever gjennomgang</option>
+                            <option value="no-dims">Uten variantdimensjoner</option>
+                            <option value="with-dims">Med variantdimensjoner</option>
+                        </select>
+                    </label>
+                    <label>Søk:
+                        <input type="text" id="familySearch" placeholder="Familienavn eller artikkelnr...">
+                    </label>
+                    <span id="familyCount" style="color:var(--text-muted)"></span>
+                </div>
+
+                <div id="familyList"></div>
             </div>
         </div>
     </div>
@@ -1134,6 +1292,152 @@
             }
         });
 
+        // ── Product Families UI ──
+        const familyBtn = document.getElementById('familyBtn');
+        const familiesSection = document.getElementById('familiesSection');
+        const familyStatsGrid = document.getElementById('familyStatsGrid');
+        const familyList = document.getElementById('familyList');
+        const familyFilter = document.getElementById('familyFilter');
+        const familySearch = document.getElementById('familySearch');
+        const familyCount = document.getElementById('familyCount');
+
+        let familyData = null;
+
+        familyBtn.addEventListener('click', async () => {
+            if (!currentJobId) return;
+            familyBtn.disabled = true;
+            familyBtn.textContent = 'Laster familier...';
+            try {
+                const resp = await fetch(`${API_BASE}/api/families/${currentJobId}`);
+                if (!resp.ok) {
+                    const err = await resp.json().catch(() => ({}));
+                    throw new Error(err.detail || `HTTP ${resp.status}`);
+                }
+                familyData = await resp.json();
+                renderFamilyResults(familyData);
+                familiesSection.classList.add('active');
+                familiesSection.scrollIntoView({ behavior: 'smooth', block: 'start' });
+            } catch (e) {
+                alert(`Kunne ikke laste produktfamilier: ${e.message}`);
+            } finally {
+                familyBtn.disabled = false;
+                familyBtn.textContent = 'Vis produktfamilier';
+            }
+        });
+
+        function renderFamilyResults(data) {
+            // Stats
+            familyStatsGrid.innerHTML = `
+                <div class="stat-card">
+                    <div class="value">${data.total_products}</div>
+                    <div class="label">Produkter</div>
+                </div>
+                <div class="stat-card success">
+                    <div class="value">${data.total_families}</div>
+                    <div class="label">Familier</div>
+                </div>
+                <div class="stat-card success">
+                    <div class="value">${data.strong_families}</div>
+                    <div class="label">Sterke familier</div>
+                </div>
+                <div class="stat-card ${data.families_with_dimensions > 0 ? 'success' : 'danger'}">
+                    <div class="value">${data.families_with_dimensions}</div>
+                    <div class="label">Med varianter</div>
+                </div>
+                <div class="stat-card ${data.families_without_dimensions === 0 ? 'success' : 'warning'}">
+                    <div class="value">${data.families_without_dimensions}</div>
+                    <div class="label">Uten varianter</div>
+                </div>
+                <div class="stat-card">
+                    <div class="value">${data.standalone_products}</div>
+                    <div class="label">Frittstående</div>
+                </div>
+            `;
+            renderFamilyList(data.families);
+        }
+
+        function renderFamilyList(families) {
+            const filter = familyFilter.value;
+            const search = familySearch.value.toLowerCase().trim();
+
+            let filtered = families;
+            if (filter === 'strong') filtered = filtered.filter(f => f.confidence >= 0.65);
+            if (filter === 'review') filtered = filtered.filter(f => f.review_required);
+            if (filter === 'no-dims') filtered = filtered.filter(f => f.variant_dimensions.length === 0);
+            if (filter === 'with-dims') filtered = filtered.filter(f => f.variant_dimensions.length > 0);
+            if (search) {
+                filtered = filtered.filter(f =>
+                    f.family_name.toLowerCase().includes(search) ||
+                    f.family_id.toLowerCase().includes(search) ||
+                    f.members.some(m => m.article_number.toLowerCase().includes(search))
+                );
+            }
+
+            familyCount.textContent = `${filtered.length} av ${families.length} familier`;
+
+            if (filtered.length === 0) {
+                familyList.innerHTML = '<p style="color:var(--text-muted);padding:1rem">Ingen familier matcher filteret.</p>';
+                return;
+            }
+
+            familyList.innerHTML = filtered.map(f => {
+                const confClass = f.confidence >= 0.65 ? 'badge-strong' : f.confidence >= 0.30 ? 'badge-weak' : 'badge-review';
+                const confLabel = f.confidence >= 0.65 ? 'Sterk' : f.confidence >= 0.30 ? 'Moderat' : 'Svak';
+                const dimsHtml = f.variant_dimensions.length > 0
+                    ? f.variant_dimensions.map(d => `<span class="badge badge-dims">${escHtml(d)}</span>`).join(' ')
+                    : '<span style="color:var(--text-muted);font-size:0.8rem">ingen dimensjoner</span>';
+
+                const membersHtml = f.members.map(m => {
+                    const roleClass = m.role === 'mother' ? 'role-mother' : 'role-child';
+                    const roleLabel = m.role === 'mother' ? 'Mor' : 'Barn';
+                    const dimsStr = m.variant_dimensions.map(d =>
+                        `<span class="dim-tag">${escHtml(d.name)}: ${escHtml(d.value)}</span>`
+                    ).join('');
+                    return `<tr>
+                        <td class="${roleClass}">${roleLabel}</td>
+                        <td style="font-family:monospace;font-size:0.8rem">${escHtml(m.article_number)}</td>
+                        <td>${escHtml(m.specification || '')}</td>
+                        <td>${dimsStr || '<span style="color:#aaa">—</span>'}</td>
+                    </tr>`;
+                }).join('');
+
+                return `<div class="family-card" data-id="${f.family_id}">
+                    <div class="family-header" onclick="this.parentElement.classList.toggle('open')">
+                        <span class="family-chevron">▶</span>
+                        <span class="family-name" title="${escHtml(f.family_name)}">${escHtml(f.family_name)}</span>
+                        <div class="family-meta">
+                            ${dimsHtml}
+                            <span class="badge ${confClass}">${confLabel} (${f.confidence})</span>
+                            <span style="color:var(--text-muted)">${f.member_count} stk</span>
+                            ${f.review_required ? '<span class="badge badge-review">Gjennomgang</span>' : ''}
+                        </div>
+                    </div>
+                    <div class="family-body">
+                        <div style="margin-bottom:0.5rem;font-size:0.82rem;color:var(--text-muted)">
+                            ${escHtml(f.grouping_reason)}
+                            ${f.mother_article ? ` · Mor: <strong>${escHtml(f.mother_article)}</strong>` : ' · Mor: <em>(abstrakt)</em>'}
+                        </div>
+                        <table class="member-table">
+                            <thead><tr><th>Rolle</th><th>Artikkelnr</th><th>Spesifikasjon</th><th>Varianter</th></tr></thead>
+                            <tbody>${membersHtml}</tbody>
+                        </table>
+                    </div>
+                </div>`;
+            }).join('');
+        }
+
+        function escHtml(s) {
+            if (!s) return '';
+            return s.replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;');
+        }
+
+        familyFilter.addEventListener('change', () => {
+            if (familyData) renderFamilyList(familyData.families);
+        });
+        familySearch.addEventListener('input', () => {
+            if (familyData) renderFamilyList(familyData.families);
+        });
+
         // New analysis with confirmation
         newAnalysisBtn.addEventListener('click', () => {
             if (!confirm('Start ny analyse? Gjeldende resultater vil ikke lenger v\u00e6re tilgjengelig i nettleseren.\n\n(Excel-rapporten kan fortsatt lastes ned hvis du har lagret den.)')) {
@@ -1149,6 +1453,8 @@
             startBtn.textContent = 'Start analyse';
             progressSection.classList.remove('active');
             resultsSection.classList.remove('active');
+            familiesSection.classList.remove('active');
+            familyData = null;
             errorsCard.classList.add('hidden');
             progressBar.style.width = '0%';
             progressWarning.style.display = 'none';
