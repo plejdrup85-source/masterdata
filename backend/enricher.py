@@ -824,19 +824,39 @@ def _infer_manufacturer_from_url(url: str) -> Optional[str]:
 # ── Final Quality Gate ──
 
 
+def _text_similarity(a: str, b: str) -> float:
+    """Compute simple token-overlap similarity between two texts (0.0-1.0).
+
+    Uses Jaccard similarity on lowercased word tokens.  Fast and sufficient
+    for catching near-paraphrases at the quality-gate level.
+    """
+    if not a or not b:
+        return 0.0
+    tokens_a = set(a.lower().split())
+    tokens_b = set(b.lower().split())
+    if not tokens_a or not tokens_b:
+        return 0.0
+    intersection = tokens_a & tokens_b
+    union = tokens_a | tokens_b
+    return len(intersection) / len(union) if union else 0.0
+
+
 def apply_ai_review_to_suggestions(
     suggestions: list[EnrichmentSuggestion],
     ai_reviews: list[dict],
 ) -> list[EnrichmentSuggestion]:
-    """Apply AI editorial review results to enrichment suggestions.
+    """Apply strict AI quality-gate results to enrichment suggestions.
 
-    AI reviews can:
-    - Polish the suggested_value (better Norwegian, complete sentences)
-    - Reject a suggestion entirely (sets suggested_value=None)
-    - Adjust confidence up/down
-    - Set review_required
+    The AI quality gate uses a verdict-based protocol:
+    - "NO_MEANINGFUL_IMPROVEMENT": suggestion is a paraphrase, not an improvement → drop
+    - "REJECTED_CONTENT_DEGRADATION": suggestion removes safety/compliance info → drop
+    - "APPROVED": genuine improvement → apply reviewed_value
+    - Legacy "rejected": true format is also supported for backwards compatibility
 
-    Returns filtered list with only non-rejected suggestions.
+    For every suggestion, stores the original_suggested_value before any AI
+    modification, creating a diff trail for medical safety review.
+
+    Returns filtered list with only approved, genuinely improved suggestions.
     """
     if not ai_reviews:
         return suggestions
@@ -849,6 +869,9 @@ def apply_ai_review_to_suggestions(
             reviews_by_field[fname] = r
 
     result = []
+    rejected_count = 0
+    no_improvement_count = 0
+
     for suggestion in suggestions:
         review = reviews_by_field.get(suggestion.field_name)
 
@@ -857,17 +880,58 @@ def apply_ai_review_to_suggestions(
             result.append(suggestion)
             continue
 
-        if review.get("rejected"):
+        verdict = review.get("verdict", "").upper()
+
+        # Handle verdict-based rejection
+        if verdict == "NO_MEANINGFUL_IMPROVEMENT":
+            no_improvement_count += 1
+            logger.info(
+                f"[quality-gate] {suggestion.field_name} NO_MEANINGFUL_IMPROVEMENT — "
+                f"suggestion is not a true improvement over current value"
+            )
+            continue
+
+        if verdict == "REJECTED_CONTENT_DEGRADATION":
+            rejected_count += 1
+            reason = review.get("reject_reason", "Innholdstap: sikkerhet/samsvar/materiale")
+            logger.info(
+                f"[quality-gate] {suggestion.field_name} REJECTED_CONTENT_DEGRADATION: {reason}"
+            )
+            continue
+
+        # Legacy compatibility: "rejected": true
+        if review.get("rejected") and verdict != "APPROVED":
+            rejected_count += 1
             reason = review.get("reject_reason", "Avvist av kvalitetskontroll")
             logger.info(
                 f"[quality-gate] {suggestion.field_name} REJECTED: {reason}"
             )
             continue
 
-        # Apply polished value
+        # Store original value for diff trail (P0-2: medical safety)
+        suggestion.original_suggested_value = suggestion.suggested_value
+
+        # Apply reviewed value
         reviewed_value = review.get("reviewed_value")
         if reviewed_value and reviewed_value.strip():
-            suggestion.suggested_value = reviewed_value.strip()
+            new_val = reviewed_value.strip()
+
+            # Mechanical similarity check: if AI "improved" to >80% identical text,
+            # treat as no meaningful improvement and keep original instead
+            if suggestion.suggested_value:
+                similarity = _text_similarity(suggestion.suggested_value, new_val)
+                if similarity > 0.80 and new_val != suggestion.suggested_value:
+                    logger.info(
+                        f"[quality-gate] {suggestion.field_name}: AI review is {similarity:.0%} "
+                        f"similar to original — keeping source-grounded value"
+                    )
+                    # Keep original suggested_value, don't apply AI rewrite
+                else:
+                    suggestion.suggested_value = new_val
+                    suggestion.ai_modified = True
+            else:
+                suggestion.suggested_value = new_val
+                suggestion.ai_modified = True
 
         # Apply confidence adjustment
         conf_adj = review.get("confidence_adjustment", 0)
@@ -888,7 +952,8 @@ def apply_ai_review_to_suggestions(
     logger.info(
         f"[quality-gate] {len(suggestions)} suggestions → "
         f"{len(result)} after AI review "
-        f"({len(suggestions) - len(result)} rejected)"
+        f"({rejected_count} rejected, "
+        f"{no_improvement_count} no meaningful improvement)"
     )
     return result
 
@@ -901,6 +966,7 @@ def final_quality_gate(suggestions: list[EnrichmentSuggestion]) -> list[Enrichme
     - Are too short to be useful for their field
     - Contain obvious extraction artifacts
     - Have very low confidence
+    - Are near-paraphrases of current value (>80% token overlap)
     """
     result = []
     for s in suggestions:
@@ -920,6 +986,17 @@ def final_quality_gate(suggestions: list[EnrichmentSuggestion]) -> list[Enrichme
         # Reject if value is identical to current (no improvement)
         if s.current_value and val.strip().lower() == s.current_value.strip().lower():
             continue
+
+        # Reject near-paraphrases: if suggested is >80% similar to current,
+        # it's not a meaningful improvement (addresses paraphrase padding)
+        if s.current_value and len(s.current_value) > 20:
+            similarity = _text_similarity(s.current_value, val)
+            if similarity > 0.80:
+                logger.info(
+                    f"[quality-gate] {s.field_name} dropped: {similarity:.0%} similar "
+                    f"to current value — not a meaningful improvement"
+                )
+                continue
 
         # Run field validation one more time
         is_valid, reason = _validate_suggestion_value(val, s.field_name)

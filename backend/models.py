@@ -68,11 +68,13 @@ class EnrichmentSuggestion(BaseModel):
     field_name: str  # Norwegian field name (e.g., "Produktnavn")
     current_value: Optional[str] = None
     suggested_value: Optional[str] = None
+    original_suggested_value: Optional[str] = None  # Pre-AI-review value for diff trail
     source: Optional[str] = None  # Human-readable source label
     source_url: Optional[str] = None
     evidence: Optional[str] = None  # Quote / snippet proving the value
     confidence: float = 0.0  # 0.0-1.0
     review_required: bool = True  # Must a human verify this?
+    ai_modified: bool = False  # True if AI review changed the value
 
 
 class FieldAnalysis(BaseModel):

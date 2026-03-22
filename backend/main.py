@@ -1734,17 +1734,12 @@ async def _run_analysis(
                                 enrichment_suggestions, ai_reviews
                             )
 
-                    # 6c: Legacy AI enrichment (generates independent suggestions)
-                    # Kept for fields not covered by source-grounded enrichment
-                    ai_enrich_result = await enrich_product_async(
-                        product_name=product_data.product_name,
-                        description=product_data.description,
-                        specification=product_data.specification,
-                        category=product_data.category,
-                        packaging=product_data.packaging_info or product_data.packaging_unit,
-                    )
-                    if ai_enrich_result:
-                        analysis.ai_enrichment = ai_enrich_result
+                    # 6c: Legacy AI enrichment removed (P0-1 safety fix).
+                    # The legacy enrich_product_async() generated descriptions
+                    # with no source document, violating the medical-safety
+                    # principle of "no enrichment without documented source."
+                    # All enrichment now goes through the source-grounded
+                    # pipeline (enricher.py) + strict AI quality gate.
 
                 except Exception as e:
                     logger.warning(f"[{job_id}] AI scoring/review failed for {article_number}: {e}")

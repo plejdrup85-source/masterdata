@@ -362,6 +362,8 @@ def _create_improvements_sheet(ws, results: list[ProductAnalysis]) -> None:
         "Confidence",
         "Evidens / Begrunnelse",
         "Krever gjennomgang",
+        "Kildeverdi (før AI)",
+        "Endret av AI",
     ]
 
     for col, header in enumerate(headers, 1):
@@ -388,6 +390,9 @@ def _create_improvements_sheet(ws, results: list[ProductAnalysis]) -> None:
                 ws.cell(row=row_idx, column=7, value=es.confidence if es.confidence else "")
                 ws.cell(row=row_idx, column=8, value=es.evidence or "")
                 ws.cell(row=row_idx, column=9, value="Ja" if es.review_required else "Nei")
+                # Diff trail columns (P0-2: medical safety)
+                ws.cell(row=row_idx, column=10, value=es.original_suggested_value or "")
+                ws.cell(row=row_idx, column=11, value="Ja" if es.ai_modified else "Nei")
                 enriched_fields.add(es.field_name)
                 row_idx += 1
 
@@ -403,6 +408,8 @@ def _create_improvements_sheet(ws, results: list[ProductAnalysis]) -> None:
                 ws.cell(row=row_idx, column=7, value=fa.confidence if fa.confidence else "")
                 ws.cell(row=row_idx, column=8, value=fa.comment or "")
                 ws.cell(row=row_idx, column=9, value="Ja")
+                ws.cell(row=row_idx, column=10, value="")  # No AI diff for field suggestions
+                ws.cell(row=row_idx, column=11, value="Nei")
                 row_idx += 1
 
     if row_idx == 2:
