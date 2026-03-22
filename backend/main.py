@@ -688,6 +688,63 @@ async def analyze_upload_families(file: UploadFile = File(...)):
     return _run_family_detection(products, source_id)
 
 
+@app.post("/api/families/analyze-articles")
+async def analyze_articles_families(data: dict):
+    """Run family detection on a list of pasted article numbers.
+
+    Body: {"article_numbers": ["12345", "67890", ...]}
+
+    Looks up each article in Jeeves and runs family detection.
+    """
+    if not _jeeves_index or not _jeeves_index.loaded:
+        raise HTTPException(400, "Jeeves-data er ikke lastet inn — kreves for familieanalyse")
+
+    raw_articles = data.get("article_numbers", [])
+    if not raw_articles:
+        raise HTTPException(400, "Ingen artikkelnumre oppgitt")
+
+    # Deduplicate and normalize
+    seen = set()
+    article_numbers = []
+    for art in raw_articles:
+        art = str(art).strip()
+        if art and art not in seen:
+            seen.add(art)
+            article_numbers.append(art)
+
+    if not article_numbers:
+        raise HTTPException(400, "Ingen gyldige artikkelnumre etter validering")
+
+    # Build product dicts from Jeeves
+    products = []
+    not_found = []
+    for artnr in article_numbers:
+        j = _jeeves_index.get(artnr)
+        if j:
+            products.append({
+                "article_number": j.article_number,
+                "product_name": j.item_description or j.web_title or "",
+                "brand": j.product_brand or "",
+                "supplier": j.supplier or "",
+                "specification": j.specification or "",
+                "technical_details": {},
+                "category": "",
+            })
+        else:
+            not_found.append(artnr)
+
+    if not products:
+        raise HTTPException(400, f"Ingen produkter funnet i Jeeves for de oppgitte artiklene")
+
+    import hashlib
+    hash_input = ",".join(sorted(seen))
+    source_id = f"articles-{hashlib.md5(hash_input.encode()).hexdigest()[:8]}"
+    result = _run_family_detection(products, source_id)
+    result["not_found_articles"] = not_found
+    result["input_count"] = len(article_numbers)
+    return result
+
+
 @app.put("/api/families/{source_id}/review/{family_id}")
 async def update_family_review(source_id: str, family_id: str, data: dict):
     """Update review status and comment for a single family.

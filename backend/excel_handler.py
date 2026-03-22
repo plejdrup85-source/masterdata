@@ -148,9 +148,9 @@ def create_output_excel(
     ws_inriver = wb.create_sheet("Inriver Import")
     _create_inriver_import_sheet(ws_inriver, results)
 
-    # Sheet 12: Product Families / Variant Structure
-    ws_families = wb.create_sheet("Produktfamilier")
-    _create_family_sheet(ws_families, results)
+    # NOTE: Product families / variant structure sheet has been removed from
+    # the standard output. Family/relationship analysis is a separate module
+    # with its own dedicated export via /api/families/{source_id}/export.
 
     # Save directly to file
     wb.save(output_path)

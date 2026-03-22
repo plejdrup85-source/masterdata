@@ -461,6 +461,49 @@
             border-bottom-color: var(--primary);
         }
 
+        /* Module navigation */
+        .module-nav {
+            display: flex;
+            gap: 0;
+            margin-bottom: 1.5rem;
+            border-bottom: 2px solid var(--border);
+        }
+        .module-tab {
+            padding: 0.75rem 1.5rem;
+            border: none;
+            background: none;
+            font-size: 0.95rem;
+            font-weight: 600;
+            color: var(--text-muted);
+            cursor: pointer;
+            border-bottom: 3px solid transparent;
+            margin-bottom: -2px;
+            transition: all 0.15s;
+        }
+        .module-tab:hover { color: var(--text); }
+        .module-tab.active {
+            color: #7c3aed;
+            border-bottom-color: #7c3aed;
+        }
+        /* Relationship module */
+        .rel-mode-btn {
+            padding: 0.5rem 1rem;
+            border: 2px solid var(--border);
+            border-radius: 8px;
+            background: #fff;
+            font-size: 0.85rem;
+            font-weight: 500;
+            cursor: pointer;
+            transition: all 0.15s;
+        }
+        .rel-mode-btn:hover { border-color: #a78bfa; }
+        .rel-mode-btn.active {
+            border-color: #7c3aed;
+            background: #f5f3ff;
+            color: #7c3aed;
+        }
+        .rel-mode-panel { margin-top: 0.75rem; }
+
         .family-card {
             background: var(--card-bg);
             border: 1px solid var(--border);
@@ -641,8 +684,23 @@
     <div class="container">
         <header>
             <h1>Masterdata Kvalitetssjekk</h1>
-            <p>Last opp en Excel-fil med artikkelnumre for automatisk kvalitetsanalyse mot onemed.no</p>
+            <p>Verktøy for kvalitetsanalyse og produktrelasjoner</p>
         </header>
+
+        <!-- Module Navigation -->
+        <div class="module-nav" id="moduleNav">
+            <button class="module-tab active" id="tabMasterdata" onclick="switchModule('masterdata')">
+                Kvalitetsanalyse
+            </button>
+            <button class="module-tab" id="tabRelations" onclick="switchModule('relations')">
+                Produktfamilier
+            </button>
+        </div>
+
+        <!-- ═══════════════════════════════════════════════════════ -->
+        <!-- MODULE: MASTERDATA KVALITETSANALYSE                    -->
+        <!-- ═══════════════════════════════════════════════════════ -->
+        <div id="moduleMasterdata">
 
         <!-- Upload Section -->
         <div class="card" id="uploadCard">
@@ -699,16 +757,7 @@
             <div class="column-info hidden" id="batchInfo"></div>
             <div class="actions">
                 <button class="btn btn-primary" id="startBtn" disabled>Start analyse</button>
-                <button class="btn btn-primary" id="familyOnlyBtn" disabled style="background:#7c3aed;font-size:0.9rem">Kun familieanalyse</button>
                 <span id="fileInfo" style="color:var(--text-muted);font-size:0.9rem"></span>
-            </div>
-            <div style="margin-top:0.5rem">
-                <button class="btn btn-primary" id="jeevesDirectBtn" style="background:#7c3aed;font-size:0.85rem;padding:0.5rem 1rem">
-                    Analyser hele Jeeves-katalogen
-                </button>
-                <span style="color:var(--text-muted);font-size:0.8rem;margin-left:0.5rem">
-                    Kjør familieanalyse direkte på all Jeeves-data (uten kvalitetsanalyse)
-                </span>
             </div>
         </div>
 
@@ -737,7 +786,6 @@
                 <div class="stats-grid" id="statsGrid"></div>
                 <div class="actions">
                     <button class="btn btn-success" id="downloadBtn">Last ned Excel-rapport</button>
-                    <button class="btn btn-primary" id="familyBtn" style="background:#7c3aed">Vis produktfamilier</button>
                     <button class="btn btn-primary" id="newAnalysisBtn">Ny analyse</button>
                 </div>
             </div>
@@ -769,7 +817,70 @@
             </div>
         </div>
 
-        <!-- Product Families Section -->
+        </div><!-- /moduleMasterdata -->
+
+        <!-- ═══════════════════════════════════════════════════════ -->
+        <!-- MODULE: PRODUKTFAMILIER / RELASJONER                   -->
+        <!-- ═══════════════════════════════════════════════════════ -->
+        <div id="moduleRelations" style="display:none">
+
+        <!-- Relationship Module: Configuration -->
+        <div class="card" id="relConfigCard">
+            <h2>Produktfamilier og variantgruppering</h2>
+            <p style="color:var(--text-muted);font-size:0.9rem;margin-bottom:1rem">
+                Denne modulen identifiserer produktfamilier (Mor/Barn-strukturer) for Inriver og nettbutikk.
+                Den er uavhengig av den vanlige kvalitetsanalysen.
+            </p>
+
+            <!-- Input mode selector -->
+            <div style="margin-bottom:1rem">
+                <div style="font-size:0.9rem;font-weight:600;margin-bottom:0.5rem">Velg datakilde</div>
+                <div style="display:flex;gap:0.5rem;flex-wrap:wrap">
+                    <button class="rel-mode-btn active" data-mode="catalog" onclick="setRelMode('catalog')">Hele katalogen</button>
+                    <button class="rel-mode-btn" data-mode="paste" onclick="setRelMode('paste')">Lim inn artikkelnumre</button>
+                    <button class="rel-mode-btn" data-mode="upload" onclick="setRelMode('upload')">Last opp Excel</button>
+                </div>
+            </div>
+
+            <!-- Mode A: Full catalog -->
+            <div id="relModeCatalog" class="rel-mode-panel">
+                <div style="padding:1rem;background:#fef3c7;border:1px solid #fde68a;border-radius:8px;font-size:0.85rem;color:#92400e">
+                    <strong>Hele Jeeves-katalogen</strong> vil bli analysert. Dette kan ta noen sekunder avhengig av katalogstørrelsen.
+                    <span id="relCatalogCount" style="font-weight:600"></span>
+                </div>
+            </div>
+
+            <!-- Mode B: Paste article numbers -->
+            <div id="relModePaste" class="rel-mode-panel" style="display:none">
+                <label style="font-size:0.85rem;font-weight:500;display:block;margin-bottom:0.35rem">
+                    Lim inn artikkelnumre (ett per linje, eller komma-/semikolonseparert)
+                </label>
+                <textarea id="relPasteInput" rows="6" style="width:100%;padding:0.5rem;border:1px solid var(--border);border-radius:6px;font-family:monospace;font-size:0.85rem;resize:vertical" placeholder="12345&#10;67890&#10;N54321"></textarea>
+                <div id="relPasteInfo" style="font-size:0.82rem;color:var(--text-muted);margin-top:0.3rem"></div>
+            </div>
+
+            <!-- Mode C: Upload Excel -->
+            <div id="relModeUpload" class="rel-mode-panel" style="display:none">
+                <div class="upload-area" id="relUploadArea" style="padding:1.5rem;min-height:auto">
+                    <p style="margin:0;font-size:0.85rem">Dra og slipp Excel-fil her, eller klikk for å velge</p>
+                    <p style="font-size:0.78rem;color:#94a3b8;margin:0.3rem 0 0">.xlsx-fil med artikkelnumre</p>
+                    <p class="filename hidden" id="relFileName"></p>
+                    <input type="file" id="relFileInput" accept=".xlsx" style="display:none">
+                </div>
+                <div id="relUploadInfo" style="font-size:0.82rem;color:var(--text-muted);margin-top:0.3rem"></div>
+            </div>
+
+            <!-- Run summary + button -->
+            <div style="margin-top:1rem;display:flex;align-items:center;gap:0.75rem;flex-wrap:wrap">
+                <button class="btn btn-primary" id="relRunBtn" style="background:#7c3aed;font-size:0.9rem;padding:0.6rem 1.5rem">
+                    Start familieanalyse
+                </button>
+                <span id="relRunSummary" style="font-size:0.85rem;color:var(--text-muted)"></span>
+            </div>
+            <div id="relRunProgress" style="display:none;margin-top:0.75rem;font-size:0.85rem;color:var(--primary)"></div>
+        </div>
+
+        <!-- Relationship Results Section (shown after analysis) -->
         <div class="results-section" id="familiesSection">
             <div class="card">
                 <div style="display:flex;justify-content:space-between;align-items:center;flex-wrap:wrap;gap:0.5rem">
@@ -838,6 +949,8 @@
             </div>
         </div>
 
+        </div><!-- /moduleRelations -->
+
         <!-- Move member modal -->
         <div id="moveMemberModal" style="display:none;position:fixed;inset:0;background:rgba(0,0,0,0.4);z-index:1000;align-items:center;justify-content:center">
             <div style="background:#fff;border-radius:12px;padding:1.5rem;max-width:450px;width:90%;box-shadow:0 8px 32px rgba(0,0,0,0.2)">
@@ -894,6 +1007,159 @@
         let currentJobId = null;
         let pollInterval = null;
         let selectedFile = null;
+
+        // ── Module Navigation ──
+        let currentModule = 'masterdata';
+        function switchModule(mod) {
+            currentModule = mod;
+            document.getElementById('moduleMasterdata').style.display = mod === 'masterdata' ? '' : 'none';
+            document.getElementById('moduleRelations').style.display = mod === 'relations' ? '' : 'none';
+            document.querySelectorAll('.module-tab').forEach(t => t.classList.remove('active'));
+            document.getElementById(mod === 'masterdata' ? 'tabMasterdata' : 'tabRelations').classList.add('active');
+            if (mod === 'relations') initRelModule();
+        }
+
+        // ── Relationship Module State ──
+        let relMode = 'catalog';
+        let relFile = null;
+
+        function initRelModule() {
+            // Check Jeeves availability for catalog count
+            fetch(`${API_BASE}/api/status`).then(r => r.json()).then(d => {
+                const cnt = d.jeeves_product_count || 0;
+                const el = document.getElementById('relCatalogCount');
+                if (cnt > 0) el.textContent = ` (${cnt.toLocaleString('nb-NO')} produkter)`;
+                else el.textContent = ' (Jeeves-data ikke lastet)';
+                updateRelRunState();
+            }).catch(() => {});
+        }
+
+        function setRelMode(mode) {
+            relMode = mode;
+            document.querySelectorAll('.rel-mode-btn').forEach(b => b.classList.toggle('active', b.dataset.mode === mode));
+            document.getElementById('relModeCatalog').style.display = mode === 'catalog' ? '' : 'none';
+            document.getElementById('relModePaste').style.display = mode === 'paste' ? '' : 'none';
+            document.getElementById('relModeUpload').style.display = mode === 'upload' ? '' : 'none';
+            updateRelRunState();
+        }
+
+        function parseRelPasteInput() {
+            const raw = document.getElementById('relPasteInput').value;
+            if (!raw.trim()) return [];
+            // Split on newlines, commas, semicolons
+            const items = raw.split(/[\n,;]+/).map(s => s.trim()).filter(s => s.length > 0);
+            // Deduplicate
+            return [...new Set(items)];
+        }
+
+        // Validate paste input on typing
+        document.addEventListener('DOMContentLoaded', () => {
+            const ta = document.getElementById('relPasteInput');
+            if (ta) ta.addEventListener('input', () => {
+                const arts = parseRelPasteInput();
+                const info = document.getElementById('relPasteInfo');
+                if (arts.length === 0) { info.textContent = ''; }
+                else { info.textContent = `${arts.length} unike artikkelnumre oppdaget`; }
+                updateRelRunState();
+            });
+
+            // Relationship file upload
+            const relArea = document.getElementById('relUploadArea');
+            const relInput = document.getElementById('relFileInput');
+            if (relArea) {
+                relArea.addEventListener('click', () => relInput.click());
+                relArea.addEventListener('dragover', e => { e.preventDefault(); relArea.style.borderColor = '#7c3aed'; });
+                relArea.addEventListener('dragleave', () => { relArea.style.borderColor = ''; });
+                relArea.addEventListener('drop', e => {
+                    e.preventDefault(); relArea.style.borderColor = '';
+                    if (e.dataTransfer.files.length) { relInput.files = e.dataTransfer.files; relInput.dispatchEvent(new Event('change')); }
+                });
+            }
+            if (relInput) relInput.addEventListener('change', () => {
+                relFile = relInput.files[0] || null;
+                const nameEl = document.getElementById('relFileName');
+                const infoEl = document.getElementById('relUploadInfo');
+                if (relFile) {
+                    nameEl.textContent = relFile.name;
+                    nameEl.classList.remove('hidden');
+                    infoEl.textContent = `Fil valgt: ${relFile.name} (${(relFile.size/1024).toFixed(0)} KB)`;
+                } else {
+                    nameEl.classList.add('hidden');
+                    infoEl.textContent = '';
+                }
+                updateRelRunState();
+            });
+        });
+
+        function updateRelRunState() {
+            const btn = document.getElementById('relRunBtn');
+            const summary = document.getElementById('relRunSummary');
+            let canRun = false;
+            let text = '';
+            if (relMode === 'catalog') {
+                canRun = true;
+                text = 'Analyserer hele Jeeves-katalogen';
+            } else if (relMode === 'paste') {
+                const arts = parseRelPasteInput();
+                canRun = arts.length >= 2;
+                text = arts.length > 0 ? `${arts.length} artikkelnumre valgt` : 'Lim inn minst 2 artikkelnumre';
+            } else if (relMode === 'upload') {
+                canRun = !!relFile;
+                text = relFile ? `Fil: ${relFile.name}` : 'Velg en Excel-fil';
+            }
+            btn.disabled = !canRun;
+            summary.textContent = text;
+        }
+
+        // Run relationship analysis
+        document.addEventListener('DOMContentLoaded', () => {
+            document.getElementById('relRunBtn').addEventListener('click', async () => {
+                const btn = document.getElementById('relRunBtn');
+                const progress = document.getElementById('relRunProgress');
+                btn.disabled = true;
+                btn.textContent = 'Analyserer...';
+                progress.style.display = '';
+                progress.textContent = 'Kjører familieanalyse...';
+
+                try {
+                    if (relMode === 'catalog') {
+                        await loadFamilies(`${API_BASE}/api/families/analyze-jeeves`, 'POST');
+                    } else if (relMode === 'paste') {
+                        const articles = parseRelPasteInput();
+                        const resp = await fetch(`${API_BASE}/api/families/analyze-articles`, {
+                            method: 'POST',
+                            headers: {'Content-Type': 'application/json'},
+                            body: JSON.stringify({article_numbers: articles}),
+                        });
+                        if (!resp.ok) {
+                            const err = await resp.json().catch(() => ({}));
+                            throw new Error(err.detail || `HTTP ${resp.status}`);
+                        }
+                        familyData = await resp.json();
+                        familySourceId = familyData.source_id;
+                        // Show not-found articles if any
+                        const notFound = familyData.not_found_articles || [];
+                        if (notFound.length > 0) {
+                            progress.textContent = `${notFound.length} artikkelnumre ikke funnet i Jeeves: ${notFound.slice(0, 10).join(', ')}${notFound.length > 10 ? '...' : ''}`;
+                        }
+                        renderFamilyResults(familyData);
+                        familiesSection.classList.add('active');
+                        familiesSection.scrollIntoView({ behavior: 'smooth', block: 'start' });
+                    } else if (relMode === 'upload') {
+                        const fd = new FormData();
+                        fd.append('file', relFile);
+                        await loadFamilies(`${API_BASE}/api/families/analyze-upload`, 'POST', fd);
+                    }
+                } catch (e) {
+                    alert(`Familieanalyse feilet: ${e.message}`);
+                } finally {
+                    btn.disabled = false;
+                    btn.textContent = 'Start familieanalyse';
+                    if (!progress.textContent.includes('ikke funnet')) progress.style.display = 'none';
+                    updateRelRunState();
+                }
+            });
+        });
         let pollErrorCount = 0;
 
         // DOM elements
@@ -1456,9 +1722,6 @@
         });
 
         // ── Product Families UI ──
-        const familyBtn = document.getElementById('familyBtn');
-        const familyOnlyBtn = document.getElementById('familyOnlyBtn');
-        const jeevesDirectBtn = document.getElementById('jeevesDirectBtn');
         const familiesSection = document.getElementById('familiesSection');
         const familyStatsGrid = document.getElementById('familyStatsGrid');
         const familyList = document.getElementById('familyList');
@@ -1484,9 +1747,6 @@
         let standaloneOffset = 0;
         const STANDALONE_PAGE_SIZE = 50;
 
-        // Enable family-only button when file is selected
-        fileInput.addEventListener('change', () => { familyOnlyBtn.disabled = !fileInput.files.length; });
-
         async function loadFamilies(url, method = 'GET', body = null) {
             try {
                 const opts = { method };
@@ -1506,30 +1766,6 @@
                 alert(`Kunne ikke laste produktfamilier: ${e.message}`);
             }
         }
-
-        familyBtn.addEventListener('click', () => {
-            if (!currentJobId) return;
-            loadFamilies(`${API_BASE}/api/families/${currentJobId}`);
-        });
-
-        familyOnlyBtn.addEventListener('click', async () => {
-            if (!selectedFile) return;
-            familyOnlyBtn.disabled = true;
-            familyOnlyBtn.textContent = 'Analyserer...';
-            const fd = new FormData();
-            fd.append('file', selectedFile);
-            await loadFamilies(`${API_BASE}/api/families/analyze-upload`, 'POST', fd);
-            familyOnlyBtn.disabled = false;
-            familyOnlyBtn.textContent = 'Kun familieanalyse';
-        });
-
-        jeevesDirectBtn.addEventListener('click', async () => {
-            jeevesDirectBtn.disabled = true;
-            jeevesDirectBtn.textContent = 'Analyserer hele katalogen...';
-            await loadFamilies(`${API_BASE}/api/families/analyze-jeeves`, 'POST');
-            jeevesDirectBtn.disabled = false;
-            jeevesDirectBtn.textContent = 'Analyser hele Jeeves-katalogen';
-        });
 
         exportFamiliesBtn.addEventListener('click', async () => {
             if (!familySourceId) return;
