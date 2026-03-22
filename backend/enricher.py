@@ -23,6 +23,7 @@ import logging
 import re
 from typing import Optional
 
+from backend.description_cleaner import clean_description_source, validate_webshop_description
 from backend.models import (
     EnrichmentMatchStatus,
     EnrichmentResult,
@@ -299,12 +300,35 @@ def _enrich_description(
     best_evidence = None
     best_conf = 0.0
 
+    # Clean PDF text before using it — remove tables, metadata, variant lists
+    if pdf_val:
+        cleaned_pdf = clean_description_source(pdf_val)
+        if cleaned_pdf:
+            logger.debug(
+                f"[enrich] PDF description cleaned: {len(pdf_val)} → {len(cleaned_pdf)} chars"
+            )
+            pdf_val = cleaned_pdf
+        else:
+            logger.info(
+                f"[enrich] PDF description rejected after cleaning "
+                f"(original {len(pdf_val)} chars had no usable content)"
+            )
+            pdf_val = None
+
     if pdf_val and (not current or len(pdf_val) > len(current)):
         best_val = pdf_val
         best_source = SOURCE_PDF
         best_url = _get_enrichment_url(er_by_field, "description")
         best_evidence = pdf_evidence
         best_conf = pdf_conf
+
+    # Clean manufacturer description too
+    if mfr_desc:
+        cleaned_mfr = clean_description_source(mfr_desc)
+        if cleaned_mfr:
+            mfr_desc = cleaned_mfr
+        else:
+            mfr_desc = None
 
     if mfr_desc and (not best_val or len(mfr_desc) > len(best_val)):
         mfr_conf = (mfr.confidence if mfr else 0) * 0.85
@@ -332,7 +356,7 @@ def _enrich_description(
                 )
         return None
 
-    # Validate description quality before suggesting
+    # Validate basic suggestion quality
     is_valid, reject_reason = _validate_suggestion_value(best_val, "Beskrivelse")
     if not is_valid:
         logger.info(
@@ -340,6 +364,25 @@ def _enrich_description(
             f"(value: {best_val[:80]})"
         )
         return None
+
+    # Quality gate: validate the cleaned text is webshop-ready
+    gate_ok, gate_reason = validate_webshop_description(best_val)
+    if not gate_ok:
+        logger.info(
+            f"[enrich] Description failed webshop quality gate: {gate_reason} "
+            f"(value: {best_val[:80]})"
+        )
+        # Still offer it but flag for review with explanation
+        return EnrichmentSuggestion(
+            field_name="Beskrivelse",
+            current_value=current,
+            suggested_value=best_val,
+            source=best_source,
+            source_url=_get_enrichment_url(er_by_field, "description") if best_source == SOURCE_PDF else (mfr.source_url if mfr else None),
+            evidence=f"Kvalitetssjekk: {gate_reason}",
+            confidence=min(best_conf, 0.45),
+            review_required=True,
+        )
 
     # If source is English, note translation needed
     review = best_conf < MIN_CONFIDENCE_AUTO

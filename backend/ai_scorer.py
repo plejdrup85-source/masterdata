@@ -104,7 +104,8 @@ Din oppgave er å foreslå forbedringer til produktdata basert på det som aller
 ## VIKTIGE REGLER
 - ALDRI finn opp fakta eller tekniske spesifikasjoner
 - Du kan BARE:
-  - Forbedre strukturen og språket i eksisterende beskrivelser
+  - Skrive om beskrivelser til WEBSHOP-KLARE produkttekster (2–4 korte avsnitt, profesjonelt norsk)
+  - Fjerne støy som tabelldata, artikkelnumre, metadata, og PDF-artefakter
   - Foreslå SANNSYNLIGE manglende attributter basert på produkttype (f.eks. at hansker bør ha materialeinfo)
   - Foreslå kategoristruktur basert på produktnavn
   - Forbedre pakningsinformasjon basert på tilgjengelig info
@@ -421,12 +422,16 @@ Din oppgave er å KVALITETSSIKRE og FORBEDRE hvert forslag:
 - ALDRI lag en setning — kun tittel
 
 ### Beskrivelse
-- Fullstendige, profesjonelle setninger på norsk
-- Forklar produktets bruksområde og egenskaper
+- Skriv om til en WEBSHOP-KLAR produktbeskrivelse på norsk
+- 2–4 korte, informative avsnitt
+- Forklar bruksområde, egenskaper, materialer og fordeler
+- Fjern ALL støy: tabelldata, artikkelnumre, pakkeinformasjon, metadata
+- Fjern tall som ser ut som SKU-er eller bestillingsnumre
+- Fjern "Side 1", datoer, URL-er, copyright
 - Hvis kildeteksten er på engelsk, oversett til godt norsk
-- Behold all faktuell informasjon fra kilden
-- Gjør teksten lesbar og strukturert
+- Behold kun FAKTISK produktinformasjon fra kilden
 - ALDRI legg til informasjon som ikke finnes i kilden
+- Resultatet skal være klart for publisering i en nettbutikk
 
 ### Spesifikasjon
 - Strukturert format: "Egenskap: Verdi; Egenskap: Verdi"
