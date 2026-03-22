@@ -1007,6 +1007,203 @@ async def _find_product_url_via_sitemap(
     return None
 
 
+# ── Index management functions ──
+
+
+def get_index_stats() -> dict:
+    """Return current SKU index statistics (no I/O)."""
+    return {
+        "sitemap_loaded": _sitemap_loaded,
+        "sitemap_url_count": len(_sitemap_urls),
+        "sku_index_count": len(_sku_to_url),
+        "coverage_pct": round(len(_sku_to_url) / len(_sitemap_urls) * 100, 1) if _sitemap_urls else 0,
+    }
+
+
+async def build_full_index(
+    on_progress=None,
+) -> dict:
+    """Build a complete SKU→URL index by scanning ALL sitemap product pages.
+
+    This is an expensive one-time operation (~9500 pages, ~15-25 minutes).
+    Should be run as a background task. Results are persisted to disk and
+    reused by all subsequent scrape_product() calls.
+
+    Args:
+        on_progress: Optional async callback(indexed, total, new_in_batch)
+                     called after each batch completes.
+
+    Returns:
+        dict with {total_pages, indexed, skipped, errors, duration_seconds}
+    """
+    global _sitemap_urls, _sku_to_url, _sitemap_loaded
+
+    start_time = time.time()
+    BATCH_SIZE = 20
+    BATCH_DELAY = 0.5  # seconds between batches — polite crawling
+
+    async with httpx.AsyncClient() as client:
+        # Ensure sitemap is loaded
+        sitemap_urls = await _load_sitemap(client)
+        if not sitemap_urls:
+            return {"error": "Failed to load sitemap", "total_pages": 0, "indexed": 0}
+
+        # Filter out already-indexed URLs
+        indexed_urls = set(_sku_to_url.values())
+        unchecked_urls = [u for u in sitemap_urls if u not in indexed_urls]
+
+        total_to_check = len(unchecked_urls)
+        already_indexed = len(_sku_to_url)
+        new_indexed = 0
+        errors = 0
+
+        logger.info(
+            f"[build-index] Starting full index build: {total_to_check} pages to check, "
+            f"{already_indexed} already indexed"
+        )
+
+        for batch_start in range(0, total_to_check, BATCH_SIZE):
+            batch = unchecked_urls[batch_start:batch_start + BATCH_SIZE]
+
+            async def _check_page(url: str):
+                try:
+                    resp = await client.get(
+                        url, headers=HEADERS, follow_redirects=True, timeout=15
+                    )
+                    if resp.status_code == 200:
+                        sku = _extract_sku_from_html(resp.text)
+                        if sku:
+                            return (sku, url)
+                except Exception:
+                    pass
+                return None
+
+            tasks = [_check_page(url) for url in batch]
+            results = await asyncio.gather(*tasks, return_exceptions=True)
+
+            batch_new = 0
+            for result in results:
+                if isinstance(result, tuple):
+                    sku, url = result
+                    if sku not in _sku_to_url:
+                        _sku_to_url[sku] = url
+                        new_indexed += 1
+                        batch_new += 1
+                elif isinstance(result, Exception):
+                    errors += 1
+
+            # Save progress every 10 batches (200 pages)
+            if (batch_start // BATCH_SIZE) % 10 == 9:
+                _save_sitemap_index(_sitemap_urls, _sku_to_url)
+
+            # Report progress
+            checked_so_far = min(batch_start + BATCH_SIZE, total_to_check)
+            if on_progress:
+                try:
+                    await on_progress(checked_so_far, total_to_check, batch_new)
+                except Exception:
+                    pass
+
+            if checked_so_far % 200 == 0 or checked_so_far == total_to_check:
+                logger.info(
+                    f"[build-index] Progress: {checked_so_far}/{total_to_check} pages, "
+                    f"{new_indexed} new SKUs indexed"
+                )
+
+            await asyncio.sleep(BATCH_DELAY)
+
+        # Final save
+        _save_sitemap_index(_sitemap_urls, _sku_to_url)
+
+    duration = time.time() - start_time
+    logger.info(
+        f"[build-index] DONE: {new_indexed} new SKUs indexed in {duration:.0f}s. "
+        f"Total index: {len(_sku_to_url)} SKUs / {len(_sitemap_urls)} sitemap URLs"
+    )
+
+    return {
+        "total_pages": total_to_check,
+        "already_indexed": already_indexed,
+        "new_indexed": new_indexed,
+        "total_index_size": len(_sku_to_url),
+        "sitemap_urls": len(_sitemap_urls),
+        "errors": errors,
+        "duration_seconds": round(duration, 1),
+    }
+
+
+async def scan_index_incremental(max_pages: int = 50) -> int:
+    """Scan a small batch of unindexed sitemap pages to expand the SKU index.
+
+    Designed to be called at the START of each analysis job. Lightweight
+    (~5-10 seconds for 50 pages) and incrementally builds coverage over time.
+
+    Args:
+        max_pages: Maximum pages to scan (default 50).
+
+    Returns:
+        Number of new SKUs indexed in this scan.
+    """
+    global _sku_to_url
+
+    if not _sitemap_loaded or not _sitemap_urls:
+        return 0
+
+    indexed_urls = set(_sku_to_url.values())
+    unchecked = [u for u in _sitemap_urls if u not in indexed_urls]
+
+    if not unchecked:
+        logger.info("[incremental-scan] Index is complete — all sitemap URLs indexed")
+        return 0
+
+    pages_to_scan = min(max_pages, len(unchecked))
+    batch_urls = unchecked[:pages_to_scan]
+    new_count = 0
+    BATCH_SIZE = 15
+
+    logger.info(
+        f"[incremental-scan] Scanning {pages_to_scan} unindexed pages "
+        f"({len(unchecked)} remaining)"
+    )
+
+    async with httpx.AsyncClient() as client:
+        for batch_start in range(0, len(batch_urls), BATCH_SIZE):
+            batch = batch_urls[batch_start:batch_start + BATCH_SIZE]
+
+            async def _check(url):
+                try:
+                    resp = await client.get(
+                        url, headers=HEADERS, follow_redirects=True, timeout=15
+                    )
+                    if resp.status_code == 200:
+                        sku = _extract_sku_from_html(resp.text)
+                        if sku:
+                            return (sku, url)
+                except Exception:
+                    pass
+                return None
+
+            tasks = [_check(u) for u in batch]
+            results = await asyncio.gather(*tasks, return_exceptions=True)
+
+            for result in results:
+                if isinstance(result, tuple):
+                    sku, url = result
+                    if sku not in _sku_to_url:
+                        _sku_to_url[sku] = url
+                        new_count += 1
+
+            await asyncio.sleep(0.3)
+
+    if new_count:
+        _save_sitemap_index(_sitemap_urls, _sku_to_url)
+        logger.info(f"[incremental-scan] Indexed {new_count} new SKUs (total: {len(_sku_to_url)})")
+    else:
+        logger.info(f"[incremental-scan] No new SKUs found in this batch")
+
+    return new_count
+
+
 async def scrape_product(
     article_number: str,
     use_cache: bool = True,

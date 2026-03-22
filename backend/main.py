@@ -39,7 +39,10 @@ from backend.models import (
 )
 from backend.scoring import score_product_areas, FOCUS_AREAS, ALL_AREAS, AREA_LABELS, ANALYSIS_PRESETS
 from backend.pdf_enricher import run_enrichment_pipeline
-from backend.scraper import scrape_product, _load_sitemap, _sitemap_loaded, _sku_to_url
+from backend.scraper import (
+    scrape_product, _load_sitemap, _sitemap_loaded, _sku_to_url,
+    build_full_index, scan_index_incremental, get_index_stats,
+)
 
 # Configure logging
 logging.basicConfig(
@@ -286,13 +289,15 @@ async def root():
 @app.get("/api/health")
 async def health_check():
     """Health check endpoint with feature status."""
+    idx = get_index_stats()
     return {
         "status": "ok",
-        "version": "2.0.0",
+        "version": "2.1.0",
         "active_jobs": len(jobs),
         "jeeves_loaded": _jeeves_index is not None and _jeeves_index.loaded,
         "jeeves_product_count": _jeeves_index.count if _jeeves_index else 0,
         "ai_scoring_available": bool(os.environ.get("ANTHROPIC_API_KEY")),
+        "sku_index": idx,
         "analysis_modes": [
             {"value": m.value, "label": l}
             for m, l in [
@@ -309,6 +314,83 @@ async def health_check():
                 "analysis_mode": v["analysis_mode"], "focus_areas": v["focus_areas"]}
             for k, v in ANALYSIS_PRESETS.items()
         },
+    }
+
+
+# ── SKU Index management ──
+
+# Track active index build so we don't run two at once
+_index_build_task: Optional[asyncio.Task] = None
+_index_build_status: dict = {}
+
+
+@app.post("/api/build-index")
+async def build_index():
+    """Start a full SKU index build as a background task.
+
+    Scans all sitemap product pages (~9500) and maps article numbers to URLs.
+    Takes ~15-25 minutes but runs in the background. Results are persisted to
+    disk and used automatically by all subsequent analyses.
+
+    Returns immediately with status. Poll GET /api/index-status for progress.
+    """
+    global _index_build_task, _index_build_status
+
+    if _index_build_task and not _index_build_task.done():
+        return {
+            "status": "already_running",
+            "message": "Indeksbygging kjører allerede. Se /api/index-status for fremdrift.",
+            **_index_build_status,
+        }
+
+    _index_build_status = {
+        "status": "running",
+        "started_at": datetime.now().isoformat(),
+        "checked": 0,
+        "total": 0,
+        "new_indexed": 0,
+    }
+
+    async def _progress_callback(checked, total, new_in_batch):
+        _index_build_status["checked"] = checked
+        _index_build_status["total"] = total
+        _index_build_status["new_indexed"] += new_in_batch
+
+    async def _run_build():
+        try:
+            result = await build_full_index(on_progress=_progress_callback)
+            _index_build_status.update({
+                "status": "completed",
+                "completed_at": datetime.now().isoformat(),
+                **result,
+            })
+            logger.info(f"[build-index] Background build completed: {result}")
+        except Exception as e:
+            _index_build_status.update({
+                "status": "failed",
+                "error": str(e),
+            })
+            logger.error(f"[build-index] Background build failed: {e}")
+
+    _index_build_task = asyncio.create_task(_run_build())
+    _background_tasks.add(_index_build_task)
+    _index_build_task.add_done_callback(_background_tasks.discard)
+
+    return {
+        "status": "started",
+        "message": "Indeksbygging startet i bakgrunnen. Se /api/index-status for fremdrift.",
+    }
+
+
+@app.get("/api/index-status")
+async def index_status():
+    """Get current SKU index status and build progress."""
+    idx = get_index_stats()
+    build = dict(_index_build_status) if _index_build_status else {"status": "never_run"}
+
+    return {
+        "index": idx,
+        "build": build,
     }
 
 
@@ -2264,6 +2346,18 @@ async def _run_analysis(
             f"{len(unique_articles)} unique articles "
             f"({duplicate_count} duplicate fetches prevented)"
         )
+
+    # --- Incremental index scan ---
+    # Before analysis, scan a small batch of unindexed sitemap pages to expand
+    # the SKU→URL index. This is lightweight (~5-10s for 50 pages) and gradually
+    # builds coverage so more products get their pages found instead of CDN_ONLY.
+    try:
+        job.current_step = "index_scan"
+        new_skus = await scan_index_incremental(max_pages=50)
+        if new_skus:
+            logger.info(f"[{job_id}] Incremental scan added {new_skus} new SKUs to index")
+    except Exception as e:
+        logger.warning(f"[{job_id}] Incremental index scan failed (non-fatal): {e}")
 
     # Scope logging — verify strict input processing
     # Defensive: _sku_to_url is an optional metrics aid; never crash the job if unavailable
