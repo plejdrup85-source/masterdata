@@ -865,11 +865,11 @@
                 <!-- Info banner: shown after refresh when file must be re-selected -->
                 <div id="relFileReselectBanner" style="display:none;background:#fef3c7;border:1px solid #f59e0b;border-radius:6px;padding:0.6rem 0.9rem;margin-bottom:0.6rem;font-size:0.82rem;color:#92400e">
                     <strong>Filen m&aring; velges p&aring; nytt</strong> etter oppfriskning av siden.
-                    <span id="relPrevFileName" style="color:#78350f"></span>
-                    <br><span style="font-size:0.78rem;color:#a16207">Kolonnevalg og andre innstillinger er bevart.</span>
+                    <span id="relPrevFileName" style="display:block;font-size:0.78rem;color:#78350f;margin:0.15rem 0"></span>
+                    <span style="font-size:0.78rem;color:#a16207">Kolonnevalg og andre innstillinger er bevart &mdash; klikk nedenfor for &aring; velge filen p&aring; nytt.</span>
                 </div>
                 <div class="upload-area" id="relUploadArea" style="padding:1.5rem;min-height:auto">
-                    <p style="margin:0;font-size:0.85rem">Dra og slipp Excel-fil her, eller klikk for &aring; velge</p>
+                    <p id="relUploadCTA" style="margin:0;font-size:0.85rem">Dra og slipp Excel-fil her, eller klikk for &aring; velge</p>
                     <p style="font-size:0.78rem;color:#94a3b8;margin:0.3rem 0 0">.xlsx-fil med artikkelnumre</p>
                     <p class="filename hidden" id="relFileName"></p>
                     <input type="file" id="relFileInput" accept=".xlsx" style="display:none">
@@ -1134,9 +1134,16 @@
                 nameEl.textContent = '';
             }
             banner.style.display = '';
+            // Adapt upload area CTA text when in reselect mode
+            const cta = document.getElementById('relUploadCTA');
+            if (cta) cta.textContent = prevFileName
+                ? `Velg "${prevFileName}" på nytt, eller velg en annen fil`
+                : 'Velg fil på nytt';
         }
         function relHideFileReselectBanner() {
             document.getElementById('relFileReselectBanner').style.display = 'none';
+            const cta = document.getElementById('relUploadCTA');
+            if (cta) cta.textContent = 'Dra og slipp Excel-fil her, eller klikk for å velge';
         }
 
         let relInitDone = false;
@@ -1184,6 +1191,8 @@
             preview.style.display = 'none';
             relUploadPreviewData = null;
             relValidatedCount = null;
+            relValidatedRawCount = 0;
+            relValidatedDuplicates = 0;
 
             // Only clear column if NOT switching sheets with a preserved preference
             if (sheetOverride === undefined) {
@@ -1259,12 +1268,14 @@
             // Render preview table with column highlight
             relRenderPreviewTable();
 
-            // Task 2: Count clarity — show estimate from preview, mark as preliminary
+            // Count clarity — show preview estimate, then trigger async full validation
             relUpdateColumnCount();
             preview.style.display = '';
             relHideFileReselectBanner();
             updateRelRunState();
             relSaveState();
+            // Trigger async validation if a column is already selected
+            if (relSelectedColumn !== null) relValidateColumn();
         }
 
         function relRenderPreviewTable() {
@@ -1304,20 +1315,72 @@
             ).length;
 
             if (relValidatedCount !== null) {
-                // After full extraction — show validated count
+                // After full validation — show trustworthy count
+                const dupInfo = relValidatedDuplicates > 0
+                    ? `, ${relValidatedDuplicates} duplikater fjernet` : '';
                 countEl.innerHTML =
-                    `<strong>${relValidatedCount}</strong> unike artikkelnumre (validert fra ${total_data_rows} datarader)`;
+                    `<strong style="color:#16a34a">${relValidatedCount}</strong> unike artikkelnumre` +
+                    ` (av ${relValidatedRawCount} r&aring;verdier${dupInfo})`;
+                relExtractedCount = relValidatedCount;
             } else if (total_data_rows > preview_rows.length) {
-                // More rows exist than shown — preview is an estimate
+                // More rows exist than shown — validation is in progress
+                // Do NOT set relExtractedCount > 0 until validation completes
+                // to prevent premature run-button enabling (race condition fix)
                 countEl.innerHTML =
-                    `${nonEmpty} av ${preview_rows.length} viste rader har verdi` +
-                    ` &mdash; totalt ${total_data_rows} datarader i arket (endelig antall beregnes ved kjøring)`;
+                    `<span style="color:#d97706">Estimat:</span> ${nonEmpty} av ${preview_rows.length} viste rader har verdi` +
+                    ` &mdash; totalt ca. ${total_data_rows} datarader i arket` +
+                    ` <span style="font-size:0.78rem">(validerer...)</span>`;
+                relExtractedCount = 0; // keep disabled until validation completes
             } else {
-                // All rows fit in the preview
+                // All rows fit in the preview — count is exact, no validation needed
                 countEl.innerHTML =
                     `${nonEmpty} verdier i valgt kolonne (alle ${total_data_rows} datarader vist)`;
+                relExtractedCount = nonEmpty;
             }
-            relExtractedCount = nonEmpty > 0 ? Math.max(nonEmpty, 1) : 0;
+        }
+
+        // Validate the full column extraction via backend (async)
+        let relValidateAbort = null;
+        let relValidatedRawCount = 0;
+        let relValidatedDuplicates = 0;
+        async function relValidateColumn() {
+            if (!relFile || relSelectedColumn === null) return;
+            // Cancel any in-flight validation
+            if (relValidateAbort) relValidateAbort.abort();
+            relValidateAbort = new AbortController();
+            relValidatedCount = null;
+            relValidatedRawCount = 0;
+            relValidatedDuplicates = 0;
+            relUpdateColumnCount(); // show estimating state
+            updateRelRunState();
+            const fd = new FormData();
+            fd.append('file', relFile);
+            const params = new URLSearchParams();
+            params.set('column_index', relSelectedColumn);
+            if (relSelectedSheet) params.set('sheet_name', relSelectedSheet);
+            try {
+                const resp = await fetch(
+                    `${API_BASE}/api/families/validate-upload-column?${params.toString()}`,
+                    { method: 'POST', body: fd, signal: relValidateAbort.signal }
+                );
+                if (!resp.ok) {
+                    const e = await resp.json().catch(()=>({}));
+                    throw new Error(e.detail || `HTTP ${resp.status}`);
+                }
+                const data = await resp.json();
+                relValidatedCount = data.valid_unique;
+                relValidatedRawCount = data.raw_values;
+                relValidatedDuplicates = data.duplicates_removed;
+                relExtractedCount = data.valid_unique;
+                relUpdateColumnCount();
+                updateRelRunState();
+            } catch (e) {
+                if (e.name === 'AbortError') return; // superseded by newer request
+                // Validation failed — fall back to estimate
+                relValidatedCount = null;
+                relUpdateColumnCount();
+                updateRelRunState();
+            }
         }
 
         document.addEventListener('DOMContentLoaded', () => {
@@ -1368,21 +1431,27 @@
                 updateRelRunState();
             });
 
-            // Column selection change — just re-render highlight + count, no re-fetch
+            // Column selection change — re-render highlight, show estimate, trigger async validation
             document.getElementById('relColumnSelect').addEventListener('change', (e) => {
                 relSelectedColumn = parseInt(e.target.value, 10);
-                relValidatedCount = null; // reset validated count on column change
+                relValidatedCount = null;
+                relValidatedRawCount = 0;
+                relValidatedDuplicates = 0;
                 relRenderPreviewTable();
                 relUpdateColumnCount();
                 relSaveState();
                 updateRelRunState();
+                // Trigger async full-column validation
+                relValidateColumn();
             });
 
-            // Task 4: Sheet selection change — re-fetch preview for new sheet
+            // Sheet selection change — re-fetch preview for new sheet
             document.getElementById('relSheetSelect').addEventListener('change', (e) => {
                 relSelectedSheet = e.target.value;
-                relSelectedColumn = null; // reset column for new sheet
+                relSelectedColumn = null;
                 relValidatedCount = null;
+                relValidatedRawCount = 0;
+                relValidatedDuplicates = 0;
                 relSaveState();
                 if (relFile) relPreviewUpload(relFile, relSelectedSheet);
             });
@@ -1408,10 +1477,12 @@
                     text = 'Velg en Excel-fil';
                 else if (relSelectedColumn === null)
                     text = 'Velg kolonne med artikkelnumre';
+                else if (relValidatedCount !== null && relValidatedCount === 0)
+                    text = 'Ingen gyldige artikkelnumre i valgt kolonne';
+                else if (relValidatedCount !== null)
+                    text = `${relValidatedCount} unike artikkelnumre klare`;
                 else
-                    text = relValidatedCount !== null
-                        ? `${relValidatedCount} unike artikkelnumre klare`
-                        : 'Kolonne valgt, klar til analyse';
+                    text = 'Validerer kolonne...';
             }
             btn.disabled = !canRun;
             summary.textContent = text;
@@ -1593,6 +1664,7 @@
         // Start analysis
         startBtn.addEventListener('click', async () => {
             if (!selectedFile) return;
+            lastMasterdataArticles = []; // Clear stale handoff data when starting new run
 
             startBtn.disabled = true;
             startBtn.innerHTML = '<span class="spinner"></span> Laster opp...';

@@ -743,6 +743,64 @@ async def preview_upload_for_families(
     return result
 
 
+@app.post("/api/families/validate-upload-column")
+async def validate_upload_column(
+    file: UploadFile = File(...),
+    column_index: int = Query(..., description="Column index for article numbers (0-based)"),
+    sheet_name: Optional[str] = Query(None, description="Sheet name to read from"),
+):
+    """Validate a specific column in an uploaded Excel file.
+
+    Extracts all values from the selected column, normalizes and deduplicates them,
+    and returns the validated count and sample — without running family analysis.
+    Used by the frontend to show a trustworthy article count before the user commits
+    to running the analysis.
+    """
+    from openpyxl import load_workbook
+    from io import BytesIO
+    from backend.scraper import normalize_identifier
+
+    content = await file.read()
+    try:
+        wb = load_workbook(BytesIO(content), read_only=True, data_only=True)
+    except Exception as e:
+        raise HTTPException(400, f"Kunne ikke lese Excel-fil: {e}")
+
+    if sheet_name and sheet_name in wb.sheetnames:
+        ws = wb[sheet_name]
+    else:
+        ws = wb.active
+
+    raw_count = 0
+    article_numbers = []
+    for i, row in enumerate(ws.iter_rows(values_only=True)):
+        if i == 0:
+            continue  # Skip header
+        if row and len(row) > column_index:
+            val = row[column_index]
+            if val is not None and str(val).strip():
+                raw_count += 1
+            normalized = normalize_identifier(val)
+            if normalized:
+                article_numbers.append(normalized)
+    wb.close()
+
+    # Deduplicate
+    seen = set()
+    unique = []
+    for a in article_numbers:
+        if a not in seen:
+            seen.add(a)
+            unique.append(a)
+
+    return {
+        "raw_values": raw_count,
+        "valid_unique": len(unique),
+        "sample": unique[:10],
+        "duplicates_removed": len(article_numbers) - len(unique),
+    }
+
+
 @app.post("/api/families/analyze-upload")
 async def analyze_upload_families(
     file: UploadFile = File(...),
