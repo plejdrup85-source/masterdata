@@ -1903,6 +1903,9 @@
 
 
                 const results = data.results;
+                // Restore analysis mode from server (survives page refresh)
+                if (data.analysis_mode) currentAnalysisMode = data.analysis_mode;
+                if (data.focus_areas) currentFocusAreas = data.focus_areas;
                 // Store article numbers from data model for cross-module handoff (Task 3)
                 lastMasterdataArticles = results.map(r => r.article_number).filter(Boolean);
                 const total = results.length;

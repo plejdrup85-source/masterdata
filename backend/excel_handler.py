@@ -1156,6 +1156,10 @@ def _create_area_scores_sheet(ws, results: list[ProductAnalysis],
     # Auto-width for key columns
     ws.column_dimensions["A"].width = 18
     ws.column_dimensions["B"].width = 35
+    # Freeze header row and set auto-filter for usability
+    ws.freeze_panes = "A2"
+    if len(headers) > 0:
+        ws.auto_filter.ref = f"A1:{get_column_letter(len(headers))}1"
 
 
 def _create_debug_log_sheet(ws, results: list[ProductAnalysis]) -> None:
