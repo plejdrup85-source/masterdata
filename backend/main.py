@@ -650,22 +650,109 @@ async def analyze_jeeves_families():
     return _run_family_detection(product_dicts, source_id, data_source="jeeves_direct")
 
 
+@app.post("/api/families/preview-upload")
+async def preview_upload_for_families(file: UploadFile = File(...)):
+    """Preview an uploaded Excel file: return headers and first 5 rows.
+
+    Used by the relationship module to let users pick the article-number column
+    before running analysis.
+    """
+    from openpyxl import load_workbook
+    from io import BytesIO
+
+    content = await file.read()
+    try:
+        wb = load_workbook(BytesIO(content), read_only=True, data_only=True)
+    except Exception as e:
+        raise HTTPException(400, f"Kunne ikke lese Excel-fil: {e}")
+
+    ws = wb.active
+    rows = []
+    for i, row in enumerate(ws.iter_rows(values_only=True)):
+        if i >= 6:  # header + 5 data rows
+            break
+        rows.append([str(v).strip() if v is not None else "" for v in row])
+    wb.close()
+
+    if not rows:
+        raise HTTPException(400, "Filen er tom")
+
+    headers = rows[0] if rows else []
+    preview_rows = rows[1:] if len(rows) > 1 else []
+
+    # Auto-detect article column
+    detected_col = None
+    search_terms = {
+        "artikkelnummer", "artikkel", "artikkelnr", "artnr", "artnummer",
+        "varenummer", "varenr", "article", "articlenumber", "article_number",
+        "sku", "item", "itemnumber", "produktnummer",
+    }
+    normalized_search = {
+        t.replace(".", "").replace(" ", "").replace("_", "")
+        for t in search_terms
+    }
+    for idx, h in enumerate(headers):
+        if h:
+            normalized = h.lower().replace(".", "").replace(" ", "").replace("_", "")
+            if normalized in normalized_search:
+                detected_col = idx
+                break
+
+    return {
+        "headers": headers,
+        "preview_rows": preview_rows,
+        "detected_column": detected_col,
+        "total_columns": len(headers),
+    }
+
+
 @app.post("/api/families/analyze-upload")
-async def analyze_upload_families(file: UploadFile = File(...)):
+async def analyze_upload_families(
+    file: UploadFile = File(...),
+    column_index: Optional[int] = Query(None, description="Column index for article numbers (0-based)"),
+):
     """Run family detection on an uploaded Excel file directly.
 
     Reads article numbers from the file, looks up Jeeves data for each,
     and runs family detection without requiring a full quality analysis.
+    If column_index is provided, uses that column instead of auto-detection.
     """
-    from backend.family_detector import products_from_jeeves_index
-
     if not _jeeves_index or not _jeeves_index.loaded:
         raise HTTPException(400, "Jeeves-data er ikke lastet inn — kreves for familieanalyse")
 
     content = await file.read()
-    article_numbers, _ = read_article_numbers(content, file.filename or "upload.xlsx")
+
+    if column_index is not None:
+        # Manual column selection — read from specified column
+        from openpyxl import load_workbook
+        from io import BytesIO
+        from backend.scraper import normalize_identifier
+
+        wb = load_workbook(BytesIO(content), read_only=True, data_only=True)
+        ws = wb.active
+        article_numbers = []
+        for i, row in enumerate(ws.iter_rows(values_only=True)):
+            if i == 0:
+                continue  # Skip header
+            if row and len(row) > column_index:
+                val = row[column_index]
+                normalized = normalize_identifier(val)
+                if normalized:
+                    article_numbers.append(normalized)
+        wb.close()
+        # Deduplicate
+        seen = set()
+        unique = []
+        for a in article_numbers:
+            if a not in seen:
+                seen.add(a)
+                unique.append(a)
+        article_numbers = unique
+    else:
+        article_numbers, _ = read_article_numbers(content, file.filename or "upload.xlsx")
+
     if not article_numbers:
-        raise HTTPException(400, "Ingen artikkelnumre funnet i filen")
+        raise HTTPException(400, "Ingen artikkelnumre funnet i valgt kolonne")
 
     # Build product dicts from Jeeves for the uploaded articles only
     products = []
