@@ -650,12 +650,66 @@ async def analyze_jeeves_families():
     return _run_family_detection(product_dicts, source_id, data_source="jeeves_direct")
 
 
-@app.post("/api/families/preview-upload")
-async def preview_upload_for_families(file: UploadFile = File(...)):
-    """Preview an uploaded Excel file: return headers and first 5 rows.
+_ARTICLE_SEARCH_TERMS = {
+    "artikkelnummer", "artikkel", "artikkelnr", "artnr", "artnummer",
+    "varenummer", "varenr", "article", "articlenumber", "article_number",
+    "sku", "item", "itemnumber", "produktnummer",
+}
+_ARTICLE_SEARCH_NORMALIZED = {
+    t.replace(".", "").replace(" ", "").replace("_", "")
+    for t in _ARTICLE_SEARCH_TERMS
+}
 
-    Used by the relationship module to let users pick the article-number column
-    before running analysis.
+
+def _detect_article_column(headers: list[str]) -> int | None:
+    """Return 0-based index of the auto-detected article-number column, or None."""
+    for idx, h in enumerate(headers):
+        if h:
+            normalized = h.lower().replace(".", "").replace(" ", "").replace("_", "")
+            if normalized in _ARTICLE_SEARCH_NORMALIZED:
+                return idx
+    return None
+
+
+def _preview_sheet(ws) -> dict:
+    """Extract preview data from a worksheet: headers, first 5 rows, total data rows."""
+    rows = []
+    total_data_rows = 0
+    for i, row in enumerate(ws.iter_rows(values_only=True)):
+        cell_values = [str(v).strip() if v is not None else "" for v in row]
+        if i < 6:  # header + 5 data rows
+            rows.append(cell_values)
+        if i > 0:
+            # Count non-empty data rows (at least one non-empty cell)
+            if any(c for c in cell_values):
+                total_data_rows += 1
+
+    if not rows:
+        return {"headers": [], "preview_rows": [], "detected_column": None,
+                "total_columns": 0, "total_data_rows": 0}
+
+    headers = rows[0]
+    preview_rows = rows[1:] if len(rows) > 1 else []
+    detected_col = _detect_article_column(headers)
+
+    return {
+        "headers": headers,
+        "preview_rows": preview_rows,
+        "detected_column": detected_col,
+        "total_columns": len(headers),
+        "total_data_rows": total_data_rows,
+    }
+
+
+@app.post("/api/families/preview-upload")
+async def preview_upload_for_families(
+    file: UploadFile = File(...),
+    sheet_name: Optional[str] = Query(None, description="Sheet name to preview (default: active sheet)"),
+):
+    """Preview an uploaded Excel file: return headers, first 5 rows, and sheet list.
+
+    Used by the relationship module to let users pick the sheet and article-number
+    column before running analysis.
     """
     from openpyxl import load_workbook
     from io import BytesIO
@@ -666,56 +720,41 @@ async def preview_upload_for_families(file: UploadFile = File(...)):
     except Exception as e:
         raise HTTPException(400, f"Kunne ikke lese Excel-fil: {e}")
 
-    ws = wb.active
-    rows = []
-    for i, row in enumerate(ws.iter_rows(values_only=True)):
-        if i >= 6:  # header + 5 data rows
-            break
-        rows.append([str(v).strip() if v is not None else "" for v in row])
+    sheet_names = wb.sheetnames
+
+    # Select requested sheet or default to active
+    if sheet_name and sheet_name in sheet_names:
+        ws = wb[sheet_name]
+    elif sheet_name and sheet_name not in sheet_names:
+        wb.close()
+        raise HTTPException(400, f"Arket '{sheet_name}' finnes ikke i filen")
+    else:
+        ws = wb.active
+
+    selected_title = ws.title
+    result = _preview_sheet(ws)
     wb.close()
 
-    if not rows:
-        raise HTTPException(400, "Filen er tom")
+    if not result["headers"]:
+        raise HTTPException(400, "Arket er tomt eller har ingen overskrifter")
 
-    headers = rows[0] if rows else []
-    preview_rows = rows[1:] if len(rows) > 1 else []
-
-    # Auto-detect article column
-    detected_col = None
-    search_terms = {
-        "artikkelnummer", "artikkel", "artikkelnr", "artnr", "artnummer",
-        "varenummer", "varenr", "article", "articlenumber", "article_number",
-        "sku", "item", "itemnumber", "produktnummer",
-    }
-    normalized_search = {
-        t.replace(".", "").replace(" ", "").replace("_", "")
-        for t in search_terms
-    }
-    for idx, h in enumerate(headers):
-        if h:
-            normalized = h.lower().replace(".", "").replace(" ", "").replace("_", "")
-            if normalized in normalized_search:
-                detected_col = idx
-                break
-
-    return {
-        "headers": headers,
-        "preview_rows": preview_rows,
-        "detected_column": detected_col,
-        "total_columns": len(headers),
-    }
+    result["sheet_names"] = sheet_names
+    result["active_sheet"] = selected_title
+    return result
 
 
 @app.post("/api/families/analyze-upload")
 async def analyze_upload_families(
     file: UploadFile = File(...),
     column_index: Optional[int] = Query(None, description="Column index for article numbers (0-based)"),
+    sheet_name: Optional[str] = Query(None, description="Sheet name to read from"),
 ):
     """Run family detection on an uploaded Excel file directly.
 
     Reads article numbers from the file, looks up Jeeves data for each,
     and runs family detection without requiring a full quality analysis.
     If column_index is provided, uses that column instead of auto-detection.
+    If sheet_name is provided, reads from that sheet instead of the active sheet.
     """
     if not _jeeves_index or not _jeeves_index.loaded:
         raise HTTPException(400, "Jeeves-data er ikke lastet inn — kreves for familieanalyse")
@@ -723,13 +762,16 @@ async def analyze_upload_families(
     content = await file.read()
 
     if column_index is not None:
-        # Manual column selection — read from specified column
+        # Manual column/sheet selection — read from specified column
         from openpyxl import load_workbook
         from io import BytesIO
         from backend.scraper import normalize_identifier
 
         wb = load_workbook(BytesIO(content), read_only=True, data_only=True)
-        ws = wb.active
+        if sheet_name and sheet_name in wb.sheetnames:
+            ws = wb[sheet_name]
+        else:
+            ws = wb.active
         article_numbers = []
         for i, row in enumerate(ws.iter_rows(values_only=True)):
             if i == 0:

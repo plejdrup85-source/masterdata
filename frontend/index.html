@@ -862,20 +862,33 @@
 
             <!-- Mode C: Upload Excel -->
             <div id="relModeUpload" class="rel-mode-panel" style="display:none">
+                <!-- Info banner: shown after refresh when file must be re-selected -->
+                <div id="relFileReselectBanner" style="display:none;background:#fef3c7;border:1px solid #f59e0b;border-radius:6px;padding:0.6rem 0.9rem;margin-bottom:0.6rem;font-size:0.82rem;color:#92400e">
+                    <strong>Filen m&aring; velges p&aring; nytt</strong> etter oppfriskning av siden.
+                    <span id="relPrevFileName" style="color:#78350f"></span>
+                    <br><span style="font-size:0.78rem;color:#a16207">Kolonnevalg og andre innstillinger er bevart.</span>
+                </div>
                 <div class="upload-area" id="relUploadArea" style="padding:1.5rem;min-height:auto">
-                    <p style="margin:0;font-size:0.85rem">Dra og slipp Excel-fil her, eller klikk for å velge</p>
+                    <p style="margin:0;font-size:0.85rem">Dra og slipp Excel-fil her, eller klikk for &aring; velge</p>
                     <p style="font-size:0.78rem;color:#94a3b8;margin:0.3rem 0 0">.xlsx-fil med artikkelnumre</p>
                     <p class="filename hidden" id="relFileName"></p>
                     <input type="file" id="relFileInput" accept=".xlsx" style="display:none">
                 </div>
                 <div id="relUploadInfo" style="font-size:0.82rem;color:var(--text-muted);margin-top:0.3rem"></div>
-                <!-- Excel preview + column picker (shown after file uploaded) -->
+                <!-- Excel preview + sheet/column picker (shown after file uploaded) -->
                 <div id="relUploadPreview" style="display:none;margin-top:0.75rem">
+                    <!-- Sheet selector (only shown for multi-sheet files) -->
+                    <div id="relSheetRow" style="display:none;margin-bottom:0.5rem">
+                        <label style="font-size:0.85rem;font-weight:500;margin-right:0.5rem">Ark:</label>
+                        <select id="relSheetSelect" style="padding:0.35rem 0.5rem;border:1px solid var(--border);border-radius:6px;font-size:0.85rem"></select>
+                    </div>
                     <div style="display:flex;align-items:center;gap:0.75rem;margin-bottom:0.5rem;flex-wrap:wrap">
                         <label style="font-size:0.85rem;font-weight:500">Velg kolonne med artikkelnumre:</label>
                         <select id="relColumnSelect" style="padding:0.35rem 0.5rem;border:1px solid var(--border);border-radius:6px;font-size:0.85rem"></select>
-                        <span id="relColumnCount" style="font-size:0.82rem;color:var(--text-muted)"></span>
                     </div>
+                    <!-- Count info: preview estimate vs full validated count -->
+                    <div id="relColumnCount" style="font-size:0.82rem;color:var(--text-muted);margin-bottom:0.4rem"></div>
+                    <p style="font-size:0.78rem;color:#94a3b8;margin:0 0 0.4rem">Forh&aring;ndsvisning &mdash; f&oslash;rste 5 rader</p>
                     <div style="overflow-x:auto;border:1px solid var(--border);border-radius:6px;max-height:200px">
                         <table class="standalone-table" id="relPreviewTable" style="font-size:0.78rem"></table>
                     </div>
@@ -1019,6 +1032,7 @@
         let currentJobId = null;
         let pollInterval = null;
         let selectedFile = null;
+        let lastMasterdataArticles = []; // Task 3: authoritative article list for handoff
 
         // ── Module Navigation ──
         let currentModule = 'masterdata';
@@ -1031,47 +1045,60 @@
             if (mod === 'relations') initRelModule();
         }
 
-        // ── Task 2: Cross-module handoff ──
+        // ── Cross-module handoff (Task 3: uses data model, not DOM) ──
         function handoffToRelationshipModule() {
-            if (!currentJobId) return;
-            const job = null; // We'll collect article numbers from the results table
-            const rows = document.querySelectorAll('#resultsBody tr');
-            const articles = [];
-            rows.forEach(r => {
-                const cell = r.querySelector('td');
-                if (cell) articles.push(cell.textContent.trim());
-            });
-            if (!articles.length) { alert('Ingen artikkelnumre å overføre.'); return; }
-            // Switch to relationship module and pre-fill paste input
+            // Use stored article numbers from the last completed analysis result,
+            // not DOM scraping, to guarantee completeness even if the table is
+            // partially rendered or virtualised.
+            const articles = lastMasterdataArticles;
+            if (!articles || !articles.length) {
+                alert('Ingen artikkelnumre å overføre.');
+                return;
+            }
             switchModule('relations');
             setRelMode('paste');
             const ta = document.getElementById('relPasteInput');
             ta.value = articles.join('\n');
             ta.dispatchEvent(new Event('input'));
             relSaveState();
-            document.getElementById('relRunSummary').textContent = `${articles.length} artikkelnumre overført fra kvalitetsanalyse`;
+            document.getElementById('relRunSummary').textContent =
+                `${articles.length} artikkelnumre overført fra kvalitetsanalyse`;
         }
 
         // ── Relationship Module State ──
         let relMode = 'catalog';
         let relFile = null;
-        let relUploadPreviewData = null; // {headers, preview_rows, detected_column}
+        let relUploadPreviewData = null; // {headers, preview_rows, detected_column, total_data_rows, sheet_names, active_sheet}
         let relSelectedColumn = null;
+        let relSelectedSheet = null;
         let relExtractedCount = 0;
+        let relValidatedCount = null; // set after full extraction at run time
 
-        // ── Task 4: localStorage persistence ──
+        // ── localStorage persistence ──
         const REL_STORAGE_PREFIX = 'relationshipModule.';
         function relSaveState() {
             try {
                 localStorage.setItem(REL_STORAGE_PREFIX + 'inputMode', relMode);
-                localStorage.setItem(REL_STORAGE_PREFIX + 'pasteValue', document.getElementById('relPasteInput').value || '');
-                if (relSelectedColumn !== null) localStorage.setItem(REL_STORAGE_PREFIX + 'selectedColumn', String(relSelectedColumn));
-                localStorage.setItem(REL_STORAGE_PREFIX + 'version', '1');
+                localStorage.setItem(REL_STORAGE_PREFIX + 'pasteValue',
+                    document.getElementById('relPasteInput').value || '');
+                if (relSelectedColumn !== null)
+                    localStorage.setItem(REL_STORAGE_PREFIX + 'selectedColumn', String(relSelectedColumn));
+                else
+                    localStorage.removeItem(REL_STORAGE_PREFIX + 'selectedColumn');
+                if (relSelectedSheet !== null)
+                    localStorage.setItem(REL_STORAGE_PREFIX + 'selectedSheet', relSelectedSheet);
+                else
+                    localStorage.removeItem(REL_STORAGE_PREFIX + 'selectedSheet');
+                // Persist filename for display-only context after refresh
+                if (relFile)
+                    localStorage.setItem(REL_STORAGE_PREFIX + 'fileName', relFile.name);
+                localStorage.setItem(REL_STORAGE_PREFIX + 'version', '2');
             } catch(e) { /* localStorage full or disabled */ }
         }
         function relRestoreState() {
             try {
-                if (localStorage.getItem(REL_STORAGE_PREFIX + 'version') !== '1') return;
+                const ver = localStorage.getItem(REL_STORAGE_PREFIX + 'version');
+                if (ver !== '1' && ver !== '2') return;
                 const mode = localStorage.getItem(REL_STORAGE_PREFIX + 'inputMode');
                 if (mode && ['catalog', 'paste', 'upload'].includes(mode)) setRelMode(mode);
                 const paste = localStorage.getItem(REL_STORAGE_PREFIX + 'pasteValue');
@@ -1080,15 +1107,39 @@
                     document.getElementById('relPasteInput').dispatchEvent(new Event('input'));
                 }
                 const col = localStorage.getItem(REL_STORAGE_PREFIX + 'selectedColumn');
-                if (col !== null) relSelectedColumn = parseInt(col, 10);
+                if (col !== null && col !== '') relSelectedColumn = parseInt(col, 10);
+                const sheet = localStorage.getItem(REL_STORAGE_PREFIX + 'selectedSheet');
+                if (sheet) relSelectedSheet = sheet;
+                // Task 1: Show re-selection banner if upload mode was active
+                if (mode === 'upload') {
+                    const prevName = localStorage.getItem(REL_STORAGE_PREFIX + 'fileName');
+                    relShowFileReselectBanner(prevName);
+                }
             } catch(e) {}
         }
         function relClearState() {
             try {
-                Object.keys(localStorage).filter(k => k.startsWith(REL_STORAGE_PREFIX)).forEach(k => localStorage.removeItem(k));
+                Object.keys(localStorage)
+                    .filter(k => k.startsWith(REL_STORAGE_PREFIX))
+                    .forEach(k => localStorage.removeItem(k));
             } catch(e) {}
         }
+        // Task 1: Show info banner when file must be re-selected after refresh
+        function relShowFileReselectBanner(prevFileName) {
+            const banner = document.getElementById('relFileReselectBanner');
+            const nameEl = document.getElementById('relPrevFileName');
+            if (prevFileName) {
+                nameEl.textContent = `Forrige fil: ${prevFileName}`;
+            } else {
+                nameEl.textContent = '';
+            }
+            banner.style.display = '';
+        }
+        function relHideFileReselectBanner() {
+            document.getElementById('relFileReselectBanner').style.display = 'none';
+        }
 
+        let relInitDone = false;
         function initRelModule() {
             fetch(`${API_BASE}/api/status`).then(r => r.json()).then(d => {
                 const cnt = d.jeeves_product_count || 0;
@@ -1097,12 +1148,16 @@
                 else el.textContent = ' (Jeeves-data ikke lastet)';
                 updateRelRunState();
             }).catch(() => {});
-            relRestoreState();
+            if (!relInitDone) {
+                relRestoreState();
+                relInitDone = true;
+            }
         }
 
         function setRelMode(mode) {
             relMode = mode;
-            document.querySelectorAll('.rel-mode-btn').forEach(b => b.classList.toggle('active', b.dataset.mode === mode));
+            document.querySelectorAll('.rel-mode-btn').forEach(b =>
+                b.classList.toggle('active', b.dataset.mode === mode));
             document.getElementById('relModeCatalog').style.display = mode === 'catalog' ? '' : 'none';
             document.getElementById('relModePaste').style.display = mode === 'paste' ? '' : 'none';
             document.getElementById('relModeUpload').style.display = mode === 'upload' ? '' : 'none';
@@ -1117,36 +1172,70 @@
             return [...new Set(items)];
         }
 
-        // ── Task 1: Excel preview + column picker ──
-        async function relPreviewUpload(file) {
+        // ── Excel preview + column/sheet picker ──
+        async function relPreviewUpload(file, sheetOverride) {
             const preview = document.getElementById('relUploadPreview');
             const colSelect = document.getElementById('relColumnSelect');
             const countEl = document.getElementById('relColumnCount');
             const table = document.getElementById('relPreviewTable');
+            const sheetRow = document.getElementById('relSheetRow');
+            const sheetSelect = document.getElementById('relSheetSelect');
 
             preview.style.display = 'none';
             relUploadPreviewData = null;
-            relSelectedColumn = null;
-            relExtractedCount = 0;
+            relValidatedCount = null;
+
+            // Only clear column if NOT switching sheets with a preserved preference
+            if (sheetOverride === undefined) {
+                relSelectedColumn = null;
+                relExtractedCount = 0;
+            }
 
             if (!file) { updateRelRunState(); return; }
 
             const fd = new FormData();
             fd.append('file', file);
+            let url = `${API_BASE}/api/families/preview-upload`;
+            const sheetParam = sheetOverride || relSelectedSheet;
+            if (sheetParam) url += `?sheet_name=${encodeURIComponent(sheetParam)}`;
             try {
-                const resp = await fetch(`${API_BASE}/api/families/preview-upload`, { method: 'POST', body: fd });
-                if (!resp.ok) { const e = await resp.json().catch(()=>({})); throw new Error(e.detail || `HTTP ${resp.status}`); }
+                const resp = await fetch(url, { method: 'POST', body: fd });
+                if (!resp.ok) {
+                    const e = await resp.json().catch(()=>({}));
+                    throw new Error(e.detail || `HTTP ${resp.status}`);
+                }
                 relUploadPreviewData = await resp.json();
             } catch (e) {
-                document.getElementById('relUploadInfo').textContent = `Feil ved lesing: ${e.message}`;
+                document.getElementById('relUploadInfo').textContent =
+                    `Feil ved lesing: ${e.message}`;
                 updateRelRunState();
                 return;
             }
 
-            const { headers, preview_rows, detected_column } = relUploadPreviewData;
+            const { headers, preview_rows, detected_column, total_data_rows,
+                    sheet_names, active_sheet } = relUploadPreviewData;
+
+            // Task 4: Multi-sheet support — show sheet selector if >1 sheet
+            if (sheet_names && sheet_names.length > 1) {
+                sheetRow.style.display = '';
+                if (!sheetOverride || sheetSelect.options.length === 0) {
+                    sheetSelect.innerHTML = '';
+                    sheet_names.forEach(sn => {
+                        const opt = document.createElement('option');
+                        opt.value = sn;
+                        opt.textContent = sn;
+                        sheetSelect.appendChild(opt);
+                    });
+                }
+                sheetSelect.value = active_sheet;
+                relSelectedSheet = active_sheet;
+            } else {
+                sheetRow.style.display = 'none';
+                relSelectedSheet = null;
+            }
 
             // Populate column dropdown
-            colSelect.innerHTML = '<option value="" disabled>Velg kolonne...</option>';
+            colSelect.innerHTML = '<option value="" disabled selected>Velg kolonne...</option>';
             headers.forEach((h, i) => {
                 const label = h || `Kolonne ${i + 1}`;
                 const opt = document.createElement('option');
@@ -1154,59 +1243,91 @@
                 opt.textContent = `${label}${i === detected_column ? ' (autooppdaget)' : ''}`;
                 colSelect.appendChild(opt);
             });
-            if (detected_column !== null) {
+
+            // Restore saved column preference if valid for this sheet, else use auto-detect
+            const savedCol = relSelectedColumn;
+            if (savedCol !== null && savedCol < headers.length) {
+                colSelect.value = savedCol;
+                relSelectedColumn = savedCol;
+            } else if (detected_column !== null) {
                 colSelect.value = detected_column;
                 relSelectedColumn = detected_column;
+            } else {
+                relSelectedColumn = null;
             }
 
-            // Render preview table
+            // Render preview table with column highlight
+            relRenderPreviewTable();
+
+            // Task 2: Count clarity — show estimate from preview, mark as preliminary
+            relUpdateColumnCount();
+            preview.style.display = '';
+            relHideFileReselectBanner();
+            updateRelRunState();
+            relSaveState();
+        }
+
+        function relRenderPreviewTable() {
+            if (!relUploadPreviewData) return;
+            const { headers, preview_rows } = relUploadPreviewData;
+            const table = document.getElementById('relPreviewTable');
+            const sel = relSelectedColumn;
             let html = '<thead><tr>';
             headers.forEach((h, i) => {
-                const highlight = i === (relSelectedColumn ?? detected_column) ? 'background:#f5f3ff;font-weight:600' : '';
-                html += `<th style="padding:0.3rem 0.5rem;${highlight}">${escHtml(h || `Kol ${i+1}`)}</th>`;
+                const hl = i === sel ? 'background:#f5f3ff;font-weight:600' : '';
+                html += `<th style="padding:0.3rem 0.5rem;${hl}">${escHtml(h || 'Kol ' + (i+1))}</th>`;
             });
             html += '</tr></thead><tbody>';
             preview_rows.forEach(row => {
                 html += '<tr>';
                 row.forEach((v, i) => {
-                    const highlight = i === (relSelectedColumn ?? detected_column) ? 'background:#f5f3ff' : '';
-                    html += `<td style="padding:0.2rem 0.5rem;${highlight}">${escHtml(v)}</td>`;
+                    const hl = i === sel ? 'background:#f5f3ff' : '';
+                    html += `<td style="padding:0.2rem 0.5rem;${hl}">${escHtml(v)}</td>`;
                 });
                 html += '</tr>';
             });
             html += '</tbody>';
             table.innerHTML = html;
-
-            // Count valid articles in selected column
-            relUpdateColumnCount();
-            preview.style.display = '';
-            updateRelRunState();
         }
 
+        // Task 2: Clear distinction between preview estimate and validated count
         function relUpdateColumnCount() {
             const countEl = document.getElementById('relColumnCount');
             if (!relUploadPreviewData || relSelectedColumn === null) {
-                countEl.textContent = '';
+                countEl.innerHTML = '';
                 relExtractedCount = 0;
                 return;
             }
-            // Count non-empty values in selected column from preview (approximate)
-            const { preview_rows } = relUploadPreviewData;
-            const nonEmpty = preview_rows.filter(r => r[relSelectedColumn] && r[relSelectedColumn].trim()).length;
-            countEl.textContent = nonEmpty > 0
-                ? `Forhåndsvisning: ${nonEmpty} verdier i valgt kolonne (${preview_rows.length} rader vist)`
-                : 'Ingen verdier funnet i valgt kolonne';
-            relExtractedCount = nonEmpty;
+            const { preview_rows, total_data_rows } = relUploadPreviewData;
+            const nonEmpty = preview_rows.filter(
+                r => r[relSelectedColumn] && r[relSelectedColumn].trim()
+            ).length;
+
+            if (relValidatedCount !== null) {
+                // After full extraction — show validated count
+                countEl.innerHTML =
+                    `<strong>${relValidatedCount}</strong> unike artikkelnumre (validert fra ${total_data_rows} datarader)`;
+            } else if (total_data_rows > preview_rows.length) {
+                // More rows exist than shown — preview is an estimate
+                countEl.innerHTML =
+                    `${nonEmpty} av ${preview_rows.length} viste rader har verdi` +
+                    ` &mdash; totalt ${total_data_rows} datarader i arket (endelig antall beregnes ved kjøring)`;
+            } else {
+                // All rows fit in the preview
+                countEl.innerHTML =
+                    `${nonEmpty} verdier i valgt kolonne (alle ${total_data_rows} datarader vist)`;
+            }
+            relExtractedCount = nonEmpty > 0 ? Math.max(nonEmpty, 1) : 0;
         }
 
         document.addEventListener('DOMContentLoaded', () => {
-            // Paste input persistence
+            // Paste input
             const ta = document.getElementById('relPasteInput');
             if (ta) ta.addEventListener('input', () => {
                 const arts = parseRelPasteInput();
                 const info = document.getElementById('relPasteInfo');
-                if (arts.length === 0) { info.textContent = ''; }
-                else { info.textContent = `${arts.length} unike artikkelnumre oppdaget`; }
+                info.textContent = arts.length === 0 ? ''
+                    : `${arts.length} unike artikkelnumre oppdaget`;
                 updateRelRunState();
                 relSaveState();
             });
@@ -1216,11 +1337,18 @@
             const relInput = document.getElementById('relFileInput');
             if (relArea) {
                 relArea.addEventListener('click', () => relInput.click());
-                relArea.addEventListener('dragover', e => { e.preventDefault(); relArea.style.borderColor = '#7c3aed'; });
-                relArea.addEventListener('dragleave', () => { relArea.style.borderColor = ''; });
+                relArea.addEventListener('dragover', e => {
+                    e.preventDefault(); relArea.style.borderColor = '#7c3aed';
+                });
+                relArea.addEventListener('dragleave', () => {
+                    relArea.style.borderColor = '';
+                });
                 relArea.addEventListener('drop', e => {
                     e.preventDefault(); relArea.style.borderColor = '';
-                    if (e.dataTransfer.files.length) { relInput.files = e.dataTransfer.files; relInput.dispatchEvent(new Event('change')); }
+                    if (e.dataTransfer.files.length) {
+                        relInput.files = e.dataTransfer.files;
+                        relInput.dispatchEvent(new Event('change'));
+                    }
                 });
             }
             if (relInput) relInput.addEventListener('change', () => {
@@ -1230,7 +1358,7 @@
                 if (relFile) {
                     nameEl.textContent = relFile.name;
                     nameEl.classList.remove('hidden');
-                    infoEl.textContent = `Laster forhåndsvisning...`;
+                    infoEl.textContent = 'Laster forhåndsvisning...';
                     relPreviewUpload(relFile);
                 } else {
                     nameEl.classList.add('hidden');
@@ -1240,14 +1368,23 @@
                 updateRelRunState();
             });
 
-            // Column selection change
+            // Column selection change — just re-render highlight + count, no re-fetch
             document.getElementById('relColumnSelect').addEventListener('change', (e) => {
                 relSelectedColumn = parseInt(e.target.value, 10);
+                relValidatedCount = null; // reset validated count on column change
+                relRenderPreviewTable();
                 relUpdateColumnCount();
-                // Re-highlight preview table
-                if (relUploadPreviewData) relPreviewUpload(relFile);
                 relSaveState();
                 updateRelRunState();
+            });
+
+            // Task 4: Sheet selection change — re-fetch preview for new sheet
+            document.getElementById('relSheetSelect').addEventListener('change', (e) => {
+                relSelectedSheet = e.target.value;
+                relSelectedColumn = null; // reset column for new sheet
+                relValidatedCount = null;
+                relSaveState();
+                if (relFile) relPreviewUpload(relFile, relSelectedSheet);
             });
         });
 
@@ -1262,12 +1399,19 @@
             } else if (relMode === 'paste') {
                 const arts = parseRelPasteInput();
                 canRun = arts.length >= 2;
-                text = arts.length > 0 ? `${arts.length} artikkelnumre valgt` : 'Lim inn minst 2 artikkelnumre';
+                text = arts.length > 0
+                    ? `${arts.length} artikkelnumre valgt`
+                    : 'Lim inn minst 2 artikkelnumre';
             } else if (relMode === 'upload') {
                 canRun = !!relFile && relSelectedColumn !== null && relExtractedCount > 0;
-                text = relFile
-                    ? (relSelectedColumn !== null ? `Kolonne valgt, klar til analyse` : 'Velg kolonne med artikkelnumre')
-                    : 'Velg en Excel-fil';
+                if (!relFile)
+                    text = 'Velg en Excel-fil';
+                else if (relSelectedColumn === null)
+                    text = 'Velg kolonne med artikkelnumre';
+                else
+                    text = relValidatedCount !== null
+                        ? `${relValidatedCount} unike artikkelnumre klare`
+                        : 'Kolonne valgt, klar til analyse';
             }
             btn.disabled = !canRun;
             summary.textContent = text;
@@ -1309,8 +1453,11 @@
                     } else if (relMode === 'upload') {
                         const fd = new FormData();
                         fd.append('file', relFile);
-                        const colParam = relSelectedColumn !== null ? `?column_index=${relSelectedColumn}` : '';
-                        await loadFamilies(`${API_BASE}/api/families/analyze-upload${colParam}`, 'POST', fd);
+                        const params = new URLSearchParams();
+                        if (relSelectedColumn !== null) params.set('column_index', relSelectedColumn);
+                        if (relSelectedSheet) params.set('sheet_name', relSelectedSheet);
+                        const qs = params.toString() ? `?${params.toString()}` : '';
+                        await loadFamilies(`${API_BASE}/api/families/analyze-upload${qs}`, 'POST', fd);
                     }
                 } catch (e) {
                     alert(`Familieanalyse feilet: ${e.message}`);
@@ -1579,6 +1726,8 @@
 
 
                 const results = data.results;
+                // Store article numbers from data model for cross-module handoff (Task 3)
+                lastMasterdataArticles = results.map(r => r.article_number).filter(Boolean);
                 const total = results.length;
                 const found = results.filter(r => r.found).length;
                 const avgScore = total > 0
@@ -2395,6 +2544,7 @@
                 return;
             }
             currentJobId = null;
+            lastMasterdataArticles = [];
             selectedFile = null;
             fileInput.value = '';
             fileName.classList.add('hidden');
