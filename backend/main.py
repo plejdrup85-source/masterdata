@@ -477,14 +477,46 @@ async def cancel_job(job_id: str):
 
 
 @app.get("/api/download/{job_id}")
-async def download_result(job_id: str):
-    """Download the analysis result Excel file."""
+async def download_result(
+    job_id: str,
+    threshold: Optional[int] = Query(None, description="Score threshold — export only products below this score"),
+):
+    """Download the analysis result Excel file.
+
+    If threshold is set, regenerates the export with only products scoring below it.
+    """
     job = jobs.get(job_id)
     if not job:
         raise HTTPException(404, "Jobb ikke funnet")
 
     if job.status != JobStatus.COMPLETED:
-        raise HTTPException(400, "Analysen er ikke fullf\u00f8rt enda")
+        raise HTTPException(400, "Analysen er ikke fullført enda")
+
+    # If threshold is set, regenerate filtered export
+    if threshold is not None and 0 < threshold <= 100:
+        filtered_results = []
+        for r in job.results:
+            # Use area score if available, fall back to total_score
+            area_score = (r.ai_score or {}).get("area_scores", {}).get("overall_score")
+            effective_score = area_score if area_score is not None else r.total_score
+            if effective_score < threshold:
+                filtered_results.append(r)
+
+        if not filtered_results:
+            raise HTTPException(400, f"Ingen produkter har score under {threshold}")
+
+        timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+        filtered_filename = f"masterdata_filtrert_{job_id}_{timestamp}.xlsx"
+        filtered_path = str(OUTPUT_DIR / filtered_filename)
+        create_output_excel(
+            filtered_results, filtered_path,
+            analysis_mode=job.analysis_mode, focus_areas=job.focus_areas,
+        )
+        return FileResponse(
+            filtered_path,
+            filename=f"masterdata_kvalitetssjekk_{job_id}_under{threshold}.xlsx",
+            media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+        )
 
     if not job.output_file or not Path(job.output_file).exists():
         raise HTTPException(404, "Resultatfilen finnes ikke lenger. Den kan ha blitt slettet.")
@@ -539,6 +571,25 @@ async def get_results(job_id: str):
                 ]),
                 "priority_level": (r.ai_score or {}).get("area_scores", {}).get("priority_level", ""),
                 "why_low": (r.ai_score or {}).get("area_scores", {}).get("why_low", ""),
+                # Source traceability: which external sources were attempted and found
+                "sources_used": {
+                    "manufacturer": {
+                        "searched": r.manufacturer_lookup.searched,
+                        "found": r.manufacturer_lookup.found,
+                        "source_url": r.manufacturer_lookup.source_url,
+                        "notes": r.manufacturer_lookup.notes,
+                    } if r.manufacturer_lookup.searched else None,
+                    "norengros": {
+                        "searched": r.norengros_lookup.searched,
+                        "found": r.norengros_lookup.found,
+                        "source_url": r.norengros_lookup.source_url,
+                        "notes": r.norengros_lookup.notes,
+                    } if r.norengros_lookup and r.norengros_lookup.searched else None,
+                    "pdf": {
+                        "available": r.pdf_available,
+                        "url": r.pdf_url,
+                    },
+                },
                 "ai_score": r.ai_score,
                 "ai_enrichment": r.ai_enrichment,
                 "enrichment_suggestions": [
@@ -1958,13 +2009,21 @@ async def _run_analysis(
                     )
 
                     # Step 4b: Norengros secondary lookup
-                    # Only when primary sources are weak (no PDF, no manufacturer data)
-                    data_is_weak = (
-                        not pdf_exists
-                        and (not mfr_data or not mfr_data.found)
-                        and (not product_data.description or len(product_data.description or "") < 20)
+                    # Triggered when primary enrichment sources are insufficient.
+                    # Previous gate was too restrictive (required ALL of: no PDF, no mfr,
+                    # no description) — meaning Norengros was almost never reached.
+                    # Now: trigger if any key field is still missing after primary sources.
+                    has_good_description = (
+                        product_data.description and len(product_data.description or "") >= 50
                     )
-                    if data_is_weak and product_data.found_on_onemed:
+                    has_good_spec = bool(
+                        product_data.specification or product_data.technical_details
+                    )
+                    primary_enrichment_sufficient = (
+                        has_good_description and has_good_spec
+                        and (pdf_exists or (mfr_data and mfr_data.found))
+                    )
+                    if not primary_enrichment_sufficient and product_data.found_on_onemed:
                         job.current_step = "norengros_lookup"
                         logger.info(f"[{job_id}] Norengros secondary lookup for {article_number}")
                         try:

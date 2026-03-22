@@ -235,58 +235,118 @@ async def search_manufacturer_info(product: ProductData) -> ManufacturerLookup:
         result.notes = "Ikke nok informasjon for \u00e5 s\u00f8ke hos produsent"
         return result
 
-    # Only attempt lookup for known manufacturers
-    mfr_config = _find_manufacturer_config(product.manufacturer or "")
-    if not mfr_config:
-        result.notes = (
-            f"Produsenten '{product.manufacturer or 'ukjent'}' er ikke i listen over kjente "
-            f"produsenter med s\u00f8kbart nettsted. Manuelt oppslag anbefales."
-        )
-        return result
-
     queries = _build_search_queries(product)
     if not queries:
-        result.notes = "Kunne ikke bygge s\u00f8kesp\u00f8rring - mangler b\u00e5de varenummer og produktnavn"
+        result.notes = "Kunne ikke bygge søkespørring - mangler både varenummer og produktnavn"
         return result
 
-    search_pattern = mfr_config.get("search_pattern", "/search?q={query}")
-
-    async with httpx.AsyncClient(timeout=15) as client:
-        for domain in mfr_config["domains"]:
-            for query in queries[:2]:  # Max 2 queries per domain
-                try:
-                    search_url = f"https://{domain}{search_pattern.format(query=query)}"
-                    response = await client.get(
-                        search_url,
-                        headers=HEADERS,
-                        follow_redirects=True,
-                    )
-                    if response.status_code == 200:
-                        info = _extract_product_info_from_page(
-                            response.text, str(response.url)
+    # Strategy 1: Known manufacturer direct search (high confidence)
+    mfr_config = _find_manufacturer_config(product.manufacturer or "")
+    if mfr_config:
+        search_pattern = mfr_config.get("search_pattern", "/search?q={query}")
+        async with httpx.AsyncClient(timeout=15) as client:
+            for domain in mfr_config["domains"]:
+                for query in queries[:2]:
+                    try:
+                        search_url = f"https://{domain}{search_pattern.format(query=quote_plus(query))}"
+                        logger.info(f"Manufacturer search: known={domain} query='{query}'")
+                        response = await client.get(
+                            search_url, headers=HEADERS, follow_redirects=True,
                         )
-                        if info.get("product_name") or info.get("specifications"):
-                            result.found = True
-                            result.source_url = str(response.url)
-                            result.product_name = info.get("product_name")
-                            result.description = info.get("description")
-                            result.specifications = info.get("specifications")
-                            result.datasheet_url = info.get("datasheet_url")
-                            result.image_url = info.get("image_url")
-                            # Confidence is moderate - this is a search result page,
-                            # not necessarily the exact product
-                            result.confidence = 0.5
-                            result.notes = (
-                                f"Data funnet via {domain}. "
-                                f"Verifiser at det er riktig produkt f\u00f8r bruk."
+                        if response.status_code == 200:
+                            info = _extract_product_info_from_page(
+                                response.text, str(response.url)
                             )
-                            return result
+                            if info.get("product_name") or info.get("specifications"):
+                                result.found = True
+                                result.source_url = str(response.url)
+                                result.product_name = info.get("product_name")
+                                result.description = info.get("description")
+                                result.specifications = info.get("specifications")
+                                result.datasheet_url = info.get("datasheet_url")
+                                result.image_url = info.get("image_url")
+                                result.confidence = 0.5
+                                result.notes = (
+                                    f"Data funnet via kjent produsentside ({domain}). "
+                                    f"Verifiser at det er riktig produkt før bruk."
+                                )
+                                return result
+                    except Exception as e:
+                        logger.debug(f"Search error for {domain}: {e}")
+                        continue
+
+    # Strategy 2: Generic web search for unknown manufacturers
+    # Use manufacturer name + article number to find product pages
+    if product.manufacturer and not mfr_config:
+        mfr_name = product.manufacturer.strip()
+        search_queries = []
+        if product.manufacturer_article_number:
+            search_queries.append(f"{mfr_name} {product.manufacturer_article_number}")
+        if product.product_name:
+            search_queries.append(f"{mfr_name} {product.product_name}")
+
+        async with httpx.AsyncClient(timeout=15) as client:
+            for sq in search_queries[:2]:
+                try:
+                    # Try searching on the manufacturer's likely website
+                    # by constructing site:manufacturer.com query patterns
+                    mfr_domain = _guess_manufacturer_domain(mfr_name)
+                    if mfr_domain:
+                        search_url = f"https://{mfr_domain}/search?q={quote_plus(sq)}"
+                        logger.info(f"Manufacturer search: guessed={mfr_domain} query='{sq}'")
+                        response = await client.get(
+                            search_url, headers=HEADERS, follow_redirects=True,
+                        )
+                        if response.status_code == 200:
+                            info = _extract_product_info_from_page(
+                                response.text, str(response.url)
+                            )
+                            if info.get("product_name") or info.get("specifications"):
+                                result.found = True
+                                result.source_url = str(response.url)
+                                result.product_name = info.get("product_name")
+                                result.description = info.get("description")
+                                result.specifications = info.get("specifications")
+                                result.datasheet_url = info.get("datasheet_url")
+                                result.image_url = info.get("image_url")
+                                result.confidence = 0.35
+                                result.notes = (
+                                    f"Data funnet via antatt produsentside ({mfr_domain}). "
+                                    f"Lavere konfidensgrad — verifiser nøye."
+                                )
+                                return result
                 except Exception as e:
-                    logger.debug(f"Search error for {domain}: {e}")
+                    logger.debug(f"Generic manufacturer search error: {e}")
                     continue
 
-    result.notes = f"Ingen treff hos kjente produsentnettsted for '{product.manufacturer or 'ukjent'}'"
+    if mfr_config:
+        result.notes = f"Ingen treff hos kjente produsentnettsted for '{product.manufacturer or 'ukjent'}'"
+    else:
+        result.notes = (
+            f"Produsenten '{product.manufacturer or 'ukjent'}' er ikke i listen over kjente "
+            f"produsenter. Søkte også generisk uten resultat. Manuelt oppslag anbefales."
+        )
     return result
+
+
+def _guess_manufacturer_domain(manufacturer_name: str) -> Optional[str]:
+    """Try to guess a manufacturer's website domain from their name.
+
+    Conservative: only returns a domain if the name maps clearly.
+    """
+    if not manufacturer_name:
+        return None
+    clean = re.sub(r'[®™©]', '', manufacturer_name).strip().lower()
+    # Remove common suffixes
+    for suffix in [" as", " ab", " gmbh", " inc", " ltd", " ag", " sa"]:
+        if clean.endswith(suffix):
+            clean = clean[:-len(suffix)].strip()
+
+    # Only return if it's a single reasonable word/brand name
+    if " " not in clean and len(clean) >= 3 and clean.isalnum():
+        return f"www.{clean}.com"
+
+    return None
 
 
 def generate_improvement_suggestions(
@@ -365,64 +425,127 @@ NORENGROS_SEARCH = f"{NORENGROS_BASE}/search"
 async def search_norengros(product: ProductData) -> NorengrosLookup:
     """Search Norengros as a secondary market reference source.
 
-    Used ONLY when primary sources (Jeeves, website, PDF, manufacturer) are
-    weak or missing. Norengros data requires manual review and is never
-    auto-approved.
+    Strategy:
+    1. Search with manufacturer article number (most specific)
+    2. Search with cleaned OneMed article number
+    3. Search with product name + manufacturer
+    4. For each search: find product links in results, then fetch product page
 
     Returns results with conservative confidence and review_required=True.
     """
     result = NorengrosLookup(searched=True)
 
-    # Build search queries — prefer article number for exact match
-    queries = []
     art_num = product.article_number.strip()
-    # Try without N-prefix for broader match
     clean_num = art_num.lstrip("N") if art_num.startswith("N") else art_num
+
+    # Build search queries in order of specificity
+    queries = []
     if product.manufacturer_article_number:
-        queries.append(product.manufacturer_article_number)
-    queries.append(clean_num)
-    if product.product_name:
-        queries.append(product.product_name)
+        queries.append(("mfr_artnr", product.manufacturer_article_number))
+    queries.append(("artnr", clean_num))
+    if product.product_name and product.manufacturer:
+        queries.append(("name+mfr", f"{product.product_name} {product.manufacturer}"))
+    elif product.product_name:
+        queries.append(("name", product.product_name))
+
+    strategies_tried = []
 
     async with httpx.AsyncClient(timeout=15) as client:
-        for query in queries[:2]:
+        for strategy, query in queries[:3]:
+            strategies_tried.append(f"{strategy}={query}")
             try:
                 search_url = f"{NORENGROS_SEARCH}?q={quote_plus(query)}"
+                logger.info(f"Norengros search: strategy={strategy} query='{query}' url={search_url}")
                 response = await client.get(
-                    search_url,
-                    headers=HEADERS,
-                    follow_redirects=True,
+                    search_url, headers=HEADERS, follow_redirects=True,
                 )
                 if response.status_code != 200:
+                    logger.debug(f"Norengros search HTTP {response.status_code} for '{query}'")
                     continue
 
-                info = _extract_norengros_product(response.text, str(response.url))
-                if info.get("product_name") or info.get("image_url"):
-                    result.found = True
-                    result.source_url = str(response.url)
-                    result.product_name = info.get("product_name")
-                    result.description = info.get("description")
-                    result.specifications = info.get("specifications")
-                    result.image_url = info.get("image_url")
-                    # Conservative confidence — competitor source
-                    result.confidence = 0.35
-                    result.notes = (
-                        "Norengros brukt som sekundær referansekilde. "
-                        "All data krever manuell verifisering."
-                    )
-                    logger.info(
-                        f"Norengros: found data for {art_num} "
-                        f"(name={'yes' if info.get('product_name') else 'no'}, "
-                        f"image={'yes' if info.get('image_url') else 'no'})"
-                    )
-                    return result
+                # Step 1: Find product links in search results
+                product_urls = _extract_norengros_product_links(response.text)
+                if not product_urls:
+                    logger.debug(f"Norengros: no product links found for '{query}'")
+                    continue
+
+                # Step 2: Fetch the first product page for detail extraction
+                for product_url in product_urls[:2]:
+                    full_url = product_url if product_url.startswith("http") else f"{NORENGROS_BASE}{product_url}"
+                    try:
+                        page_resp = await client.get(
+                            full_url, headers=HEADERS, follow_redirects=True,
+                        )
+                        if page_resp.status_code != 200:
+                            continue
+
+                        info = _extract_norengros_product(page_resp.text, str(page_resp.url))
+                        if info.get("product_name") or info.get("description") or info.get("specifications"):
+                            result.found = True
+                            result.source_url = str(page_resp.url)
+                            result.product_name = info.get("product_name")
+                            result.description = info.get("description")
+                            result.specifications = info.get("specifications")
+                            result.image_url = info.get("image_url")
+                            result.confidence = 0.35
+                            result.notes = (
+                                f"Norengros: data fra produktside ({strategy}). "
+                                f"All data krever manuell verifisering. "
+                                f"Strategier forsøkt: {', '.join(strategies_tried)}"
+                            )
+                            logger.info(
+                                f"Norengros: found data for {art_num} via {strategy} "
+                                f"(name={'yes' if info.get('product_name') else 'no'}, "
+                                f"desc={'yes' if info.get('description') else 'no'}, "
+                                f"specs={len(info.get('specifications', {}))})"
+                            )
+                            return result
+                    except Exception as e:
+                        logger.debug(f"Norengros product page fetch error: {e}")
+                        continue
 
             except Exception as e:
-                logger.debug(f"Norengros search error for query '{query}': {e}")
+                logger.debug(f"Norengros search error for '{query}': {e}")
                 continue
 
-    result.notes = f"Ingen treff på Norengros for {art_num}"
+    result.notes = (
+        f"Ingen treff på Norengros for {art_num}. "
+        f"Strategier forsøkt: {', '.join(strategies_tried)}"
+    )
     return result
+
+
+def _extract_norengros_product_links(html: str) -> list[str]:
+    """Extract product page links from Norengros search results page.
+
+    Norengros search results contain product cards with links.
+    We extract the href from these cards to then fetch the actual product page.
+    """
+    soup = BeautifulSoup(html, "lxml")
+    links = []
+
+    # Look for product links in search results
+    # Common patterns: <a> with href containing /product/ or /p/ or /vare/
+    for a in soup.find_all("a", href=True):
+        href = a.get("href", "")
+        # Product page patterns on Norwegian e-commerce sites
+        if any(seg in href for seg in ["/product/", "/p/", "/vare/", "/produkt/"]):
+            if href not in links:
+                links.append(href)
+
+    # Fallback: look for links inside product-card-like containers
+    if not links:
+        for container in soup.find_all(class_=re.compile(
+            r"product|item|result|card", re.IGNORECASE
+        )):
+            a = container.find("a", href=True)
+            if a:
+                href = a.get("href", "")
+                if href and href not in links and not href.startswith("#"):
+                    links.append(href)
+
+    logger.debug(f"Norengros: found {len(links)} product links in search results")
+    return links[:5]  # Max 5 to avoid excessive fetching
 
 
 def _extract_norengros_product(html: str, url: str) -> dict:

@@ -2367,7 +2367,15 @@
             if (!currentJobId) return;
 
             try {
-                const resp = await fetch(`${API_BASE}/api/download/${currentJobId}`);
+                // If threshold export is enabled, pass it to backend for filtered export
+                let downloadUrl = `${API_BASE}/api/download/${currentJobId}`;
+                const thresholdEnabled = document.getElementById('thresholdEnabled').checked;
+                const exportOnly = document.getElementById('thresholdExportOnly').checked;
+                if (thresholdEnabled && exportOnly) {
+                    const threshold = parseInt(document.getElementById('thresholdValue').value) || 70;
+                    downloadUrl += `?threshold=${threshold}`;
+                }
+                const resp = await fetch(downloadUrl);
                 if (!resp.ok) {
                     const err = await resp.json().catch(() => ({}));
                     alert(`Kunne ikke laste ned: ${err.detail || 'Ukjent feil'}`);
