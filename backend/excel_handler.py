@@ -96,65 +96,72 @@ def read_article_numbers(file_content: bytes, filename: str) -> tuple[list[str],
 def create_output_excel(
     results: list[ProductAnalysis],
     output_path: str,
+    analysis_mode: str = "full_enrichment",
+    focus_areas: list[str] | None = None,
 ) -> None:
     """Create a structured Excel output file with analysis results.
 
-    Writes directly to file to avoid holding entire workbook in memory twice.
+    Output structure adapts to analysis_mode:
+    - full_enrichment: all sheets (existing behavior)
+    - audit_only: summary + audit scoring + overview (no enrichment sheets)
+    - focused_scan: summary + focused area scores (minimal, relevant sheets only)
     """
+    from backend.scoring import AREA_LABELS
     wb = Workbook()
 
-    # Sheet 1: Summary (high-level metrics)
+    is_audit = analysis_mode == "audit_only"
+    is_focused = analysis_mode == "focused_scan"
+
+    # Sheet 1: Summary (always included)
     ws_summary = wb.active
     ws_summary.title = "Summary"
-    _create_summary_sheet(ws_summary, results)
+    _create_summary_sheet(ws_summary, results, analysis_mode=analysis_mode, focus_areas=focus_areas)
 
-    # Sheet 2: Comparison_And_Enrichment (main review sheet)
-    ws_comparison = wb.create_sheet("Comparison_And_Enrichment")
-    _create_comparison_and_enrichment_sheet(ws_comparison, results)
+    # Sheet 2: Area Scores (audit and focused modes)
+    if is_audit or is_focused:
+        ws_audit = wb.create_sheet("Omr\u00e5descorer")
+        _create_area_scores_sheet(ws_audit, results, focus_areas)
 
-    # Sheet 3: Debug_Log (traceability)
-    ws_debug = wb.create_sheet("Debug_Log")
-    _create_debug_log_sheet(ws_debug, results)
+    if not is_focused:
+        # Full overview for audit and enrichment modes
+        ws_overview = wb.create_sheet("Oversikt")
+        _create_overview_sheet(ws_overview, results)
 
-    # Sheet 4: Overview (one row per product, legacy)
-    ws_overview = wb.create_sheet("Oversikt")
-    _create_overview_sheet(ws_overview, results)
+        ws_detail = wb.create_sheet("Feltanalyse")
+        _create_detail_sheet(ws_detail, results)
 
-    # Sheet 5: Field Analysis Detail
-    ws_detail = wb.create_sheet("Feltanalyse")
-    _create_detail_sheet(ws_detail, results)
+    if not is_audit and not is_focused:
+        # Enrichment-only sheets
+        ws_comparison = wb.create_sheet("Comparison_And_Enrichment")
+        _create_comparison_and_enrichment_sheet(ws_comparison, results)
 
-    # Sheet 6: Improvement Suggestions
-    ws_improvements = wb.create_sheet("Forbedringsforslag")
-    _create_improvements_sheet(ws_improvements, results)
+        ws_debug = wb.create_sheet("Debug_Log")
+        _create_debug_log_sheet(ws_debug, results)
 
-    # Sheet 7: Manufacturer Follow-up
-    ws_manufacturer = wb.create_sheet("Produsentoppf\u00f8lging")
-    _create_manufacturer_sheet(ws_manufacturer, results)
+        ws_improvements = wb.create_sheet("Forbedringsforslag")
+        _create_improvements_sheet(ws_improvements, results)
 
-    # Sheet 8: Image Details
-    ws_images = wb.create_sheet("Bildeanalyse")
-    _create_image_detail_sheet(ws_images, results)
+        ws_manufacturer = wb.create_sheet("Produsentoppf\u00f8lging")
+        _create_manufacturer_sheet(ws_manufacturer, results)
 
-    # Sheet 9: Image Issues Priority
-    ws_img_issues = wb.create_sheet("Bildeproblemer")
-    _create_image_issues_sheet(ws_img_issues, results)
+        ws_conflicts = wb.create_sheet("Kildekonflikter")
+        _create_conflicts_sheet(ws_conflicts, results)
 
-    # Sheet 10: Source Conflicts
-    ws_conflicts = wb.create_sheet("Kildekonflikter")
-    _create_conflicts_sheet(ws_conflicts, results)
+        ws_inriver = wb.create_sheet("Inriver Import")
+        _create_inriver_import_sheet(ws_inriver, results)
 
-    # Sheet 11: Inriver Import staging
-    ws_inriver = wb.create_sheet("Inriver Import")
-    _create_inriver_import_sheet(ws_inriver, results)
+    # Image sheets: include for audit, full enrichment, and focused with images
+    include_images = (not is_focused) or (focus_areas and "images" in focus_areas)
+    if include_images:
+        ws_images = wb.create_sheet("Bildeanalyse")
+        _create_image_detail_sheet(ws_images, results)
 
-    # NOTE: Product families / variant structure sheet has been removed from
-    # the standard output. Family/relationship analysis is a separate module
-    # with its own dedicated export via /api/families/{source_id}/export.
+        ws_img_issues = wb.create_sheet("Bildeproblemer")
+        _create_image_issues_sheet(ws_img_issues, results)
 
     # Save directly to file
     wb.save(output_path)
-    logger.info(f"Excel output saved to {output_path}")
+    logger.info(f"Excel output saved to {output_path} (mode={analysis_mode})")
 
 
 def _write_id_cell(ws, row: int, column: int, value, alignment=None):
@@ -935,7 +942,9 @@ def _create_conflicts_sheet(ws, results: list[ProductAnalysis]) -> None:
     ws.freeze_panes = "A2"
 
 
-def _create_summary_sheet(ws, results: list[ProductAnalysis]) -> None:
+def _create_summary_sheet(ws, results: list[ProductAnalysis],
+                          analysis_mode: str = "full_enrichment",
+                          focus_areas: list[str] | None = None) -> None:
     """Create the Summary sheet with high-level two-source metrics."""
     title_font = Font(bold=True, size=14)
     section_font = Font(bold=True, size=12, color="4472C4")
@@ -943,8 +952,17 @@ def _create_summary_sheet(ws, results: list[ProductAnalysis]) -> None:
     value_font = Font(size=11)
     indent_font = Font(size=11, color="404040")
 
-    ws.cell(row=1, column=1, value="Masterdata Kvalitetsrapport").font = title_font
+    mode_titles = {
+        "full_enrichment": "Masterdata Kvalitetsrapport — Full berikelse",
+        "audit_only": "Masterdata Kvalitetsrapport — Kvalitetsrevisjon",
+        "focused_scan": "Masterdata Kvalitetsrapport — Fokusert sjekk",
+    }
+    ws.cell(row=1, column=1, value=mode_titles.get(analysis_mode, "Masterdata Kvalitetsrapport")).font = title_font
     ws.cell(row=2, column=1, value=f"Generert: {datetime.now().strftime('%Y-%m-%d %H:%M')}").font = indent_font
+    if focus_areas:
+        from backend.scoring import AREA_LABELS
+        area_labels = [AREA_LABELS.get(a, a) for a in focus_areas]
+        ws.cell(row=3, column=1, value=f"Fokusomr\u00e5der: {', '.join(area_labels)}").font = indent_font
 
     total = len(results)
     found = sum(1 for r in results if r.product_data.found_on_onemed)
@@ -1047,6 +1065,97 @@ def _create_summary_sheet(ws, results: list[ProductAnalysis]) -> None:
 
     ws.column_dimensions["A"].width = 40
     ws.column_dimensions["B"].width = 55
+
+
+def _create_area_scores_sheet(ws, results: list[ProductAnalysis],
+                              focus_areas: list[str] | None = None) -> None:
+    """Create the Area Scores sheet for audit/focused modes.
+
+    One row per product with per-area scores, status, issues, and recommendations.
+    """
+    from backend.scoring import AREA_LABELS, ALL_AREAS
+
+    # Determine which areas to show
+    areas_to_show = focus_areas if focus_areas else ALL_AREAS
+
+    # Build headers: Article Number, Product Name, Overall Score, then per-area columns
+    headers = ["Artikkelnummer", "Produktnavn", "Totalscore", "Alvorlighetsgrad"]
+    for area in areas_to_show:
+        label = AREA_LABELS.get(area, area)
+        headers.append(f"{label} Score")
+        headers.append(f"{label} Status")
+        headers.append(f"{label} Problemer")
+        headers.append(f"{label} Anbefaling")
+
+    headers.append("Manglende omr\u00e5der")
+    headers.append("Oppsummering")
+
+    for col, header in enumerate(headers, 1):
+        ws.cell(row=1, column=col, value=header)
+    _style_header(ws, 1, len(headers))
+
+    for row_idx, result in enumerate(results, 2):
+        _write_id_cell(ws, row_idx, 1, result.article_number)
+        ws.cell(row=row_idx, column=2, value=result.product_data.product_name or "")
+
+        # Get area scores from the ai_score dict (populated by scoring framework)
+        area_score_data = {}
+        overall_score = result.total_score
+        overall_severity = ""
+        missing_areas = []
+        issue_summary = ""
+
+        if result.ai_score and "area_scores" in result.ai_score:
+            asd = result.ai_score["area_scores"]
+            overall_score = asd.get("overall_score", result.total_score)
+            overall_severity = asd.get("overall_severity", "")
+            missing_areas = asd.get("missing_areas", [])
+            issue_summary = asd.get("issue_summary", "")
+            for a in asd.get("area_scores", []):
+                area_score_data[a["area"]] = a
+
+        ws.cell(row=row_idx, column=3, value=round(overall_score, 1))
+        # Color-code overall score
+        score_cell = ws.cell(row=row_idx, column=3)
+        if overall_score >= 75:
+            score_cell.fill = PatternFill(start_color="C6EFCE", end_color="C6EFCE", fill_type="solid")
+        elif overall_score >= 50:
+            score_cell.fill = PatternFill(start_color="FFEB9C", end_color="FFEB9C", fill_type="solid")
+        else:
+            score_cell.fill = PatternFill(start_color="FFC7CE", end_color="FFC7CE", fill_type="solid")
+
+        ws.cell(row=row_idx, column=4, value=overall_severity)
+
+        col = 5
+        for area in areas_to_show:
+            a_data = area_score_data.get(area, {})
+            a_score = a_data.get("score", 0)
+            a_status = a_data.get("status", "Mangler")
+            a_issues = "; ".join(i["description"] for i in a_data.get("issues", []))
+            a_action = a_data.get("recommended_action", "")
+
+            score_cell = ws.cell(row=row_idx, column=col, value=round(a_score, 1))
+            if a_score >= 75:
+                score_cell.fill = PatternFill(start_color="C6EFCE", end_color="C6EFCE", fill_type="solid")
+            elif a_score >= 40:
+                score_cell.fill = PatternFill(start_color="FFEB9C", end_color="FFEB9C", fill_type="solid")
+            elif a_score > 0:
+                score_cell.fill = PatternFill(start_color="FFC7CE", end_color="FFC7CE", fill_type="solid")
+            else:
+                score_cell.fill = PatternFill(start_color="FF6B6B", end_color="FF6B6B", fill_type="solid")
+                score_cell.font = Font(color="FFFFFF")
+
+            ws.cell(row=row_idx, column=col + 1, value=a_status)
+            ws.cell(row=row_idx, column=col + 2, value=a_issues[:200] if a_issues else "")
+            ws.cell(row=row_idx, column=col + 3, value=a_action)
+            col += 4
+
+        ws.cell(row=row_idx, column=col, value=", ".join(missing_areas) if missing_areas else "")
+        ws.cell(row=row_idx, column=col + 1, value=issue_summary)
+
+    # Auto-width for key columns
+    ws.column_dimensions["A"].width = 18
+    ws.column_dimensions["B"].width = 35
 
 
 def _create_debug_log_sheet(ws, results: list[ProductAnalysis]) -> None:

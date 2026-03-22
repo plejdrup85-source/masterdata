@@ -609,6 +609,30 @@ def build_manufacturer_enrichment_results(
     return results
 
 
+async def check_pdf_exists(
+    article_number: str,
+) -> tuple[bool, Optional[str]]:
+    """Lightweight HEAD check for PDF existence without downloading/parsing.
+
+    Used by audit mode to score document presence without the cost of full extraction.
+    Returns (exists, pdf_url).
+    """
+    clean = article_number.strip()
+    pdf_url = f"{PDF_BASE_URL}/{clean}.pdf"
+
+    try:
+        async with httpx.AsyncClient(timeout=10) as client:
+            response = await client.head(pdf_url, headers=PDF_HEADERS, follow_redirects=True)
+            if response.status_code == 200:
+                content_type = response.headers.get("content-type", "")
+                if "pdf" in content_type.lower() or "octet-stream" in content_type.lower():
+                    return True, pdf_url
+            return False, pdf_url
+    except Exception as e:
+        logger.debug(f"PDF existence check failed for {article_number}: {e}")
+        return False, pdf_url
+
+
 async def fetch_and_parse_product_pdf(
     article_number: str,
     client: Optional[httpx.AsyncClient] = None,

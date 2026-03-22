@@ -240,6 +240,13 @@ class BatchMode(str, Enum):
     SPECIFIC = "specific"
 
 
+class AnalysisMode(str, Enum):
+    """Top-level analysis mode controlling what the pipeline does."""
+    FULL_ENRICHMENT = "full_enrichment"  # Existing: full quality + enrichment suggestions
+    AUDIT_ONLY = "audit_only"            # Quality audit only, no enrichment
+    FOCUSED_SCAN = "focused_scan"        # Focused area audit / improvement scan
+
+
 class JobStatus(str, Enum):
     PENDING = "pending"
     RUNNING = "running"
@@ -263,3 +270,6 @@ class AnalysisJob(BaseModel):
     # Batch selection metadata
     batch_mode: str = BatchMode.FULL.value
     batch_info: Optional[str] = None  # e.g. "Rader 1-200", "Random 100 (seed=42)"
+    # Analysis mode metadata
+    analysis_mode: str = AnalysisMode.FULL_ENRICHMENT.value
+    focus_areas: list[str] = []  # Only used when analysis_mode == "focused_scan"

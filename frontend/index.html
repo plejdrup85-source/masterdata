@@ -723,6 +723,49 @@
                 </label>
             </div>
 
+            <!-- Analysis Mode Selector -->
+            <div style="margin-top:1rem;padding:1rem;background:#f0f9ff;border-radius:8px;border:1px solid #bae6fd">
+                <div style="font-size:0.9rem;font-weight:600;margin-bottom:0.5rem;color:#0369a1">Analysemodus</div>
+                <div style="display:flex;gap:0.5rem;flex-wrap:wrap;font-size:0.85rem">
+                    <label style="display:flex;align-items:center;gap:0.3rem;cursor:pointer;background:#fff;padding:0.4rem 0.7rem;border-radius:6px;border:1px solid var(--border)">
+                        <input type="radio" name="analysisMode" value="full_enrichment" checked> Full berikelse
+                    </label>
+                    <label style="display:flex;align-items:center;gap:0.3rem;cursor:pointer;background:#fff;padding:0.4rem 0.7rem;border-radius:6px;border:1px solid var(--border)">
+                        <input type="radio" name="analysisMode" value="audit_only"> Kun kvalitetsrevisjon
+                    </label>
+                    <label style="display:flex;align-items:center;gap:0.3rem;cursor:pointer;background:#fff;padding:0.4rem 0.7rem;border-radius:6px;border:1px solid var(--border)">
+                        <input type="radio" name="analysisMode" value="focused_scan"> Fokusert sjekk
+                    </label>
+                </div>
+                <div id="analysisModeHelp" style="font-size:0.78rem;color:#64748b;margin-top:0.4rem">
+                    Full analyse med berikelsesforslag og AI-vurdering.
+                </div>
+                <!-- Focus Area Checkboxes (shown for focused_scan) -->
+                <div id="focusAreaPanel" style="display:none;margin-top:0.6rem;padding:0.6rem;background:#fff;border-radius:6px;border:1px solid #e2e8f0">
+                    <div style="font-size:0.82rem;font-weight:500;margin-bottom:0.4rem">Velg omr&aring;der &aring; sjekke:</div>
+                    <div style="display:flex;gap:0.6rem;flex-wrap:wrap;font-size:0.82rem">
+                        <label style="display:flex;align-items:center;gap:0.25rem;cursor:pointer">
+                            <input type="checkbox" class="focusAreaCb" value="description"> Beskrivelse
+                        </label>
+                        <label style="display:flex;align-items:center;gap:0.25rem;cursor:pointer">
+                            <input type="checkbox" class="focusAreaCb" value="specification"> Spesifikasjon
+                        </label>
+                        <label style="display:flex;align-items:center;gap:0.25rem;cursor:pointer">
+                            <input type="checkbox" class="focusAreaCb" value="images"> Bilder
+                        </label>
+                        <label style="display:flex;align-items:center;gap:0.25rem;cursor:pointer">
+                            <input type="checkbox" class="focusAreaCb" value="attributes"> Attributter
+                        </label>
+                        <label style="display:flex;align-items:center;gap:0.25rem;cursor:pointer">
+                            <input type="checkbox" class="focusAreaCb" value="documents"> Dokumentasjon
+                        </label>
+                    </div>
+                    <div id="focusAreaError" style="display:none;font-size:0.78rem;color:#dc2626;margin-top:0.3rem">
+                        Velg minst ett omr&aring;de
+                    </div>
+                </div>
+            </div>
+
             <!-- Batch Selection Controls -->
             <div style="margin-top:1rem;padding:1rem;background:var(--bg);border-radius:8px;border:1px solid var(--border)">
                 <div style="font-size:0.9rem;font-weight:600;margin-bottom:0.5rem">Batch-modus</div>
@@ -1592,15 +1635,64 @@
                 const arts = document.getElementById('specificArticles').value.trim();
                 if (arts) params.set('specific_articles', arts);
             }
+
+            // Analysis mode
+            const analysisMode = document.querySelector('input[name="analysisMode"]:checked').value;
+            params.set('analysis_mode', analysisMode);
+            if (analysisMode === 'focused_scan') {
+                const checked = Array.from(document.querySelectorAll('.focusAreaCb:checked')).map(cb => cb.value);
+                if (checked.length > 0) params.set('focus_areas', checked.join(','));
+            }
+
             return params;
         }
+
+        // Analysis mode UI logic
+        const ANALYSIS_MODE_HELP = {
+            'full_enrichment': 'Full analyse med berikelsesforslag og AI-vurdering. Tar lengst tid.',
+            'audit_only': 'Kun kvalitetsvurdering og scoring. Ingen berikelsesforslag. Raskere.',
+            'focused_scan': 'Sjekk kun valgte omr\u00e5der. Raskest for m\u00e5lrettede revisjoner.',
+        };
+
+        document.querySelectorAll('input[name="analysisMode"]').forEach(radio => {
+            radio.addEventListener('change', () => {
+                const mode = radio.value;
+                document.getElementById('analysisModeHelp').textContent = ANALYSIS_MODE_HELP[mode] || '';
+                document.getElementById('focusAreaPanel').style.display = mode === 'focused_scan' ? '' : 'none';
+                document.getElementById('focusAreaError').style.display = 'none';
+                updateStartBtnState();
+            });
+        });
+
+        document.querySelectorAll('.focusAreaCb').forEach(cb => {
+            cb.addEventListener('change', () => {
+                const anyChecked = document.querySelectorAll('.focusAreaCb:checked').length > 0;
+                document.getElementById('focusAreaError').style.display = anyChecked ? 'none' : '';
+                updateStartBtnState();
+            });
+        });
+
+        function updateStartBtnState() {
+            const hasFile = !!selectedFile;
+            const analysisMode = document.querySelector('input[name="analysisMode"]:checked').value;
+            let focusOk = true;
+            if (analysisMode === 'focused_scan') {
+                focusOk = document.querySelectorAll('.focusAreaCb:checked').length > 0;
+            }
+            startBtn.disabled = !hasFile || !focusOk;
+        }
+
+        let currentAnalysisMode = 'full_enrichment';
+        let currentFocusAreas = [];
 
         const STEP_LABELS = {
             'scraping': 'Henter produktdata',
             'image_analysis': 'Bildeanalyse',
             'manufacturer_lookup': 'Produsentoppslag',
             'pdf_enrichment': 'PDF-berikelse',
+            'pdf_check': 'Sjekker dokumenttilgjengelighet',
             'quality_analysis': 'Kvalitetsanalyse',
+            'area_scoring': 'Beregner omr\u00e5descorer',
             'ai_scoring': 'AI-vurdering (Claude)',
         };
 
@@ -1640,7 +1732,7 @@
             fileName.textContent = file.name;
             fileName.classList.remove('hidden');
             fileInfo.textContent = `${(file.size / 1024).toFixed(1)} KB`;
-            startBtn.disabled = false;
+            updateStartBtnState();
             columnInfo.classList.add('hidden');
         }
 
@@ -1664,6 +1756,19 @@
         // Start analysis
         startBtn.addEventListener('click', async () => {
             if (!selectedFile) return;
+
+            // Validate focused mode
+            const analysisMode = document.querySelector('input[name="analysisMode"]:checked').value;
+            if (analysisMode === 'focused_scan') {
+                const checked = document.querySelectorAll('.focusAreaCb:checked');
+                if (checked.length === 0) {
+                    document.getElementById('focusAreaError').style.display = '';
+                    return;
+                }
+            }
+            currentAnalysisMode = analysisMode;
+            currentFocusAreas = Array.from(document.querySelectorAll('.focusAreaCb:checked')).map(cb => cb.value);
+
             lastMasterdataArticles = []; // Clear stale handoff data when starting new run
 
             startBtn.disabled = true;
@@ -1861,26 +1966,79 @@
                     `;
                 }
 
-                // Enrichment stats
-                const pdfCount = results.filter(r => r.pdf_available).length;
-                const enrichedCount = results.filter(r => r.enrichment_count > 0).length;
-                const conflictCount = results.filter(r => r.enrichment_conflicts > 0).length;
+                // Area score summary (audit/focused modes)
+                const areaScoreData = results
+                    .map(r => r.ai_score && r.ai_score.area_scores ? r.ai_score.area_scores : null)
+                    .filter(Boolean);
 
-                statsGrid.innerHTML += `
-                    <div class="stat-card ${pdfCount > 0 ? 'success' : ''}">
-                        <div class="value">${pdfCount}</div>
-                        <div class="label">PDF funnet</div>
-                    </div>
-                    <div class="stat-card ${enrichedCount > 0 ? 'success' : ''}">
-                        <div class="value">${enrichedCount}</div>
-                        <div class="label">Beriket</div>
-                    </div>
-                    ${conflictCount > 0 ? `
-                    <div class="stat-card warning">
-                        <div class="value">${conflictCount}</div>
-                        <div class="label">Kildekonflikter</div>
-                    </div>` : ''}
-                `;
+                if (areaScoreData.length > 0) {
+                    // Collect per-area averages
+                    const areaAverages = {};
+                    const areaMissing = {};
+                    areaScoreData.forEach(asd => {
+                        (asd.area_scores || []).forEach(as => {
+                            if (!areaAverages[as.area_label]) {
+                                areaAverages[as.area_label] = { sum: 0, count: 0 };
+                                areaMissing[as.area_label] = 0;
+                            }
+                            areaAverages[as.area_label].sum += as.score;
+                            areaAverages[as.area_label].count += 1;
+                            if (as.status === 'Mangler') areaMissing[as.area_label]++;
+                        });
+                    });
+
+                    let areaStatsHtml = '';
+                    for (const [label, data] of Object.entries(areaAverages)) {
+                        const avg = (data.sum / data.count).toFixed(0);
+                        const missing = areaMissing[label] || 0;
+                        const cls = parseFloat(avg) >= 75 ? 'success' : parseFloat(avg) >= 40 ? 'warning' : 'danger';
+                        areaStatsHtml += `
+                            <div class="stat-card ${cls}">
+                                <div class="value">${avg}</div>
+                                <div class="label">${escapeHtml(label)}${missing > 0 ? ` (${missing} mangler)` : ''}</div>
+                            </div>
+                        `;
+                    }
+                    if (areaStatsHtml) {
+                        statsGrid.innerHTML += areaStatsHtml;
+                    }
+
+                    // Overall area score average
+                    const overallAreaScores = areaScoreData.map(a => a.overall_score).filter(s => s !== undefined);
+                    if (overallAreaScores.length > 0) {
+                        const avgOverall = (overallAreaScores.reduce((a,b) => a+b, 0) / overallAreaScores.length).toFixed(0);
+                        const cls = parseFloat(avgOverall) >= 75 ? 'success' : parseFloat(avgOverall) >= 40 ? 'warning' : 'danger';
+                        statsGrid.innerHTML += `
+                            <div class="stat-card ${cls}">
+                                <div class="value">${avgOverall}</div>
+                                <div class="label">Omr\u00e5descore (snitt)</div>
+                            </div>
+                        `;
+                    }
+                }
+
+                // Enrichment stats (only for full enrichment mode)
+                if (currentAnalysisMode === 'full_enrichment') {
+                    const pdfCount = results.filter(r => r.pdf_available).length;
+                    const enrichedCount = results.filter(r => r.enrichment_count > 0).length;
+                    const conflictCount = results.filter(r => r.enrichment_conflicts > 0).length;
+
+                    statsGrid.innerHTML += `
+                        <div class="stat-card ${pdfCount > 0 ? 'success' : ''}">
+                            <div class="value">${pdfCount}</div>
+                            <div class="label">PDF funnet</div>
+                        </div>
+                        <div class="stat-card ${enrichedCount > 0 ? 'success' : ''}">
+                            <div class="value">${enrichedCount}</div>
+                            <div class="label">Beriket</div>
+                        </div>
+                        ${conflictCount > 0 ? `
+                        <div class="stat-card warning">
+                            <div class="value">${conflictCount}</div>
+                            <div class="label">Kildekonflikter</div>
+                        </div>` : ''}
+                    `;
+                }
 
                 // Render results table with expandable rows
                 resultsBody.innerHTML = results.map((r, idx) => {

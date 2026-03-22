@@ -32,9 +32,10 @@ from backend.manufacturer import (
     search_norengros,
 )
 from backend.models import (
-    AnalysisJob, BatchMode, ImageSuggestion, JobStatus,
+    AnalysisJob, AnalysisMode, BatchMode, ImageSuggestion, JobStatus,
     ProductAnalysis, ProductData, QualityStatus, VerificationStatus,
 )
+from backend.scoring import score_product_areas, FOCUS_AREAS, ALL_AREAS, AREA_LABELS
 from backend.pdf_enricher import run_enrichment_pipeline
 from backend.scraper import scrape_product, _load_sitemap, _sitemap_loaded, _sku_to_url
 
@@ -190,6 +191,17 @@ async def health_check():
         "jeeves_loaded": _jeeves_index is not None and _jeeves_index.loaded,
         "jeeves_product_count": _jeeves_index.count if _jeeves_index else 0,
         "ai_scoring_available": bool(os.environ.get("ANTHROPIC_API_KEY")),
+        "analysis_modes": [
+            {"value": m.value, "label": l}
+            for m, l in [
+                (AnalysisMode.FULL_ENRICHMENT, "Full berikelse og forslag"),
+                (AnalysisMode.AUDIT_ONLY, "Kun kvalitetsrevisjon"),
+                (AnalysisMode.FOCUSED_SCAN, "Fokusert områdesjekk"),
+            ]
+        ],
+        "focus_areas": [
+            {"value": a, "label": AREA_LABELS[a]} for a in FOCUS_AREAS
+        ],
     }
 
 
@@ -257,6 +269,8 @@ async def upload_excel(
     sample_size: Optional[int] = Query(None, description="Number of random samples"),
     sample_seed: Optional[int] = Query(None, description="Random seed for reproducible sampling"),
     specific_articles: Optional[str] = Query(None, description="Comma-separated article numbers for specific mode"),
+    analysis_mode: str = Query(AnalysisMode.FULL_ENRICHMENT.value, description="Analysis mode: full_enrichment, audit_only, focused_scan"),
+    focus_areas: Optional[str] = Query(None, description="Comma-separated focus areas for focused_scan mode"),
 ):
     """Upload an Excel file and start analysis with batch selection support."""
     # Cleanup old jobs first
@@ -331,6 +345,24 @@ async def upload_excel(
     if not selected_articles:
         raise HTTPException(400, "Ingen artikler valgt etter batch-filtrering")
 
+    # Validate analysis_mode
+    valid_modes = [m.value for m in AnalysisMode]
+    if analysis_mode not in valid_modes:
+        raise HTTPException(400, f"Ugyldig analysemodus: {analysis_mode}. Gyldige: {valid_modes}")
+
+    # Parse focus_areas
+    parsed_focus_areas = []
+    if analysis_mode == AnalysisMode.FOCUSED_SCAN.value:
+        if not focus_areas:
+            raise HTTPException(400, "Fokusert modus krever minst ett valgt område (focus_areas)")
+        parsed_focus_areas = [a.strip() for a in focus_areas.split(",") if a.strip()]
+        valid_focus = set(ALL_AREAS)
+        invalid = [a for a in parsed_focus_areas if a not in valid_focus]
+        if invalid:
+            raise HTTPException(400, f"Ugyldige fokusområder: {invalid}. Gyldige: {list(valid_focus)}")
+        if not parsed_focus_areas:
+            raise HTTPException(400, "Minst ett fokusområde må velges")
+
     # Create job
     job_id = str(uuid.uuid4())[:8]
     job = AnalysisJob(
@@ -340,17 +372,27 @@ async def upload_excel(
         created_at=time.time(),
         batch_mode=batch_mode,
         batch_info=batch_info,
+        analysis_mode=analysis_mode,
+        focus_areas=parsed_focus_areas,
     )
     jobs[job_id] = job
 
     # Start analysis in background - store task reference to prevent GC
-    task = asyncio.create_task(_run_analysis(job_id, selected_articles, skip_cache))
+    task = asyncio.create_task(
+        _run_analysis(job_id, selected_articles, skip_cache,
+                      analysis_mode=analysis_mode, focus_areas=parsed_focus_areas)
+    )
     _background_tasks.add(task)
     task.add_done_callback(_background_tasks.discard)
 
-    # Estimate ~5 seconds per product (scrape + image + PDF + analysis)
+    # Estimate time: audit mode is faster (no enrichment/AI), focused is even faster
     n = len(selected_articles)
-    est_seconds = n * 5 // SCRAPE_CONCURRENCY
+    if analysis_mode == AnalysisMode.AUDIT_ONLY.value:
+        est_seconds = n * 3 // SCRAPE_CONCURRENCY
+    elif analysis_mode == AnalysisMode.FOCUSED_SCAN.value:
+        est_seconds = n * 2 // SCRAPE_CONCURRENCY
+    else:
+        est_seconds = n * 5 // SCRAPE_CONCURRENCY
     if est_seconds < 60:
         est_str = f"~{est_seconds} sekunder"
     elif est_seconds < 3600:
@@ -360,15 +402,27 @@ async def upload_excel(
 
     jeeves_status = f", Jeeves: {_jeeves_index.count} produkter" if _jeeves_index else ", Jeeves: ikke lastet"
 
+    mode_labels = {
+        AnalysisMode.FULL_ENRICHMENT.value: "Full berikelse",
+        AnalysisMode.AUDIT_ONLY.value: "Kvalitetsrevisjon",
+        AnalysisMode.FOCUSED_SCAN.value: "Fokusert sjekk",
+    }
+    mode_label = mode_labels.get(analysis_mode, analysis_mode)
+    focus_label = ""
+    if parsed_focus_areas:
+        focus_label = " (" + ", ".join(AREA_LABELS.get(a, a) for a in parsed_focus_areas) + ")"
+
     return {
         "job_id": job_id,
         "total_products": len(selected_articles),
         "detected_column": detected_column,
         "batch_mode": batch_mode,
         "batch_info": batch_info,
+        "analysis_mode": analysis_mode,
+        "focus_areas": parsed_focus_areas,
         "estimated_time": est_str,
         "jeeves_loaded": _jeeves_index is not None and _jeeves_index.loaded,
-        "message": f"Analyse startet for {n} produkter ({batch_info}). Estimert tid: {est_str}{jeeves_status}",
+        "message": f"{mode_label}{focus_label}: {n} produkter ({batch_info}). Estimert tid: {est_str}{jeeves_status}",
     }
 
 
@@ -393,6 +447,8 @@ async def get_status(job_id: str):
         "output_file": job.output_file,
         "batch_mode": job.batch_mode,
         "batch_info": job.batch_info,
+        "analysis_mode": job.analysis_mode,
+        "focus_areas": job.focus_areas,
     }
 
 
@@ -450,6 +506,8 @@ async def get_results(job_id: str):
         "status": job.status.value,
         "total_products": job.total_products,
         "processed_products": job.processed_products,
+        "analysis_mode": job.analysis_mode,
+        "focus_areas": job.focus_areas,
         "results": [
             {
                 "article_number": r.article_number,
@@ -1755,8 +1813,19 @@ async def _run_analysis(
     job_id: str,
     article_numbers: list[str],
     skip_cache: bool = False,
+    analysis_mode: str = AnalysisMode.FULL_ENRICHMENT.value,
+    focus_areas: Optional[list[str]] = None,
 ) -> None:
-    """Run the full analysis pipeline for all products."""
+    """Run the analysis pipeline for all products.
+
+    Pipeline steps depend on analysis_mode:
+    - full_enrichment: all steps (scrape, images, mfr, PDF, enrichment, AI)
+    - audit_only: scrape + images + quality analysis + scoring (no enrichment/AI suggestions)
+    - focused_scan: only evaluate selected focus_areas, skip irrelevant steps
+    """
+    is_audit = analysis_mode == AnalysisMode.AUDIT_ONLY.value
+    is_focused = analysis_mode == AnalysisMode.FOCUSED_SCAN.value
+    skip_enrichment = is_audit or is_focused
     job = jobs[job_id]
     job.status = JobStatus.RUNNING
 
@@ -1853,47 +1922,57 @@ async def _run_analysis(
                         f"(verification: {product_data.verification_status.value})"
                     )
 
-                # Step 3-5: enrichment pipeline
+                # Step 3-5: enrichment pipeline (skipped in audit/focused modes)
                 mfr_data = None
                 norengros_data = None
                 enrichment_results = []
                 pdf_exists = False
                 pdf_url = None
 
-                # Step 3: Manufacturer lookup (only if product found and data incomplete)
-                # Check Jeeves first — if Jeeves has supplier info, skip mfr lookup for that
-                jeeves_check = _jeeves_index.get(article_number) if _jeeves_index else None
-                if product_data.found_on_onemed:
-                    has_mfr = product_data.manufacturer or (jeeves_check and jeeves_check.supplier)
-                    has_mfr_num = product_data.manufacturer_article_number or (jeeves_check and jeeves_check.supplier_item_no)
-                    has_spec = product_data.specification or product_data.technical_details
-                    needs_mfr = not has_mfr or not has_mfr_num or not has_spec
-                    if needs_mfr:
-                        job.current_step = "manufacturer_lookup"
-                        logger.info(f"[{job_id}] Manufacturer lookup for {article_number}")
-                        mfr_data = await search_manufacturer_info(product_data)
+                if not skip_enrichment:
+                    # Step 3: Manufacturer lookup (only if product found and data incomplete)
+                    # Check Jeeves first — if Jeeves has supplier info, skip mfr lookup for that
+                    jeeves_check = _jeeves_index.get(article_number) if _jeeves_index else None
+                    if product_data.found_on_onemed:
+                        has_mfr = product_data.manufacturer or (jeeves_check and jeeves_check.supplier)
+                        has_mfr_num = product_data.manufacturer_article_number or (jeeves_check and jeeves_check.supplier_item_no)
+                        has_spec = product_data.specification or product_data.technical_details
+                        needs_mfr = not has_mfr or not has_mfr_num or not has_spec
+                        if needs_mfr:
+                            job.current_step = "manufacturer_lookup"
+                            logger.info(f"[{job_id}] Manufacturer lookup for {article_number}")
+                            mfr_data = await search_manufacturer_info(product_data)
 
-                # Step 4: PDF enrichment - always try (PDF CDN uses article numbers directly)
-                job.current_step = "pdf_enrichment"
-                logger.info(f"[{job_id}] Enrichment pipeline for {article_number}")
-                pdf_exists, pdf_url, enrichment_results = await run_enrichment_pipeline(
-                    article_number, product_data, manufacturer_data=mfr_data
-                )
+                    # Step 4: PDF enrichment - always try (PDF CDN uses article numbers directly)
+                    job.current_step = "pdf_enrichment"
+                    logger.info(f"[{job_id}] Enrichment pipeline for {article_number}")
+                    pdf_exists, pdf_url, enrichment_results = await run_enrichment_pipeline(
+                        article_number, product_data, manufacturer_data=mfr_data
+                    )
 
-                # Step 4b: Norengros secondary lookup
-                # Only when primary sources are weak (no PDF, no manufacturer data)
-                data_is_weak = (
-                    not pdf_exists
-                    and (not mfr_data or not mfr_data.found)
-                    and (not product_data.description or len(product_data.description or "") < 20)
-                )
-                if data_is_weak and product_data.found_on_onemed:
-                    job.current_step = "norengros_lookup"
-                    logger.info(f"[{job_id}] Norengros secondary lookup for {article_number}")
+                    # Step 4b: Norengros secondary lookup
+                    # Only when primary sources are weak (no PDF, no manufacturer data)
+                    data_is_weak = (
+                        not pdf_exists
+                        and (not mfr_data or not mfr_data.found)
+                        and (not product_data.description or len(product_data.description or "") < 20)
+                    )
+                    if data_is_weak and product_data.found_on_onemed:
+                        job.current_step = "norengros_lookup"
+                        logger.info(f"[{job_id}] Norengros secondary lookup for {article_number}")
+                        try:
+                            norengros_data = await search_norengros(product_data)
+                        except Exception as e:
+                            logger.debug(f"[{job_id}] Norengros lookup failed for {article_number}: {e}")
+                else:
+                    # Audit/focused: still check PDF existence for document scoring
+                    # but don't run the full enrichment pipeline
+                    job.current_step = "pdf_check"
                     try:
-                        norengros_data = await search_norengros(product_data)
-                    except Exception as e:
-                        logger.debug(f"[{job_id}] Norengros lookup failed for {article_number}: {e}")
+                        from backend.pdf_enricher import check_pdf_exists
+                        pdf_exists, pdf_url = await check_pdf_exists(article_number)
+                    except Exception:
+                        pass  # PDF check is best-effort in audit mode
 
                 # Step 5: Quality analysis (with all collected data + Jeeves)
                 job.current_step = "quality_analysis"
@@ -1906,102 +1985,110 @@ async def _run_analysis(
                 analysis.pdf_available = pdf_exists
                 analysis.pdf_url = pdf_url
 
-                # Apply manufacturer data if found
-                if mfr_data:
-                    analysis.manufacturer_lookup = mfr_data
-                    if mfr_data.found:
-                        suggestions = generate_improvement_suggestions(
-                            product_data, mfr_data
-                        )
-                        for suggestion in suggestions:
-                            for fa in analysis.field_analyses:
-                                if fa.field_name == suggestion["field"]:
-                                    fa.suggested_value = suggestion["suggested"]
-                                    fa.source = suggestion["source"]
-                                    fa.confidence = suggestion["confidence"]
-                                    break
-
-                # Store Norengros data if found
-                if norengros_data:
-                    analysis.norengros_lookup = norengros_data
-
-                # Step 5b: Image suggestion logic
-                # Check if current image is weak/missing and suggest better alternatives
-                analysis.image_suggestion = _build_image_suggestion(
-                    product_data, image_summary, mfr_data, norengros_data,
+                # Step 5a: Centralized area scoring (all modes)
+                job.current_step = "area_scoring"
+                score_result = score_product_areas(
+                    product_data, jeeves_data, image_quality_dict,
+                    pdf_available=pdf_exists,
+                    areas=focus_areas if is_focused else None,
                 )
+                # Store area scores in ai_score dict for backward-compatible transport
+                # (existing results endpoint already serializes ai_score)
+                if not analysis.ai_score:
+                    analysis.ai_score = {}
+                analysis.ai_score["area_scores"] = score_result.to_dict()
 
-                # Apply enrichment suggestions to field_analyses (PDF takes priority)
-                _apply_enrichment_to_analysis(analysis)
+                if not skip_enrichment:
+                    # Apply manufacturer data if found
+                    if mfr_data:
+                        analysis.manufacturer_lookup = mfr_data
+                        if mfr_data.found:
+                            suggestions = generate_improvement_suggestions(
+                                product_data, mfr_data
+                            )
+                            for suggestion in suggestions:
+                                for fa in analysis.field_analyses:
+                                    if fa.field_name == suggestion["field"]:
+                                        fa.suggested_value = suggestion["suggested"]
+                                        fa.source = suggestion["source"]
+                                        fa.confidence = suggestion["confidence"]
+                                        break
 
-                # Run source-priority enrichment engine
-                enrichment_suggestions = enrich_product(
-                    analysis, enrichment_results, manufacturer_data=mfr_data
-                )
+                    # Store Norengros data if found
+                    if norengros_data:
+                        analysis.norengros_lookup = norengros_data
 
-                # Step 6: AI quality layer (if API key configured)
-                job.current_step = "ai_scoring"
-                try:
-                    # 6a: AI scoring (quality evaluation)
-                    ai_score_result = await score_product_async(
-                        product_name=product_data.product_name,
-                        description=product_data.description,
-                        specification=product_data.specification,
-                        category=product_data.category,
-                        packaging=product_data.packaging_info or product_data.packaging_unit,
+                    # Step 5b: Image suggestion logic
+                    analysis.image_suggestion = _build_image_suggestion(
+                        product_data, image_summary, mfr_data, norengros_data,
                     )
-                    if ai_score_result:
-                        analysis.ai_score = ai_score_result
-                        logger.info(
-                            f"[{job_id}] AI score for {article_number}: "
-                            f"{ai_score_result.get('overall_score', 'N/A')}"
-                        )
 
-                    # 6b: AI editorial review of enrichment suggestions
-                    # Pass source-grounded suggestions through AI for polish/rejection
-                    if enrichment_suggestions:
-                        suggestions_for_review = [
-                            {
-                                "field_name": s.field_name,
-                                "current_value": s.current_value,
-                                "suggested_value": s.suggested_value,
-                                "source": s.source,
-                                "evidence": s.evidence,
-                            }
-                            for s in enrichment_suggestions
-                        ]
-                        ai_reviews = await review_suggestions_async(
-                            article_number=article_number,
+                    # Apply enrichment suggestions to field_analyses (PDF takes priority)
+                    _apply_enrichment_to_analysis(analysis)
+
+                    # Run source-priority enrichment engine
+                    enrichment_suggestions = enrich_product(
+                        analysis, enrichment_results, manufacturer_data=mfr_data
+                    )
+
+                    # Step 6: AI quality layer (if API key configured)
+                    job.current_step = "ai_scoring"
+                    try:
+                        # 6a: AI scoring (quality evaluation)
+                        ai_score_result = await score_product_async(
                             product_name=product_data.product_name,
-                            suggestions=suggestions_for_review,
+                            description=product_data.description,
+                            specification=product_data.specification,
+                            category=product_data.category,
+                            packaging=product_data.packaging_info or product_data.packaging_unit,
                         )
-                        if ai_reviews:
-                            enrichment_suggestions = apply_ai_review_to_suggestions(
-                                enrichment_suggestions, ai_reviews
+                        if ai_score_result:
+                            # Merge with area scores already stored
+                            analysis.ai_score.update(ai_score_result)
+                            logger.info(
+                                f"[{job_id}] AI score for {article_number}: "
+                                f"{ai_score_result.get('overall_score', 'N/A')}"
                             )
 
-                    # 6c: Legacy AI enrichment removed (P0-1 safety fix).
-                    # The legacy enrich_product_async() generated descriptions
-                    # with no source document, violating the medical-safety
-                    # principle of "no enrichment without documented source."
-                    # All enrichment now goes through the source-grounded
-                    # pipeline (enricher.py) + strict AI quality gate.
+                        # 6b: AI editorial review of enrichment suggestions
+                        if enrichment_suggestions:
+                            suggestions_for_review = [
+                                {
+                                    "field_name": s.field_name,
+                                    "current_value": s.current_value,
+                                    "suggested_value": s.suggested_value,
+                                    "source": s.source,
+                                    "evidence": s.evidence,
+                                }
+                                for s in enrichment_suggestions
+                            ]
+                            ai_reviews = await review_suggestions_async(
+                                article_number=article_number,
+                                product_name=product_data.product_name,
+                                suggestions=suggestions_for_review,
+                            )
+                            if ai_reviews:
+                                enrichment_suggestions = apply_ai_review_to_suggestions(
+                                    enrichment_suggestions, ai_reviews
+                                )
 
-                except Exception as e:
-                    logger.warning(f"[{job_id}] AI scoring/review failed for {article_number}: {e}")
+                        # 6c: Legacy AI enrichment removed (P0-1 safety fix).
 
-                # Step 7: Final quality gate — rule-based rejection of remaining bad suggestions
-                if enrichment_suggestions:
-                    enrichment_suggestions = final_quality_gate(enrichment_suggestions)
+                    except Exception as e:
+                        logger.warning(f"[{job_id}] AI scoring/review failed for {article_number}: {e}")
 
-                # Apply surviving suggestions
-                if enrichment_suggestions:
-                    analysis.enrichment_suggestions = enrichment_suggestions
-                    apply_enrichment_suggestions(analysis, enrichment_suggestions)
-                    logger.info(
-                        f"[{job_id}] {article_number}: "
-                        f"{len(enrichment_suggestions)} enrichment suggestion(s) after quality gate"
-                    )
+                    # Step 7: Final quality gate
+                    if enrichment_suggestions:
+                        enrichment_suggestions = final_quality_gate(enrichment_suggestions)
+
+                    # Apply surviving suggestions
+                    if enrichment_suggestions:
+                        analysis.enrichment_suggestions = enrichment_suggestions
+                        apply_enrichment_suggestions(analysis, enrichment_suggestions)
+                        logger.info(
+                            f"[{job_id}] {article_number}: "
+                            f"{len(enrichment_suggestions)} enrichment suggestion(s) after quality gate"
+                        )
 
                 return analysis
 
@@ -2091,7 +2178,8 @@ async def _run_analysis(
         output_filename = f"masterdata_kvalitetssjekk_{job_id}_{timestamp}.xlsx"
         output_path = str(OUTPUT_DIR / output_filename)
 
-        create_output_excel(job.results, output_path)
+        create_output_excel(job.results, output_path,
+                           analysis_mode=analysis_mode, focus_areas=focus_areas)
         job.output_file = output_path
         job.status = JobStatus.COMPLETED
         job.current_product = None
