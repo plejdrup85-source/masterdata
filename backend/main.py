@@ -42,6 +42,7 @@ from backend.pdf_enricher import run_enrichment_pipeline
 from backend.scraper import (
     scrape_product, _load_sitemap, _sitemap_loaded, _sku_to_url,
     build_full_index, scan_index_incremental, get_index_stats,
+    find_batch_products_in_sitemap,
 )
 
 # Configure logging
@@ -117,6 +118,48 @@ async def preload_data():
         logger.info("Sitemap index pre-loaded on startup (no page scanning)")
     except Exception as e:
         logger.warning(f"Failed to pre-load sitemap on startup: {e}")
+
+    # Auto-start full index build if index coverage is low.
+    # This runs in the background and doesn't block startup.
+    idx = get_index_stats()
+    if idx["sitemap_url_count"] > 0 and idx["coverage_pct"] < 80:
+        logger.info(
+            f"SKU index coverage is {idx['coverage_pct']}% "
+            f"({idx['sku_index_count']}/{idx['sitemap_url_count']}). "
+            f"Starting background index build..."
+        )
+
+        async def _auto_build():
+            global _index_build_status, _index_build_task
+            _index_build_status = {
+                "status": "running",
+                "started_at": datetime.now().isoformat(),
+                "checked": 0, "total": 0, "new_indexed": 0,
+                "trigger": "auto_startup",
+            }
+
+            async def _progress(checked, total, new_in_batch):
+                _index_build_status["checked"] = checked
+                _index_build_status["total"] = total
+                _index_build_status["new_indexed"] += new_in_batch
+
+            try:
+                result = await build_full_index(on_progress=_progress)
+                _index_build_status.update({"status": "completed", **result})
+                logger.info(f"Auto index build completed: {result}")
+            except Exception as exc:
+                _index_build_status["status"] = "failed"
+                _index_build_status["error"] = str(exc)
+                logger.error(f"Auto index build failed: {exc}")
+
+        _index_build_task = asyncio.create_task(_auto_build())
+        _background_tasks.add(_index_build_task)
+        _index_build_task.add_done_callback(_background_tasks.discard)
+    else:
+        logger.info(
+            f"SKU index coverage OK: {idx['coverage_pct']}% "
+            f"({idx['sku_index_count']}/{idx['sitemap_url_count']})"
+        )
 
 # In-memory job storage
 jobs: dict[str, AnalysisJob] = {}
@@ -2230,11 +2273,19 @@ def _build_image_suggestion(
         if search_hint:
             reason += f" Foreslått søk hos produsent: \"{search_hint}\""
 
+        # Always include the CDN image URL so the user has a reference.
+        # For producer_search suggestions, suggested_image_url points to the
+        # current CDN image (the best we have), and reason explains what to do.
+        cdn_url = current_url or (
+            f"https://res.onemed.com/NO/ARWebBig/{product_data.article_number}.jpg"
+        )
+
         return ImageSuggestion(
-            current_image_url=current_url,
+            current_image_url=cdn_url,
             current_image_status=current_status,
-            suggested_source="producer_search" if producer else None,
-            suggested_source_url=None,
+            suggested_image_url=cdn_url,  # Best available image URL
+            suggested_source="producer_search" if producer else "current_cdn",
+            suggested_source_url=product_data.product_url,  # Link to product page if available
             confidence=0.0,
             review_required=True,
             reason=reason,
@@ -2347,32 +2398,41 @@ async def _run_analysis(
             f"({duplicate_count} duplicate fetches prevented)"
         )
 
-    # --- Incremental index scan ---
-    # Before analysis, scan a small batch of unindexed sitemap pages to expand
-    # the SKU→URL index. This is lightweight (~5-10s for 50 pages) and gradually
-    # builds coverage so more products get their pages found instead of CDN_ONLY.
+    # --- Batch product discovery ---
+    # Before analysis, find product page URLs for all products not yet in the
+    # SKU index. This scans sitemap pages looking specifically for the products
+    # in this batch. Stops as soon as all targets are found or sitemap is exhausted.
+    # Also builds the general index as a side effect for future runs.
     try:
-        job.current_step = "index_scan"
-        new_skus = await scan_index_incremental(max_pages=50)
-        if new_skus:
-            logger.info(f"[{job_id}] Incremental scan added {new_skus} new SKUs to index")
+        job.current_step = "finding_product_pages"
+        missing_from_index = {
+            a for a in unique_articles if a.strip() not in _sku_to_url
+        }
+        if missing_from_index:
+            logger.info(
+                f"[{job_id}] {len(missing_from_index)}/{len(unique_articles)} products "
+                f"not in SKU index — scanning sitemap to find their pages"
+            )
+            found_urls = await find_batch_products_in_sitemap(missing_from_index)
+            logger.info(
+                f"[{job_id}] Batch discovery found {len(found_urls)} product pages"
+            )
+        else:
+            logger.info(f"[{job_id}] All {len(unique_articles)} products already in SKU index")
     except Exception as e:
-        logger.warning(f"[{job_id}] Incremental index scan failed (non-fatal): {e}")
+        logger.warning(f"[{job_id}] Batch product discovery failed (non-fatal): {e}")
 
     # Scope logging — verify strict input processing
-    # Defensive: _sku_to_url is an optional metrics aid; never crash the job if unavailable
     try:
         in_index = sum(1 for a in unique_articles if a.strip() in _sku_to_url)
     except Exception:
-        logger.warning(f"[{job_id}] SKU index unavailable for scope metrics, defaulting to 0")
         in_index = 0
     logger.info(
-        f"[{job_id}] SCOPE: mode=strict_input | "
+        f"[{job_id}] SCOPE: "
         f"input_rows={len(article_numbers)} | "
         f"unique_articles={len(unique_articles)} | "
         f"in_sku_index={in_index} | "
-        f"not_in_index={len(unique_articles) - in_index} | "
-        f"discovery=OFF"
+        f"not_in_index={len(unique_articles) - in_index}"
     )
 
     semaphore = asyncio.Semaphore(SCRAPE_CONCURRENCY)

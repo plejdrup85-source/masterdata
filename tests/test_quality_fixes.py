@@ -352,3 +352,200 @@ class TestImageSuggestionOutput:
         )
         assert sugg.suggested_image_url is not None
         assert sugg.suggested_source_url is not None
+
+
+# ── END-TO-END FLOW TESTS ──
+# These tests simulate the complete pipeline: HTML → parse → analyze → score → verify output
+
+
+class TestEndToEndProductPage:
+    """Test the FULL pipeline when a product page is found and parsed.
+
+    Simulates: scraper finds page → parses HTML → analyzer evaluates fields → scorer scores areas.
+    Verifies ALL fields flow correctly through the entire pipeline.
+    """
+
+    REALISTIC_HTML = """
+    <html>
+    <head>
+        <script type="application/ld+json">{
+            "@type": "Product",
+            "name": "Steriliseringspose flat 100x250mm",
+            "description": "Steriliseringspose flat for bruk med dampsterilisering. Indikatorfelt for prosessverifisering.",
+            "sku": "12345",
+            "image": "https://res.onemed.com/NO/ARWebBig/12345.jpg",
+            "url": "https://www.onemed.no/nb-no/products/i001/steriliseringspose-flat",
+            "brand": {"@type": "Brand", "name": "Steriking"}
+        }</script>
+        <script type="application/ld+json">{
+            "@type": "BreadcrumbList",
+            "itemListElement": [
+                {"@type": "ListItem", "position": 1, "name": "Sortiment"},
+                {"@type": "ListItem", "position": 2, "name": "Medisinsk forbruksmateriell"},
+                {"@type": "ListItem", "position": 3, "name": "Sterilisering autoklavering"},
+                {"@type": "ListItem", "position": 4, "name": "Steriliseringsposer flate"},
+                {"@type": "ListItem", "position": 5, "name": "Steriliseringspose flat"}
+            ]
+        }</script>
+    </head>
+    <body>
+        <h1>Steriliseringspose flat 100x250mm</h1>
+        <div id="accordionItem_specifications">
+            <table>
+                <tr><td>Materiale</td><td>Papir/Plast</td></tr>
+                <tr><td>Størrelse</td><td>100x250mm</td></tr>
+                <tr><td>Steriliseringsmetode</td><td>Damp</td></tr>
+                <tr><td>Antall i pakningen</td><td>200 stk</td></tr>
+                <tr><td>Antall i transport-pakke</td><td>20</td></tr>
+                <tr><td>Antall på pall</td><td>100</td></tr>
+            </table>
+        </div>
+    </body>
+    </html>
+    """
+
+    def _parse_and_verify(self):
+        """Parse the realistic HTML and verify SKU match, return product + status."""
+        from backend.scraper import _parse_product_page, _verify_sku_match
+        from backend.models import VerificationStatus
+
+        product = _parse_product_page(self.REALISTIC_HTML, "12345")
+        v_status, v_evidence = _verify_sku_match(self.REALISTIC_HTML, "12345")
+        product.verification_status = v_status
+        product.verification_evidence = v_evidence
+        product.product_url = "https://www.onemed.no/nb-no/products/i001/steriliseringspose-flat"
+        return product
+
+    def test_e2e_verification_status_is_exact_match(self):
+        """When page is found and SKU matches, status must be EXACT_MATCH, not CDN_ONLY."""
+        from backend.models import VerificationStatus
+        product = self._parse_and_verify()
+        assert product.verification_status == VerificationStatus.EXACT_MATCH
+        assert product.found_on_onemed is True
+        assert product.product_url is not None
+        # Business label must NOT say "ingen produktside funnet"
+        label = VerificationStatus.business_label(product.verification_status)
+        assert "ikke funnet" not in label.lower()
+        assert "Verifisert" in label
+
+    def test_e2e_breadcrumbs_extracted(self):
+        """Breadcrumbs must be extracted from JSON-LD BreadcrumbList."""
+        product = self._parse_and_verify()
+        assert product.category_breadcrumb is not None
+        assert len(product.category_breadcrumb) >= 3
+        assert "Sortiment" in product.category_breadcrumb
+        assert "Steriliseringspose flat" in product.category_breadcrumb
+        assert product.category == "Steriliseringspose flat"
+
+    def test_e2e_category_not_missing_in_analysis(self):
+        """Category must NOT be MISSING when breadcrumbs exist."""
+        from backend.analyzer import _analyze_category
+        from backend.models import QualityStatus
+        product = self._parse_and_verify()
+        analysis = _analyze_category(product)
+        assert analysis.status != QualityStatus.MISSING
+        assert analysis.status in (QualityStatus.OK, QualityStatus.STRONG)
+
+    def test_e2e_category_not_missing_in_scoring(self):
+        """Category must NOT be MISSING in scoring either."""
+        from backend.scoring import _score_category_area, AreaStatus
+        product = self._parse_and_verify()
+        score = _score_category_area(product)
+        assert score.status != AreaStatus.MISSING
+        assert score.score >= 50
+
+    def test_e2e_packaging_extracted(self):
+        """Packaging info must be extracted from spec table."""
+        product = self._parse_and_verify()
+        assert product.packaging_info is not None
+        assert "200" in product.packaging_info
+
+    def test_e2e_packaging_not_missing_in_analysis(self):
+        """Packaging must NOT be MISSING when spec table has packaging data."""
+        from backend.analyzer import _analyze_packaging
+        from backend.models import QualityStatus
+        product = self._parse_and_verify()
+        analysis = _analyze_packaging(product)
+        assert analysis.status != QualityStatus.MISSING
+        assert analysis.status == QualityStatus.OK
+
+    def test_e2e_packaging_not_missing_in_scoring(self):
+        """Packaging must NOT be MISSING in scoring either."""
+        from backend.scoring import _score_packaging_area, AreaStatus
+        product = self._parse_and_verify()
+        score = _score_packaging_area(product)
+        assert score.status != AreaStatus.MISSING
+        assert score.score > 0
+
+    def test_e2e_full_analysis_no_false_missing(self):
+        """Full analyze_product() must not falsely report category/packaging as missing."""
+        from backend.analyzer import analyze_product
+        from backend.models import QualityStatus
+        product = self._parse_and_verify()
+        result = analyze_product(product)
+
+        # Check field analyses
+        field_by_name = {fa.field_name: fa for fa in result.field_analyses}
+
+        # Category must not be missing
+        cat_analysis = field_by_name.get("Kategori")
+        assert cat_analysis is not None
+        assert cat_analysis.status != QualityStatus.MISSING, \
+            f"Category falsely reported as MISSING: {cat_analysis.comment}"
+
+        # Packaging must not be missing
+        pkg_analysis = field_by_name.get("Pakningsinformasjon")
+        assert pkg_analysis is not None
+        assert pkg_analysis.status != QualityStatus.MISSING, \
+            f"Packaging falsely reported as MISSING: {pkg_analysis.comment}"
+
+        # Overall score should be decent (product has good data)
+        assert result.total_score > 50
+
+    def test_e2e_nested_breadcrumb_json_ld(self):
+        """BreadcrumbList with name inside item object must also work."""
+        from backend.scraper import _parse_product_page
+        from backend.analyzer import _analyze_category
+        from backend.models import QualityStatus
+
+        html = """
+        <html><head>
+        <script type="application/ld+json">{"@type": "Product", "name": "Test", "sku": "99999"}</script>
+        <script type="application/ld+json">{
+            "@type": "BreadcrumbList",
+            "itemListElement": [
+                {"@type": "ListItem", "position": 1, "item": {"@id": "/a", "name": "Sortiment"}},
+                {"@type": "ListItem", "position": 2, "item": {"@id": "/b", "name": "Medisinsk"}},
+                {"@type": "ListItem", "position": 3, "item": {"@id": "/c", "name": "Hansker"}}
+            ]
+        }</script>
+        </head><body></body></html>
+        """
+        product = _parse_product_page(html, "99999")
+        assert product.category_breadcrumb == ["Sortiment", "Medisinsk", "Hansker"]
+        assert product.category == "Hansker"
+
+        analysis = _analyze_category(product)
+        assert analysis.status != QualityStatus.MISSING
+
+
+class TestScoringConsistency:
+    """Verify scoring.py and analyzer.py agree on packaging status."""
+
+    def test_scoring_uses_technical_details_for_packaging(self):
+        """scoring._score_packaging_area must check technical_details, not just packaging_info."""
+        from backend.scoring import _score_packaging_area, AreaStatus
+        from backend.models import ProductData
+
+        # Product with packaging data only in technical_details
+        product = ProductData(
+            article_number="12345",
+            technical_details={
+                "Antall i pakningen": "100",
+                "Antall i transport-pakke": "10",
+            },
+        )
+        score = _score_packaging_area(product)
+        assert score.status != AreaStatus.MISSING, \
+            f"Scoring says packaging MISSING but it's in technical_details"
+        assert score.score > 0

@@ -1204,6 +1204,128 @@ async def scan_index_incremental(max_pages: int = 50) -> int:
     return new_count
 
 
+async def find_batch_products_in_sitemap(
+    target_articles: set[str],
+) -> dict[str, str]:
+    """Scan sitemap pages to find URLs for a specific set of article numbers.
+
+    Unlike full index build, this stops as soon as all target articles are found.
+    Unlike per-product discovery, this checks ALL targets in each batch (efficient).
+
+    Called once per analysis job before processing starts. Scans the entire
+    sitemap if needed, but stops early when all targets are found. Also builds
+    the general SKU index as a side effect.
+
+    Args:
+        target_articles: Set of article numbers to find.
+
+    Returns:
+        Dict mapping found article_number → product_url.
+    """
+    global _sku_to_url
+
+    # Filter out articles already in the index
+    missing = {a for a in target_articles if a.strip() not in _sku_to_url}
+    if not missing:
+        return {a: _sku_to_url[a.strip()] for a in target_articles if a.strip() in _sku_to_url}
+
+    if not _sitemap_loaded or not _sitemap_urls:
+        # Try loading sitemap
+        async with httpx.AsyncClient() as client:
+            await _load_sitemap(client)
+
+    if not _sitemap_urls:
+        logger.warning("[batch-discovery] No sitemap URLs available")
+        return {}
+
+    # Re-check after sitemap load
+    missing = {a for a in target_articles if a.strip() not in _sku_to_url}
+    if not missing:
+        return {a: _sku_to_url[a.strip()] for a in target_articles if a.strip() in _sku_to_url}
+
+    # Scan unindexed sitemap pages looking for the missing articles
+    indexed_urls = set(_sku_to_url.values())
+    unchecked = [u for u in _sitemap_urls if u not in indexed_urls]
+
+    BATCH_SIZE = 20
+    BATCH_DELAY = 0.3
+    found = {}
+    new_indexed = 0
+
+    logger.info(
+        f"[batch-discovery] Looking for {len(missing)} products in "
+        f"{len(unchecked)} unindexed sitemap pages"
+    )
+
+    async with httpx.AsyncClient() as client:
+        for batch_start in range(0, len(unchecked), BATCH_SIZE):
+            if not missing:
+                break  # All targets found
+
+            batch = unchecked[batch_start:batch_start + BATCH_SIZE]
+
+            async def _check(url):
+                try:
+                    resp = await client.get(
+                        url, headers=HEADERS, follow_redirects=True, timeout=15
+                    )
+                    if resp.status_code == 200:
+                        sku = _extract_sku_from_html(resp.text)
+                        if sku:
+                            return (sku, url)
+                except Exception:
+                    pass
+                return None
+
+            tasks = [_check(u) for u in batch]
+            results = await asyncio.gather(*tasks, return_exceptions=True)
+
+            for result in results:
+                if isinstance(result, tuple):
+                    sku, url = result
+                    if sku not in _sku_to_url:
+                        _sku_to_url[sku] = url
+                        new_indexed += 1
+                    # Check if this SKU is one of our targets
+                    clean_sku = sku.strip()
+                    for target in list(missing):
+                        clean_target = target.strip()
+                        if clean_sku == clean_target:
+                            found[target] = url
+                            missing.discard(target)
+                            logger.info(
+                                f"[batch-discovery] Found {target} at {url} "
+                                f"({len(missing)} still missing)"
+                            )
+
+            # Save progress every 500 pages
+            checked = batch_start + BATCH_SIZE
+            if checked % 500 == 0:
+                _save_sitemap_index(_sitemap_urls, _sku_to_url)
+                logger.info(
+                    f"[batch-discovery] Scanned {checked}/{len(unchecked)} pages, "
+                    f"{len(found)}/{len(target_articles)} targets found, "
+                    f"{new_indexed} new SKUs indexed"
+                )
+
+            await asyncio.sleep(BATCH_DELAY)
+
+    # Final save
+    if new_indexed:
+        _save_sitemap_index(_sitemap_urls, _sku_to_url)
+        logger.info(
+            f"[batch-discovery] Done: {len(found)} targets found, "
+            f"{new_indexed} new SKUs indexed (total index: {len(_sku_to_url)})"
+        )
+
+    # Also return targets that were already in the index
+    for a in target_articles:
+        if a not in found and a.strip() in _sku_to_url:
+            found[a] = _sku_to_url[a.strip()]
+
+    return found
+
+
 async def scrape_product(
     article_number: str,
     use_cache: bool = True,

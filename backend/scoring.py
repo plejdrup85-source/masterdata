@@ -776,8 +776,30 @@ def _score_category_area(product_data) -> AreaScore:
 
 
 def _score_packaging_area(product_data) -> AreaScore:
-    """Evaluate packaging information."""
+    """Evaluate packaging information.
+
+    Checks multiple sources:
+    1. product_data.packaging_info (pre-extracted by scraper)
+    2. product_data.packaging_unit (pre-extracted by scraper)
+    3. product_data.technical_details for packaging-related keys
+       (e.g. "Antall i pakningen", "Antall i transport-pakke", "Antall på pall")
+    """
     pkg = product_data.packaging_info or product_data.packaging_unit
+
+    # Fallback: check technical_details for packaging-related keys
+    if not pkg and product_data.technical_details:
+        _PKG_KW = [
+            "antall i pakn", "antall per pakn", "antall pr pakn",
+            "antall i forpakn", "antall pr forpakn",
+            "pakningsstørrelse", "pack size",
+            "enheter i pakn", "enheter per pakn", "enheter pr pakn",
+            "transport", "kolli", "pall",
+        ]
+        for key in product_data.technical_details:
+            key_lower = key.lower().replace("\xa0", " ").strip().rstrip(":")
+            if any(kw in key_lower for kw in _PKG_KW):
+                pkg = "fra spesifikasjoner"
+                break
 
     result = AreaScore(
         area=AREA_PACKAGING,
