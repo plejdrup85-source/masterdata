@@ -77,6 +77,9 @@ class FamilyMember:
     brand: str = ""
     specification: str = ""
 
+    # Safety-critical attributes for family review (P0-3)
+    safety_attributes: dict[str, str] = field(default_factory=dict)
+
 
 @dataclass
 class ProductFamily:
@@ -187,6 +190,50 @@ _PRODUCT_TYPE_KEYWORDS = {
     "sonde", "probe",
     "skalpell", "scalpel", "blade",
 }
+
+
+# ── Safety attribute extraction (P0-3) ──
+# Evidence-based regex patterns for safety-critical properties.
+# These are displayed as badges in the family review UI to prevent
+# users from grouping medically incompatible products.
+
+_SAFETY_PATTERNS: list[tuple[str, re.Pattern, str, str]] = [
+    # (attribute_key, pattern, positive_label, negative_label)
+    # Sterility
+    ("sterilitet", re.compile(r"\b(steril(?:e|t|isert)?)\b", re.I), "Steril", ""),
+    ("sterilitet", re.compile(r"\b(u-?steril|ikke[- ]steril|non[- ]steril|usteril)\b", re.I), "Usteril", ""),
+    # Latex
+    ("latex", re.compile(r"\b(latex[- ]?fri|latex[- ]?free|uten latex)\b", re.I), "Lateksfri", ""),
+    ("latex", re.compile(r"\b(latex)\b(?![- ]?fr)", re.I), "Latex", ""),
+    # Disposability
+    ("bruk", re.compile(r"\b(engangs|disposable|single[- ]use)\b", re.I), "Engangs", ""),
+    ("bruk", re.compile(r"\b(flergangs|reusable|gjenbruk)\b", re.I), "Flergangs", ""),
+    # Material (gloves etc.)
+    ("materiale", re.compile(r"\b(nitril)\b", re.I), "Nitril", ""),
+    ("materiale", re.compile(r"\b(vinyl)\b", re.I), "Vinyl", ""),
+    ("materiale", re.compile(r"\b(pudder[- ]?fri|powder[- ]?free|pudderfri)\b", re.I), "Pudderfri", ""),
+]
+
+
+def _extract_safety_attributes(product_name: str, specification: str) -> dict[str, str]:
+    """Extract safety-critical attributes from product text.
+
+    Returns a dict of attribute_key → detected_label.
+    Only returns attributes with positive evidence — never guesses.
+    If an attribute cannot be determined, it is omitted (not set to "unknown").
+    """
+    text = f"{product_name} {specification}".strip()
+    if not text:
+        return {}
+
+    attrs: dict[str, str] = {}
+    for attr_key, pattern, label, _ in _SAFETY_PATTERNS:
+        if attr_key in attrs:
+            continue  # First match wins per attribute key
+        if pattern.search(text):
+            attrs[attr_key] = label
+
+    return attrs
 
 
 def _normalize_for_grouping(text: str) -> str:
@@ -540,11 +587,22 @@ def _score_family(members: list[_ProductRecord]) -> tuple[float, str, list[str]]
         score = min(score, 0.40)
         signals.append("Konfidenstak: maks 0.40 uten variantdimensjoner")
 
-    # ── P0-3 ENFORCEMENT: Extra penalty for unknown-brand families ──
-    # Without brand, require both product type keyword AND variant dims to score well
-    if not has_brand and not has_variant_dims:
-        score = min(score, 0.30)
-        signals.append("Konfidenstak: maks 0.30 uten merkevare og uten varianter")
+    # ── P1-5 ENFORCEMENT: Stricter threshold for unknown-brand families ──
+    # Without brand identity, require stronger evidence to prevent false-positive
+    # grouping of products from different manufacturers.
+    if not has_brand:
+        if not has_variant_dims:
+            # No brand + no variant dimensions = very weak evidence
+            score = min(score, 0.30)
+            signals.append("Konfidenstak: maks 0.30 uten merkevare og uten varianter")
+        elif not shared_types:
+            # No brand + no shared product type = risky grouping
+            score = min(score, 0.40)
+            signals.append("Konfidenstak: maks 0.40 uten merkevare og uten felles produkttype")
+        # General unknown-brand penalty: raise effective threshold to 0.50
+        # by reducing score so that weak evidence won't reach default 0.30 threshold
+        score = score * 0.85
+        signals.append("Straff: 15% reduksjon for ukjent merkevare")
 
     # Build reason
     if score >= 0.7:
@@ -703,6 +761,7 @@ def detect_families(
                     brand=rec.brand,
                     specification=rec.specification,
                     source_signals=signals,
+                    safety_attributes=_extract_safety_attributes(rec.product_name, rec.specification),
                 )
             continue
 
@@ -763,6 +822,7 @@ def detect_families(
                 product_name=rec.product_name,
                 brand=rec.brand,
                 specification=rec.specification,
+                safety_attributes=_extract_safety_attributes(rec.product_name, rec.specification),
             )
             member_lookup[rec.article_number] = member
             family.members.append(member)
@@ -781,6 +841,7 @@ def detect_families(
                 product_name=rec.product_name,
                 brand=rec.brand,
                 specification=rec.specification,
+                safety_attributes=_extract_safety_attributes(rec.product_name, rec.specification),
             )
 
     all_members = list(member_lookup.values())

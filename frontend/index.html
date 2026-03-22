@@ -1797,6 +1797,9 @@
         function renderFamilyResults(data) {
             const accepted = data.families.filter(f => f.review_status === 'accepted').length;
             const rejected = data.families.filter(f => f.review_status === 'rejected').length;
+            // P1-3: Data source provenance
+            const sourceLabels = {quality_analysis:'Kvalitetsanalyse',jeeves_direct:'Jeeves-katalog',upload:'Opplastet fil',pasted_articles:'Innlimte artikler',unknown:'Ukjent'};
+            const srcLabel = sourceLabels[data.data_source] || data.data_source || 'Ukjent';
             familyStatsGrid.innerHTML = `
                 <div class="stat-card"><div class="value">${data.total_products}</div><div class="label">Produkter</div></div>
                 <div class="stat-card success"><div class="value">${data.total_families}</div><div class="label">Familier</div></div>
@@ -1805,6 +1808,7 @@
                 <div class="stat-card"><div class="value">${data.standalone_products}</div><div class="label">Frittstående</div></div>
                 ${accepted ? `<div class="stat-card success"><div class="value">${accepted}</div><div class="label">Godkjent</div></div>` : ''}
                 ${rejected ? `<div class="stat-card danger"><div class="value">${rejected}</div><div class="label">Avvist</div></div>` : ''}
+                <div class="stat-card"><div class="value" style="font-size:0.85rem">${srcLabel}</div><div class="label">Datakilde</div></div>
             `;
             renderFamilyList(data.families);
             standaloneCount.textContent = `(${data.standalone_products} produkter)`;
@@ -1860,11 +1864,17 @@
                     const dimsStr = m.variant_dimensions.map(d =>
                         `<span class="dim-tag">${escHtml(d.name)}: ${escHtml(d.value)}</span>`
                     ).join('');
+                    // P0-3: Safety attribute badges
+                    const safetyColors = {Steril:'#dcfce7',Usteril:'#fef3c7',Latex:'#fecaca',Lateksfri:'#dcfce7',Engangs:'#e0e7ff',Flergangs:'#fef3c7',Nitril:'#dbeafe',Vinyl:'#fef3c7',Pudderfri:'#f0fdf4'};
+                    const safetyBadges = Object.entries(m.safety_attributes || {}).map(([k,v]) =>
+                        `<span class="badge" style="background:${safetyColors[v]||'#f1f5f9'};font-size:0.7rem;padding:0.1rem 0.35rem">${escHtml(v)}</span>`
+                    ).join(' ');
                     return `<tr>
                         <td class="${roleClass}">${roleLabel}${manualBadge}</td>
                         <td style="font-family:monospace;font-size:0.8rem">${escHtml(m.article_number)}</td>
                         <td>${escHtml(m.specification || '')}</td>
                         <td>${dimsStr || '<span style="color:#aaa">—</span>'}</td>
+                        <td>${safetyBadges}</td>
                         <td>
                             <button class="move-btn" onclick="event.stopPropagation();openMoveModal('${escHtml(m.article_number)}','${f.family_id}','${escHtml(m.product_name||m.article_number)}')">Flytt</button>
                         </td>
@@ -1902,7 +1912,7 @@
                             ${f.mother_article ? ` · Mor: <strong>${escHtml(f.mother_article)}</strong>` : ' · Mor: <em>(abstrakt)</em>'}
                         </div>
                         <table class="member-table">
-                            <thead><tr><th>Rolle</th><th>Artikkelnr</th><th>Spesifikasjon</th><th>Varianter</th><th></th></tr></thead>
+                            <thead><tr><th>Rolle</th><th>Artikkelnr</th><th>Spesifikasjon</th><th>Varianter</th><th>Sikkerhet</th><th></th></tr></thead>
                             <tbody>${membersHtml}</tbody>
                         </table>
                         ${reviewBar}

@@ -272,6 +272,64 @@ def _enrich_product_name(
     return None
 
 
+def _description_quality_score(text: str) -> float:
+    """Score a description's quality for webshop use (0.0-1.0).
+
+    P1-1: Replaces simple length comparison. A shorter well-structured
+    description scores higher than a longer noisy one.
+
+    Factors:
+    - Sentence structure (complete sentences with punctuation)
+    - Technical keyword density (medical product terms)
+    - Passes webshop validation gate
+    - Not too short, not excessively long
+    """
+    if not text or not text.strip():
+        return 0.0
+
+    text = text.strip()
+    score = 0.0
+
+    # Factor 1: Length adequacy (sweet spot 50-500 chars)
+    length = len(text)
+    if length < 15:
+        return 0.05  # Too short to be useful
+    elif length < 50:
+        score += 0.10
+    elif length <= 500:
+        score += 0.25
+    elif length <= 1000:
+        score += 0.20
+    else:
+        score += 0.10  # Excessively long — likely unfiltered
+
+    # Factor 2: Sentence structure (complete sentences with punctuation)
+    sentences = [s.strip() for s in re.split(r'[.!?]', text) if len(s.strip()) > 10]
+    if len(sentences) >= 2:
+        score += 0.25
+    elif len(sentences) == 1:
+        score += 0.15
+
+    # Factor 3: Technical keyword density
+    tech_words = re.findall(
+        r'\b(?:mm|cm|ml|g|kg|stk|steril|nitril|vinyl|latex|'
+        r'engangs|flergangs|pudderfri|materiale|størrelse|'
+        r'diameter|lengde|bredde|volum)\b',
+        text.lower()
+    )
+    if len(tech_words) >= 3:
+        score += 0.25
+    elif len(tech_words) >= 1:
+        score += 0.15
+
+    # Factor 4: Webshop validation gate
+    gate_ok, _ = validate_webshop_description(text)
+    if gate_ok:
+        score += 0.25
+
+    return min(1.0, score)
+
+
 def _enrich_description(
     product: ProductData,
     analysis: ProductAnalysis,
@@ -315,7 +373,9 @@ def _enrich_description(
             )
             pdf_val = None
 
-    if pdf_val and (not current or len(pdf_val) > len(current)):
+    # P1-1: Quality-based comparison instead of length-based.
+    # A shorter but well-structured description beats a longer noisy one.
+    if pdf_val and (not current or _description_quality_score(pdf_val) > _description_quality_score(current)):
         best_val = pdf_val
         best_source = SOURCE_PDF
         best_url = _get_enrichment_url(er_by_field, "description")
@@ -330,7 +390,7 @@ def _enrich_description(
         else:
             mfr_desc = None
 
-    if mfr_desc and (not best_val or len(mfr_desc) > len(best_val)):
+    if mfr_desc and (not best_val or _description_quality_score(mfr_desc) > _description_quality_score(best_val)):
         mfr_conf = (mfr.confidence if mfr else 0) * 0.85
         if mfr_conf > best_conf or not best_val:
             best_val = mfr_desc

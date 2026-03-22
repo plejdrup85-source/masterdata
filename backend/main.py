@@ -526,10 +526,11 @@ def _serialize_family_member(m):
             {"name": d.dimension_name, "value": d.value, "source": d.source}
             for d in m.variant_dimensions
         ],
+        "safety_attributes": m.safety_attributes if m.safety_attributes else {},
     }
 
 
-def _run_family_detection(products: list[dict], source_id: str) -> dict:
+def _run_family_detection(products: list[dict], source_id: str, data_source: str = "unknown") -> dict:
     """Run family detection and persist results."""
     from backend.family_detector import detect_families
     families, all_members = detect_families(products)
@@ -566,6 +567,7 @@ def _run_family_detection(products: list[dict], source_id: str) -> dict:
 
     result = {
         "source_id": source_id,
+        "data_source": data_source,
         "total_products": len(all_members),
         "total_families": len(families),
         "strong_families": strong,
@@ -623,7 +625,7 @@ async def get_families(job_id: str):
         raise HTTPException(400, "Ingen resultater tilgjengelig")
 
     product_dicts = products_from_analyses(job.results)
-    return _run_family_detection(product_dicts, job_id)
+    return _run_family_detection(product_dicts, job_id, data_source="quality_analysis")
 
 
 @app.post("/api/families/analyze-jeeves")
@@ -645,7 +647,7 @@ async def analyze_jeeves_families():
         return _family_results[source_id]
 
     product_dicts = products_from_jeeves_index(_jeeves_index)
-    return _run_family_detection(product_dicts, source_id)
+    return _run_family_detection(product_dicts, source_id, data_source="jeeves_direct")
 
 
 @app.post("/api/families/analyze-upload")
@@ -685,7 +687,7 @@ async def analyze_upload_families(file: UploadFile = File(...)):
 
     import hashlib
     source_id = f"upload-{hashlib.md5(content).hexdigest()[:8]}"
-    return _run_family_detection(products, source_id)
+    return _run_family_detection(products, source_id, data_source="upload")
 
 
 @app.post("/api/families/analyze-articles")
@@ -739,7 +741,7 @@ async def analyze_articles_families(data: dict):
     import hashlib
     hash_input = ",".join(sorted(seen))
     source_id = f"articles-{hashlib.md5(hash_input.encode()).hexdigest()[:8]}"
-    result = _run_family_detection(products, source_id)
+    result = _run_family_detection(products, source_id, data_source="pasted_articles")
     result["not_found_articles"] = not_found
     result["input_count"] = len(article_numbers)
     return result
