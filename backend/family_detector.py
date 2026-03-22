@@ -635,9 +635,13 @@ def _stable_family_id(group_key: str) -> str:
 
     Uses a content-based hash of the group key (brand||base_name) so the same
     logical family gets the same ID across independent re-runs, regardless of
-    processing order.  Format: FAM-<8-char hex hash>.
+    processing order.  Format: FAM-<16-char hex hash>.
+
+    16 hex chars = 64 bits → ~4.3 billion IDs before 50% collision probability
+    (birthday paradox), effectively eliminating collision risk for any realistic
+    catalog size.
     """
-    digest = hashlib.sha256(group_key.encode("utf-8")).hexdigest()[:8]
+    digest = hashlib.sha256(group_key.encode("utf-8")).hexdigest()[:16]
     return f"FAM-{digest}"
 
 

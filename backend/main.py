@@ -954,6 +954,267 @@ async def move_family_member(source_id: str, data: dict):
     }
 
 
+@app.put("/api/families/{source_id}/merge")
+async def merge_families(source_id: str, data: dict):
+    """Merge one family into another.
+
+    Body: {"source_family_id": "FAM-xxx", "target_family_id": "FAM-yyy"}
+
+    All members of the source family are moved into the target family.
+    The source family is removed. The operation is recorded as an undoable
+    override event.
+    """
+    result = _load_family_results(source_id)
+
+    src_id = data.get("source_family_id")
+    tgt_id = data.get("target_family_id")
+    if not src_id or not tgt_id:
+        raise HTTPException(400, "source_family_id og target_family_id er påkrevd")
+    if src_id == tgt_id:
+        raise HTTPException(400, "Kilde og mål kan ikke være like")
+
+    src = next((f for f in result["families"] if f["family_id"] == src_id), None)
+    tgt = next((f for f in result["families"] if f["family_id"] == tgt_id), None)
+    if not src:
+        raise HTTPException(404, f"Kildefamilie {src_id} ikke funnet")
+    if not tgt:
+        raise HTTPException(404, f"Målfamilie {tgt_id} ikke funnet")
+
+    # Snapshot for undo
+    moved_articles = [m["article_number"] for m in src["members"]]
+    import copy
+    override_event = {
+        "action": "merge",
+        "source_family_id": src_id,
+        "target_family_id": tgt_id,
+        "moved_articles": moved_articles,
+        "source_family_snapshot": copy.deepcopy(src),
+    }
+
+    # Move all members
+    for m in src["members"]:
+        m["manually_moved"] = True
+        tgt["members"].append(m)
+    tgt["member_count"] = len(tgt["members"])
+
+    # Remove source family
+    result["families"] = [f for f in result["families"] if f["family_id"] != src_id]
+    result["total_families"] = len(result["families"])
+
+    result.setdefault("manual_overrides", []).append(override_event)
+    _persist_family_to_disk(source_id)
+    return {
+        "status": "ok",
+        "merged": src_id,
+        "into": tgt_id,
+        "members_moved": len(moved_articles),
+    }
+
+
+@app.put("/api/families/{source_id}/split")
+async def split_family(source_id: str, data: dict):
+    """Split selected members out of a family into a new family or standalone.
+
+    Body: {"family_id": "FAM-xxx",
+           "article_numbers": ["ART001", "ART002"],
+           "target": "new_family" or "standalone",
+           "new_family_name": "optional name for new family"}
+    """
+    result = _load_family_results(source_id)
+
+    fam_id = data.get("family_id")
+    articles = data.get("article_numbers", [])
+    target = data.get("target", "new_family")
+    new_name = data.get("new_family_name", "")
+
+    if not fam_id or not articles:
+        raise HTTPException(400, "family_id og article_numbers er påkrevd")
+
+    fam = next((f for f in result["families"] if f["family_id"] == fam_id), None)
+    if not fam:
+        raise HTTPException(404, f"Familie {fam_id} ikke funnet")
+
+    articles_set = set(articles)
+    to_split = [m for m in fam["members"] if m["article_number"] in articles_set]
+    if not to_split:
+        raise HTTPException(404, "Ingen av de angitte artiklene ble funnet i familien")
+    remaining = [m for m in fam["members"] if m["article_number"] not in articles_set]
+
+    if not remaining:
+        raise HTTPException(400, "Kan ikke flytte alle medlemmer — bruk sletting eller flytt i stedet")
+
+    import copy
+    override_event = {
+        "action": "split",
+        "source_family_id": fam_id,
+        "split_articles": list(articles_set),
+        "target": target,
+        "pre_split_members": copy.deepcopy(fam["members"]),
+    }
+
+    # Update source family
+    fam["members"] = remaining
+    fam["member_count"] = len(remaining)
+
+    new_family_id = None
+    if target == "standalone":
+        for m in to_split:
+            result.setdefault("standalone", []).append({
+                "article_number": m["article_number"],
+                "product_name": m.get("product_name", ""),
+                "specification": m.get("specification", ""),
+                "grouping_reason": f"Manuelt splittet fra {fam_id}",
+                "confidence": 0,
+                "manually_moved": True,
+            })
+    else:
+        # Create new family
+        import hashlib
+        hash_input = f"manual-split-{fam_id}-{'-'.join(sorted(articles_set))}"
+        new_family_id = f"FAM-{hashlib.sha256(hash_input.encode()).hexdigest()[:16]}"
+        new_fam = {
+            "family_id": new_family_id,
+            "family_name": new_name or f"{fam['family_name']} (splittet)",
+            "member_count": len(to_split),
+            "variant_dimensions": [],
+            "mother_article": None,
+            "confidence": fam["confidence"],
+            "review_required": True,
+            "grouping_reason": f"Manuelt splittet fra {fam_id}",
+            "review_status": "needs_review",
+            "review_comment": "",
+            "manually_created": True,
+            "members": [],
+        }
+        for m in to_split:
+            m["manually_moved"] = True
+            m["role"] = "child"
+            new_fam["members"].append(m)
+        result["families"].append(new_fam)
+
+    override_event["new_family_id"] = new_family_id
+    result["standalone_products"] = len(result.get("standalone", []))
+    result["total_families"] = len(result["families"])
+    result.setdefault("manual_overrides", []).append(override_event)
+    _persist_family_to_disk(source_id)
+    return {
+        "status": "ok",
+        "split_from": fam_id,
+        "articles_moved": len(to_split),
+        "target": target,
+        "new_family_id": new_family_id,
+    }
+
+
+@app.put("/api/families/{source_id}/undo")
+async def undo_last_override(source_id: str):
+    """Undo the most recent manual override action.
+
+    Reverses the last entry in the manual_overrides list by replaying the
+    stored snapshot data. Supports undo of: move_member, merge, split.
+    """
+    result = _load_family_results(source_id)
+    overrides = result.get("manual_overrides", [])
+    if not overrides:
+        raise HTTPException(400, "Ingen manuelle endringer å angre")
+
+    last = overrides.pop()
+    action = last.get("action")
+
+    if action == "move_member":
+        article = last["article_number"]
+        original_from = last["from"]
+        original_to = last["to"]
+
+        # Reverse: remove from original_to, place back in original_from
+        member = None
+        if original_to == "standalone":
+            idx = next((i for i, s in enumerate(result.get("standalone", []))
+                        if s["article_number"] == article), None)
+            if idx is not None:
+                s = result["standalone"].pop(idx)
+                member = {
+                    "article_number": s["article_number"],
+                    "role": "child",
+                    "product_name": s.get("product_name", ""),
+                    "specification": s.get("specification", ""),
+                    "child_specific_title": "",
+                    "variant_dimensions": [],
+                }
+        else:
+            dst_fam = next((f for f in result["families"] if f["family_id"] == original_to), None)
+            if dst_fam:
+                midx = next((i for i, m in enumerate(dst_fam["members"])
+                             if m["article_number"] == article), None)
+                if midx is not None:
+                    member = dst_fam["members"].pop(midx)
+                    member.pop("manually_moved", None)
+                    dst_fam["member_count"] = len(dst_fam["members"])
+
+        if member:
+            if original_from == "standalone":
+                result.setdefault("standalone", []).append({
+                    "article_number": member["article_number"],
+                    "product_name": member.get("product_name", ""),
+                    "specification": member.get("specification", ""),
+                    "grouping_reason": member.get("grouping_reason", ""),
+                    "confidence": member.get("confidence", 0),
+                })
+            else:
+                src_fam = next((f for f in result["families"] if f["family_id"] == original_from), None)
+                if src_fam:
+                    member.pop("manually_moved", None)
+                    src_fam["members"].append(member)
+                    src_fam["member_count"] = len(src_fam["members"])
+
+    elif action == "merge":
+        # Restore the source family from snapshot
+        snapshot = last.get("source_family_snapshot")
+        tgt_id = last["target_family_id"]
+        moved_articles = set(last.get("moved_articles", []))
+        if snapshot:
+            # Remove moved members from target
+            tgt = next((f for f in result["families"] if f["family_id"] == tgt_id), None)
+            if tgt:
+                tgt["members"] = [m for m in tgt["members"]
+                                  if m["article_number"] not in moved_articles]
+                tgt["member_count"] = len(tgt["members"])
+            # Restore source family
+            for m in snapshot.get("members", []):
+                m.pop("manually_moved", None)
+            result["families"].append(snapshot)
+
+    elif action == "split":
+        src_fam_id = last["source_family_id"]
+        pre_members = last.get("pre_split_members", [])
+        split_articles = set(last.get("split_articles", []))
+        target = last.get("target")
+        new_fam_id = last.get("new_family_id")
+
+        # Restore source family members
+        src_fam = next((f for f in result["families"] if f["family_id"] == src_fam_id), None)
+        if src_fam and pre_members:
+            for m in pre_members:
+                m.pop("manually_moved", None)
+            src_fam["members"] = pre_members
+            src_fam["member_count"] = len(pre_members)
+
+        # Remove new family if it was created
+        if target == "new_family" and new_fam_id:
+            result["families"] = [f for f in result["families"] if f["family_id"] != new_fam_id]
+        elif target == "standalone":
+            result["standalone"] = [
+                s for s in result.get("standalone", [])
+                if s["article_number"] not in split_articles
+            ]
+
+    # Update counts
+    result["standalone_products"] = len(result.get("standalone", []))
+    result["total_families"] = len(result["families"])
+    _persist_family_to_disk(source_id)
+    return {"status": "ok", "undone_action": action}
+
+
 @app.get("/api/families/{source_id}/standalone")
 async def get_standalone_page(
     source_id: str,

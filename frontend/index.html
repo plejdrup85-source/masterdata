@@ -780,6 +780,7 @@
                         </p>
                     </div>
                     <div style="display:flex;gap:0.5rem;flex-wrap:wrap">
+                        <button class="btn" id="undoBtn" style="font-size:0.85rem;padding:0.5rem 1rem;background:#f59e0b;color:#fff;display:none" onclick="undoLastAction()">Angre siste</button>
                         <button class="btn btn-success" id="exportFamiliesBtn" style="font-size:0.85rem;padding:0.5rem 1rem">Last ned Excel</button>
                         <button class="btn btn-primary" id="closeFamiliesBtn" style="font-size:0.85rem;padding:0.5rem 1rem;background:#64748b">Lukk</button>
                     </div>
@@ -847,6 +848,42 @@
                 <div style="display:flex;gap:0.5rem;justify-content:flex-end">
                     <button class="btn" style="background:#e2e8f0;color:#475569;font-size:0.85rem;padding:0.4rem 1rem" onclick="closeMoveModal()">Avbryt</button>
                     <button class="btn btn-primary" style="font-size:0.85rem;padding:0.4rem 1rem" id="moveConfirmBtn">Flytt</button>
+                </div>
+            </div>
+        </div>
+
+        <!-- Merge family modal -->
+        <div id="mergeModal" style="display:none;position:fixed;inset:0;background:rgba(0,0,0,0.4);z-index:1000;align-items:center;justify-content:center">
+            <div style="background:#fff;border-radius:12px;padding:1.5rem;max-width:480px;width:90%;box-shadow:0 8px 32px rgba(0,0,0,0.2)">
+                <h3 style="margin:0 0 0.75rem;font-size:1rem">Slå sammen familier</h3>
+                <p style="font-size:0.85rem;color:var(--text-muted);margin:0 0 0.5rem" id="mergeModalDesc"></p>
+                <label style="font-size:0.85rem;display:block;margin-bottom:0.5rem">Slå sammen inn i:</label>
+                <select id="mergeTargetSelect" style="width:100%;padding:0.4rem;border:1px solid var(--border);border-radius:6px;font-size:0.85rem;margin-bottom:1rem"></select>
+                <div style="display:flex;gap:0.5rem;justify-content:flex-end">
+                    <button class="btn" style="background:#e2e8f0;color:#475569;font-size:0.85rem;padding:0.4rem 1rem" onclick="document.getElementById('mergeModal').style.display='none'">Avbryt</button>
+                    <button class="btn btn-primary" style="font-size:0.85rem;padding:0.4rem 1rem" id="mergeConfirmBtn">Slå sammen</button>
+                </div>
+            </div>
+        </div>
+
+        <!-- Split family modal -->
+        <div id="splitModal" style="display:none;position:fixed;inset:0;background:rgba(0,0,0,0.4);z-index:1000;align-items:center;justify-content:center">
+            <div style="background:#fff;border-radius:12px;padding:1.5rem;max-width:520px;width:90%;box-shadow:0 8px 32px rgba(0,0,0,0.2);max-height:80vh;overflow-y:auto">
+                <h3 style="margin:0 0 0.75rem;font-size:1rem">Splitt familie</h3>
+                <p style="font-size:0.85rem;color:var(--text-muted);margin:0 0 0.75rem" id="splitModalDesc"></p>
+                <div id="splitMemberList" style="margin-bottom:0.75rem;max-height:200px;overflow-y:auto;border:1px solid var(--border);border-radius:6px;padding:0.5rem"></div>
+                <label style="font-size:0.85rem;display:block;margin-bottom:0.35rem">Flytt valgte til:</label>
+                <select id="splitTargetSelect" style="width:100%;padding:0.4rem;border:1px solid var(--border);border-radius:6px;font-size:0.85rem;margin-bottom:0.5rem">
+                    <option value="new_family">Ny familie</option>
+                    <option value="standalone">Frittstående</option>
+                </select>
+                <div id="splitNewNameRow" style="margin-bottom:1rem">
+                    <label style="font-size:0.85rem;display:block;margin-bottom:0.35rem">Nytt familienavn:</label>
+                    <input type="text" id="splitNewName" style="width:100%;padding:0.4rem;border:1px solid var(--border);border-radius:6px;font-size:0.85rem" placeholder="Valgfritt — bruker originalnavn + (splittet)">
+                </div>
+                <div style="display:flex;gap:0.5rem;justify-content:flex-end">
+                    <button class="btn" style="background:#e2e8f0;color:#475569;font-size:0.85rem;padding:0.4rem 1rem" onclick="document.getElementById('splitModal').style.display='none'">Avbryt</button>
+                    <button class="btn btn-primary" style="font-size:0.85rem;padding:0.4rem 1rem" id="splitConfirmBtn">Splitt</button>
                 </div>
             </div>
         </div>
@@ -1535,6 +1572,7 @@
             `;
             renderFamilyList(data.families);
             standaloneCount.textContent = `(${data.standalone_products} produkter)`;
+            updateUndoButton();
         }
 
         function renderFamilyList(families) {
@@ -1599,11 +1637,15 @@
 
                 const curStatus = f.review_status || 'pending';
                 const isChecked = selectedFamilyIds.has(f.family_id) ? 'checked' : '';
+                const manuallyCreatedBadge = f.manually_created
+                    ? '<span class="badge badge-manual" style="margin-left:0.3rem">manuelt opprettet</span>' : '';
                 const reviewBar = `<div class="family-review-bar">
                     <button class="review-btn ${curStatus==='accepted'?'active-accept':''}" onclick="setFamilyReview('${f.family_id}','accepted')">Godkjenn</button>
                     <button class="review-btn ${curStatus==='rejected'?'active-reject':''}" onclick="setFamilyReview('${f.family_id}','rejected')">Avvis</button>
                     <button class="review-btn ${curStatus==='needs_review'?'active-needs_review':''}" onclick="setFamilyReview('${f.family_id}','needs_review')">Manuell vurdering</button>
                     <input class="review-comment" placeholder="Kommentar..." value="${escHtml(f.review_comment||'')}" onchange="setFamilyComment('${f.family_id}',this.value)">
+                    <button class="move-btn" onclick="event.stopPropagation();openMergeModal('${f.family_id}')" style="margin-left:auto">Slå sammen</button>
+                    <button class="move-btn" onclick="event.stopPropagation();openSplitModal('${f.family_id}')">Splitt</button>
                 </div>`;
 
                 return `<div class="family-card" data-id="${f.family_id}">
@@ -1615,7 +1657,7 @@
                             ${dimsHtml}
                             <span class="badge ${confClass}">${confLabel} (${f.confidence})</span>
                             <span style="color:var(--text-muted)">${f.member_count} stk</span>
-                            ${rvBadge}
+                            ${rvBadge}${manuallyCreatedBadge}
                         </div>
                     </div>
                     <div class="family-body">
@@ -1785,6 +1827,121 @@
             });
             if (!familyData.families.length) sel.innerHTML = '<option disabled>Ingen familier tilgjengelig</option>';
             moveMemberModal.style.display = 'flex';
+        }
+
+        // ── Merge family ──
+        let mergeSourceId = null;
+
+        function openMergeModal(sourceFamilyId) {
+            mergeSourceId = sourceFamilyId;
+            const src = familyData.families.find(f => f.family_id === sourceFamilyId);
+            if (!src) return;
+            document.getElementById('mergeModalDesc').textContent =
+                `Flytt alle ${src.member_count} medlemmer fra "${src.family_name}" inn i en annen familie.`;
+            const sel = document.getElementById('mergeTargetSelect');
+            sel.innerHTML = '';
+            familyData.families.forEach(f => {
+                if (f.family_id !== sourceFamilyId)
+                    sel.innerHTML += `<option value="${f.family_id}">${escHtml(f.family_name)} (${f.member_count} stk)</option>`;
+            });
+            document.getElementById('mergeModal').style.display = 'flex';
+        }
+
+        document.getElementById('mergeConfirmBtn').addEventListener('click', async () => {
+            const tgtId = document.getElementById('mergeTargetSelect').value;
+            if (!tgtId || !mergeSourceId) return;
+            const src = familyData.families.find(f => f.family_id === mergeSourceId);
+            if (!confirm(`Slå sammen "${src?.family_name}" (${src?.member_count} stk) inn i valgt familie?`)) return;
+            try {
+                const resp = await fetch(`${API_BASE}/api/families/${familySourceId}/merge`, {
+                    method: 'PUT', headers: {'Content-Type': 'application/json'},
+                    body: JSON.stringify({ source_family_id: mergeSourceId, target_family_id: tgtId }),
+                });
+                if (!resp.ok) { const e = await resp.json().catch(()=>({})); throw new Error(e.detail || `HTTP ${resp.status}`); }
+                document.getElementById('mergeModal').style.display = 'none';
+                await loadFamilies(`${API_BASE}/api/families/${familySourceId}`);
+            } catch (e) { alert(`Sammenslåing feilet: ${e.message}`); }
+        });
+
+        // ── Split family ──
+        let splitSourceId = null;
+
+        function openSplitModal(familyId) {
+            splitSourceId = familyId;
+            const fam = familyData.families.find(f => f.family_id === familyId);
+            if (!fam) return;
+            document.getElementById('splitModalDesc').textContent =
+                `Velg medlemmer å flytte ut av "${fam.family_name}" (${fam.member_count} stk).`;
+            const list = document.getElementById('splitMemberList');
+            list.innerHTML = fam.members.map(m =>
+                `<label style="display:block;padding:0.2rem 0;font-size:0.82rem;cursor:pointer">
+                    <input type="checkbox" class="split-member-cb" value="${escHtml(m.article_number)}" style="margin-right:0.4rem">
+                    <span style="font-family:monospace;font-size:0.8rem">${escHtml(m.article_number)}</span>
+                    ${escHtml(m.specification || m.product_name || '')}
+                </label>`
+            ).join('');
+            document.getElementById('splitNewName').value = '';
+            document.getElementById('splitTargetSelect').value = 'new_family';
+            document.getElementById('splitNewNameRow').style.display = '';
+            document.getElementById('splitModal').style.display = 'flex';
+        }
+
+        document.getElementById('splitTargetSelect').addEventListener('change', function() {
+            document.getElementById('splitNewNameRow').style.display = this.value === 'new_family' ? '' : 'none';
+        });
+
+        document.getElementById('splitConfirmBtn').addEventListener('click', async () => {
+            const selected = [...document.querySelectorAll('.split-member-cb:checked')].map(cb => cb.value);
+            if (!selected.length) { alert('Velg minst ett medlem å flytte.'); return; }
+            const target = document.getElementById('splitTargetSelect').value;
+            const newName = document.getElementById('splitNewName').value.trim();
+            const fam = familyData.families.find(f => f.family_id === splitSourceId);
+            if (selected.length === fam?.members.length) { alert('Kan ikke flytte alle — minst ett medlem må bli igjen.'); return; }
+            const label = target === 'standalone' ? 'frittstående' : `en ny familie`;
+            if (!confirm(`Flytt ${selected.length} ${selected.length === 1 ? 'produkt' : 'produkter'} til ${label}?`)) return;
+            try {
+                const resp = await fetch(`${API_BASE}/api/families/${familySourceId}/split`, {
+                    method: 'PUT', headers: {'Content-Type': 'application/json'},
+                    body: JSON.stringify({
+                        family_id: splitSourceId,
+                        article_numbers: selected,
+                        target,
+                        new_family_name: newName,
+                    }),
+                });
+                if (!resp.ok) { const e = await resp.json().catch(()=>({})); throw new Error(e.detail || `HTTP ${resp.status}`); }
+                document.getElementById('splitModal').style.display = 'none';
+                await loadFamilies(`${API_BASE}/api/families/${familySourceId}`);
+            } catch (e) { alert(`Splitting feilet: ${e.message}`); }
+        });
+
+        // ── Undo ──
+        function updateUndoButton() {
+            const btn = document.getElementById('undoBtn');
+            const overrides = familyData?.manual_overrides || [];
+            if (overrides.length > 0) {
+                const last = overrides[overrides.length - 1];
+                const labels = { move_member: 'flytting', merge: 'sammenslåing', split: 'splitting' };
+                btn.textContent = `Angre ${labels[last.action] || last.action}`;
+                btn.style.display = '';
+            } else {
+                btn.style.display = 'none';
+            }
+        }
+
+        async function undoLastAction() {
+            const overrides = familyData?.manual_overrides || [];
+            if (!overrides.length) return;
+            const last = overrides[overrides.length - 1];
+            const labels = { move_member: 'flytting', merge: 'sammenslåing', split: 'splitting' };
+            if (!confirm(`Angre siste handling (${labels[last.action] || last.action})?`)) return;
+            try {
+                const resp = await fetch(`${API_BASE}/api/families/${familySourceId}/undo`, {
+                    method: 'PUT', headers: {'Content-Type': 'application/json'},
+                });
+                if (!resp.ok) { const e = await resp.json().catch(()=>({})); throw new Error(e.detail || `HTTP ${resp.status}`); }
+                await loadFamilies(`${API_BASE}/api/families/${familySourceId}`);
+            } catch (e) { alert(`Angring feilet: ${e.message}`); }
         }
 
         // ── Single review action handlers ──
