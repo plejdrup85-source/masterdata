@@ -68,15 +68,27 @@ def read_article_numbers(file_content: bytes, filename: str) -> tuple[list[str],
                     break
 
     # Read article numbers — normalize to prevent float coercion (e.g., 12345.0 → "12345")
+    # This safely handles re-imported Excel files where numeric article numbers were
+    # previously exported without text formatting. Old "12345.0" values are corrected
+    # to "12345" on the next run via normalize_identifier().
     start_row = 2 if header_row else 1
+    float_coercion_count = 0
     for row in ws.iter_rows(min_row=start_row, values_only=True):
         if row and len(row) > article_col:
             value = row[article_col]
             normalized = normalize_identifier(value)
             if normalized:
+                # Track float-to-string corrections for diagnostics
+                if isinstance(value, float) and normalized != str(value):
+                    float_coercion_count += 1
                 article_numbers.append(normalized)
 
     wb.close()
+    if float_coercion_count:
+        logger.warning(
+            f"Corrected {float_coercion_count} float-formatted article numbers "
+            f"in {filename} (e.g., 12345.0 → '12345')"
+        )
     logger.info(f"Read {len(article_numbers)} article numbers from {filename} (column: {detected_column})")
     return article_numbers, detected_column
 

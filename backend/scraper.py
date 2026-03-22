@@ -131,6 +131,11 @@ SITEMAP_INDEX_PATH = CACHE_DIR / "_sitemap_sku_index.json"
 SITEMAP_URLS_PATH = CACHE_DIR / "_sitemap_urls.json"
 SITEMAP_MAX_AGE = 24 * 60 * 60  # 24 hours
 
+# Cache version — increment when ProductData schema or extraction logic changes
+# in a way that makes old cached data unsafe to reuse. Old cache entries with a
+# different (or missing) version are discarded and re-scraped.
+_CACHE_VERSION = 2  # v2: added verification_status, structured text extraction
+
 
 def _get_cache_path(article_number: str) -> Path:
     """Get the cache file path for an article number."""
@@ -139,11 +144,27 @@ def _get_cache_path(article_number: str) -> Path:
 
 
 def _load_from_cache(article_number: str) -> Optional[ProductData]:
-    """Load cached product data if available. Only returns positive (found) results."""
+    """Load cached product data if available. Only returns positive (found) results.
+
+    Cache entries are versioned: entries created by an older version of the
+    extraction logic are discarded to prevent stale verification_status,
+    flattened descriptions, or other outdated data from affecting current runs.
+    """
     cache_path = _get_cache_path(article_number)
     if cache_path.exists():
         try:
             data = json.loads(cache_path.read_text(encoding="utf-8"))
+
+            # Check cache version — reject entries from older code versions
+            cached_version = data.pop("_cache_version", None)
+            if cached_version != _CACHE_VERSION:
+                cache_path.unlink(missing_ok=True)
+                logger.info(
+                    f"Invalidated stale cache for {article_number} "
+                    f"(cache version {cached_version} != current {_CACHE_VERSION})"
+                )
+                return None
+
             product = ProductData(**data)
             # Only use cache for products that were actually found
             if product.found_on_onemed:
@@ -159,16 +180,22 @@ def _load_from_cache(article_number: str) -> Optional[ProductData]:
 
 
 def _save_to_cache(product: ProductData) -> None:
-    """Save product data to cache. Only caches positive (found) results."""
+    """Save product data to cache. Only caches positive (found) results.
+
+    Includes a _cache_version marker so future code changes can invalidate
+    entries that were created with older extraction or verification logic.
+    """
     # Never cache negative results - the product might be added later
     if not product.found_on_onemed:
         return
 
     cache_path = _get_cache_path(product.article_number)
     try:
+        data = json.loads(product.model_dump_json())
+        data["_cache_version"] = _CACHE_VERSION
         cache_path.write_text(
-            product.model_dump_json(indent=2),
-            encoding="utf-8"
+            json.dumps(data, indent=2, ensure_ascii=False),
+            encoding="utf-8",
         )
     except Exception:
         logger.warning(f"Failed to save cache for {product.article_number}")
@@ -530,6 +557,10 @@ def _parse_product_page(html: str, article_number: str) -> ProductData:
         logger.debug(f"{tag} packaging: {pkg_source} → {product.packaging_info}")
 
     # Priority 2: regex on page text (fallback)
+    # NOTE: page_text here is intentionally flattened via get_text() because it is
+    # used ONLY for regex pattern matching, NOT stored as a user-facing description.
+    # The extracted values (packaging_unit, transport_packaging) are short structured
+    # strings like "100 stk", not multi-line text. Do NOT use page_text for display.
     if not product.packaging_info:
         page_text = soup.get_text()
         pkg_patterns = [
@@ -560,6 +591,9 @@ def _parse_product_page(html: str, article_number: str) -> ProductData:
         logger.debug(f"{tag} packaging: MISSING — no spec keys matched, no regex matched")
 
     # ── Manufacturer article number ──
+    # NOTE: page_text is intentionally flattened — used only for regex extraction
+    # of short identifier values, not for display. Do NOT assign page_text to any
+    # user-facing description or specification field.
     page_text = soup.get_text()
     mfr_patterns = [
         r"(?:Produsentens?\s*(?:art\.?|varenr|artikkel)(?:nummer|nr)?|Lev\.?\s*art\.?\s*nr)[\s.:]*([A-Za-z0-9\-/]+)",

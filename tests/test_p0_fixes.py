@@ -363,3 +363,97 @@ class TestPdfEnricherPreservesStructure:
         # "Nitril" is only 6 chars, "Nitril lateksfri puderfri" is 25 chars
         # 6/25 = 24% overlap — well below 80% threshold
         assert _values_match("Nitril", "Nitril lateksfri puderfri") is False
+
+
+# ── Follow-up fixes: cache versioning, identifier reuse, re-import safety ──
+
+
+class TestCacheVersioning:
+    """Test that stale cached products are invalidated."""
+
+    def test_old_cache_without_version_is_rejected(self, tmp_path):
+        """Cached entry without _cache_version should be invalidated."""
+        import json
+        from backend.scraper import _load_from_cache, _get_cache_path, CACHE_DIR, _CACHE_VERSION
+        from unittest.mock import patch
+
+        # Simulate old cache entry (no _cache_version field)
+        old_data = {
+            "article_number": "12345",
+            "found_on_onemed": True,
+            "product_name": "Old Product",
+        }
+        cache_file = tmp_path / "12345.json"
+        cache_file.write_text(json.dumps(old_data), encoding="utf-8")
+
+        with patch("backend.scraper._get_cache_path", return_value=cache_file):
+            result = _load_from_cache("12345")
+
+        # Old entry must be rejected (returns None) and file deleted
+        assert result is None
+        assert not cache_file.exists()
+
+    def test_current_version_cache_is_accepted(self, tmp_path):
+        """Cached entry with current _cache_version should load fine."""
+        import json
+        from backend.scraper import _load_from_cache, _CACHE_VERSION
+        from backend.models import VerificationStatus
+        from unittest.mock import patch
+
+        current_data = {
+            "article_number": "12345",
+            "found_on_onemed": True,
+            "product_name": "Current Product",
+            "verification_status": VerificationStatus.EXACT_MATCH.value,
+            "_cache_version": _CACHE_VERSION,
+        }
+        cache_file = tmp_path / "12345.json"
+        cache_file.write_text(json.dumps(current_data), encoding="utf-8")
+
+        with patch("backend.scraper._get_cache_path", return_value=cache_file):
+            result = _load_from_cache("12345")
+
+        assert result is not None
+        assert result.article_number == "12345"
+        assert result.verification_status == VerificationStatus.EXACT_MATCH
+
+    def test_save_cache_includes_version(self, tmp_path):
+        """Saving to cache must include _cache_version marker."""
+        import json
+        from backend.scraper import _save_to_cache, _CACHE_VERSION
+        from backend.models import ProductData, VerificationStatus
+        from unittest.mock import patch
+
+        product = ProductData(
+            article_number="12345",
+            found_on_onemed=True,
+            product_name="Test Product",
+            verification_status=VerificationStatus.EXACT_MATCH,
+        )
+        cache_file = tmp_path / "12345.json"
+
+        with patch("backend.scraper._get_cache_path", return_value=cache_file):
+            _save_to_cache(product)
+
+        saved = json.loads(cache_file.read_text(encoding="utf-8"))
+        assert saved["_cache_version"] == _CACHE_VERSION
+        assert saved["article_number"] == "12345"
+        assert saved["verification_status"] == "eksakt_treff"
+
+
+class TestFloatCoercionReimport:
+    """Test that Excel re-import of previously exported numeric article numbers is safe."""
+
+    def test_float_from_excel_normalized(self):
+        """Float 8286416.0 from openpyxl → '8286416' (the core re-import fix)."""
+        from backend.identifiers import normalize_identifier
+        assert normalize_identifier(8286416.0) == "8286416"
+        assert normalize_identifier("8286416.0") == "8286416"
+
+    def test_round_trip_consistency(self):
+        """normalize_identifier is idempotent: normalizing twice gives same result."""
+        from backend.identifiers import normalize_identifier
+        original = 8286416.0
+        first = normalize_identifier(original)
+        second = normalize_identifier(first)
+        assert first == second == "8286416"

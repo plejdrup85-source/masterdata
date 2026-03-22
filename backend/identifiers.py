@@ -1,11 +1,19 @@
 """Identifier normalization for article numbers, SKUs, and other product identifiers.
 
+CANONICAL identifier normalization module for the masterdata application.
+Any code path that reads, imports, or compares product identifiers MUST use
+normalize_identifier() from this module. This includes:
+
+  - Excel upload (read_article_numbers in excel_handler.py)
+  - Jeeves ERP import (JeevesIndex.load in jeeves_loader.py)
+  - Jeeves lookups (JeevesIndex.get/has)
+  - Excel export (_write_id_cell in excel_handler.py)
+  - Scraper SKU verification (_verify_sku_match in scraper.py)
+  - Any future CSV / API / database import path
+
 Medical product masterdata requires exact, deterministic identifier handling.
 Excel/openpyxl can auto-type numeric-looking identifiers as float (e.g., 12345 → 12345.0),
 which silently breaks lookups, comparisons, and cross-source matching.
-
-This module provides a single normalization function used everywhere identifiers
-are read, stored, compared, or exported.
 
 Rules:
 - Identifiers are ALWAYS strings
