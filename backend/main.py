@@ -146,8 +146,22 @@ def _load_history() -> list[dict]:
 
 
 def _save_history(entries: list[dict]) -> None:
-    """Save job history index to disk (FIFO, max HISTORY_MAX_ENTRIES)."""
-    entries = entries[-HISTORY_MAX_ENTRIES:]
+    """Save job history index to disk (FIFO, max HISTORY_MAX_ENTRIES).
+
+    When entries exceed the limit, the oldest are evicted and their
+    Excel files are deleted from disk to reclaim space.
+    """
+    if len(entries) > HISTORY_MAX_ENTRIES:
+        evicted = entries[:-HISTORY_MAX_ENTRIES]
+        entries = entries[-HISTORY_MAX_ENTRIES:]
+        for e in evicted:
+            old_file = HISTORY_EXCEL_DIR / e.get("excel_filename", "")
+            if old_file.exists():
+                try:
+                    old_file.unlink()
+                    logger.info(f"History FIFO: deleted evicted Excel {old_file.name}")
+                except OSError:
+                    pass
     try:
         HISTORY_INDEX_FILE.write_text(
             json.dumps(entries, ensure_ascii=False, indent=2),
