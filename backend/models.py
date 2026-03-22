@@ -50,7 +50,7 @@ class VerificationStatus(str, Enum):
             VerificationStatus.EXACT_MATCH: "Verifisert mot produktside",
             VerificationStatus.NORMALIZED_MATCH: "Verifisert (etter normalisering)",
             VerificationStatus.SKU_IN_PAGE: "Delvis verifisert (artikkelnr funnet i sidetekst)",
-            VerificationStatus.CDN_ONLY: "Kun bilde bekreftet — ingen produktside funnet",
+            VerificationStatus.CDN_ONLY: "Kun bilde bekreftet — produktside ikke funnet/hentet",
             VerificationStatus.UNVERIFIED: "Ikke verifisert — krever manuell sjekk",
             VerificationStatus.MISMATCH: "Mulig feil produkt — artikkelnr stemmer ikke",
             VerificationStatus.AMBIGUOUS: "Usikker identitet — motstridende signaler",
@@ -59,17 +59,25 @@ class VerificationStatus(str, Enum):
 
     @staticmethod
     def business_evidence(status: "VerificationStatus", raw_evidence: str | None = None) -> str:
-        """Return a business-friendly explanation of the verification evidence."""
-        explanations = {
+        """Return a business-friendly explanation of the verification evidence.
+
+        Prefers raw_evidence when available (contains product-specific context),
+        falls back to standard explanations.
+        """
+        standard = {
             VerificationStatus.EXACT_MATCH: "Produktidentitet bekreftet: artikkelnummeret stemmer eksakt med produktsiden.",
             VerificationStatus.NORMALIZED_MATCH: "Produktidentitet bekreftet etter normalisering av artikkelnummer.",
             VerificationStatus.SKU_IN_PAGE: "Artikkelnummeret ble funnet i sideteksten, men ikke i produktets strukturerte data. Svakere bevis.",
-            VerificationStatus.CDN_ONLY: "Produktbilde ble funnet i bildekatalogen, men ingen produktside med detaljer ble funnet. Produktidentiteten er usikker.",
+            VerificationStatus.CDN_ONLY: "Produktbilde ble funnet i bildekatalogen, men ingen produktside med detaljer ble funnet eller hentet. Produktidentiteten er usikker.",
             VerificationStatus.UNVERIFIED: "Produktet kunne ikke verifiseres mot nettstedet. Vurder manuelt om dataene er korrekte.",
             VerificationStatus.MISMATCH: "Artikkelnummeret på produktsiden stemmer IKKE med forventet artikkel. Dataene kan tilhøre feil produkt.",
             VerificationStatus.AMBIGUOUS: "Motstridende signaler gjør det uklart om dette er riktig produkt. Krever manuell vurdering.",
         }
-        return explanations.get(status, raw_evidence or "")
+        # Use raw_evidence when available — it contains product-specific context
+        # (e.g., which SKUs were compared, which URLs were checked)
+        if raw_evidence and raw_evidence.strip():
+            return raw_evidence
+        return standard.get(status, raw_evidence or "")
 
 
 class EnrichmentSourceLevel(str, Enum):

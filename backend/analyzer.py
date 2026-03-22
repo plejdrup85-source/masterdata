@@ -505,6 +505,8 @@ def _analyze_category(product: ProductData) -> FieldAnalysis:
     analysis = FieldAnalysis(
         field_name="Kategori",
         current_value=display_value or url_category,
+        website_value=display_value,
+        value_origin="nettside" if display_value else ("URL" if url_category else None),
     )
 
     # Determine if we have any category information at all
@@ -546,8 +548,39 @@ def _analyze_category(product: ProductData) -> FieldAnalysis:
 
 
 def _analyze_packaging(product: ProductData) -> FieldAnalysis:
-    """Analyze packaging information."""
+    """Analyze packaging information.
+
+    Checks multiple sources:
+    1. product.packaging_info (pre-extracted by scraper)
+    2. product.packaging_unit (pre-extracted by scraper)
+    3. product.technical_details for packaging-related keys
+       (e.g. "Antall i pakningen", "Antall i transport-pakke", "Antall på pall")
+    """
     pkg = product.packaging_info or product.packaging_unit
+
+    # If no pre-extracted packaging, check technical_details for packaging keys
+    pkg_from_details = None
+    if not pkg and product.technical_details:
+        _PKG_KEYWORDS = [
+            "antall i pakn", "antall per pakn", "antall pr pakn",
+            "antall i forpakn", "antall pr forpakn",
+            "pakningsstørrelse", "pack size",
+            "enheter i pakn", "enheter per pakn", "enheter pr pakn",
+            "stk i pakn", "stk per pakn", "stk pr pakn",
+            "antall i inner", "transport", "kolli", "pall",
+            "antall i trans", "antall pr trans",
+        ]
+        pkg_detail_parts = []
+        for key, val in product.technical_details.items():
+            # Normalize key for matching
+            key_norm = key.replace("\xa0", " ").replace("\u200b", "")
+            key_lower = re.sub(r"\s+", " ", key_norm).strip().lower().rstrip(":")
+            if any(kw in key_lower for kw in _PKG_KEYWORDS):
+                pkg_detail_parts.append(f"{key.strip()}: {val}")
+        if pkg_detail_parts:
+            pkg_from_details = "; ".join(pkg_detail_parts)
+            pkg = pkg_from_details
+
     analysis = FieldAnalysis(
         field_name="Pakningsinformasjon",
         current_value=pkg,
@@ -556,10 +589,19 @@ def _analyze_packaging(product: ProductData) -> FieldAnalysis:
     if not pkg:
         analysis.status = QualityStatus.MISSING
         analysis.comment = "Pakningsinformasjon mangler"
+        analysis.status_reason = "Ingen pakningsdata funnet i nettside, spesifikasjoner eller Jeeves"
         return analysis
 
-    analysis.status = QualityStatus.OK
-    analysis.comment = "Pakningsinformasjon finnes"
+    if pkg_from_details:
+        analysis.status = QualityStatus.OK
+        analysis.comment = f"Pakningsinformasjon fra spesifikasjoner: {pkg}"
+        analysis.status_reason = "Pakningsdata funnet i spesifikasjonsseksjonen"
+        analysis.website_value = pkg_from_details
+        analysis.value_origin = "nettside (spesifikasjoner)"
+    else:
+        analysis.status = QualityStatus.OK
+        analysis.comment = "Pakningsinformasjon finnes"
+        analysis.status_reason = "Pakningsdata funnet"
     return analysis
 
 

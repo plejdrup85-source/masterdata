@@ -2323,16 +2323,33 @@ async def _run_analysis(
                 if not product_data.found_on_onemed and image_summary.main_image_exists:
                     product_data.found_on_onemed = True
                     product_data.error = None
+                    # Guard: if product already has web-sourced data (product_url, name,
+                    # description from page parsing), do NOT downgrade to CDN_ONLY.
+                    # This prevents overwriting a page-verified status when the scraper
+                    # found the page but marked found_on_onemed=False (e.g., mismatch).
+                    has_web_data = bool(
+                        product_data.product_url
+                        or product_data.product_name
+                        or product_data.description
+                    )
                     # Only downgrade verification — never upgrade from a confirmed mismatch
+                    # or overwrite when the product page was actually found
                     if product_data.verification_status not in (
                         VerificationStatus.MISMATCH,
                         VerificationStatus.EXACT_MATCH,
                         VerificationStatus.NORMALIZED_MATCH,
-                    ):
+                        VerificationStatus.SKU_IN_PAGE,
+                    ) and not has_web_data:
                         product_data.verification_status = VerificationStatus.CDN_ONLY
                         product_data.verification_evidence = (
-                            f"Produktbilde funnet i bildekatalogen, men ingen produktside med detaljer ble funnet. "
+                            f"Produktbilde funnet i bildekatalogen for '{article_number}'. "
+                            f"Ingen produktside med detaljer ble funnet eller hentet. "
                             f"Produktidentiteten er usikker — vurder manuelt."
+                        )
+                    elif has_web_data:
+                        logger.info(
+                            f"[{job_id}] {article_number} has web data but found_on_onemed was False. "
+                            f"Keeping verification status: {product_data.verification_status.value}"
                         )
                     logger.info(
                         f"[{job_id}] {article_number} found via CDN image "

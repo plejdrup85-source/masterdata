@@ -272,11 +272,22 @@ def _extract_product_from_json_ld(json_ld_list: list[dict]) -> dict:
                     product_info["price"] = offers.get("price")
         elif item.get("@type") == "BreadcrumbList":
             items = item.get("itemListElement", [])
-            product_info["breadcrumbs"] = [
-                elem.get("name", "") for elem in sorted(
-                    items, key=lambda x: x.get("position", 0)
-                )
-            ]
+            raw_breadcrumbs = []
+            for elem in sorted(items, key=lambda x: x.get("position", 0)):
+                # Handle both top-level name and nested item.name patterns
+                name = elem.get("name") or ""
+                if not name:
+                    # Common JSON-LD pattern: name inside "item" object
+                    item_obj = elem.get("item")
+                    if isinstance(item_obj, dict):
+                        name = item_obj.get("name", "")
+                    elif isinstance(item_obj, str):
+                        # item is just a URL, try to extract name from URL slug
+                        pass
+                if name and name.strip():
+                    raw_breadcrumbs.append(name.strip())
+            if raw_breadcrumbs:
+                product_info["breadcrumbs"] = raw_breadcrumbs
     return product_info
 
 
@@ -475,20 +486,36 @@ def _parse_product_page(html: str, article_number: str) -> ProductData:
     if breadcrumbs:
         bc_source = "JSON-LD BreadcrumbList"
     if not breadcrumbs:
-        # Fallback: extract breadcrumb from HTML nav/ol element
+        # Fallback 1: element with class containing "breadcrumb"
         bc_nav = soup.find(class_=re.compile(r"breadcrumb", re.I))
+        # Fallback 2: <nav> with aria-label containing "breadcrumb" or "brødsmule"
+        if not bc_nav:
+            bc_nav = soup.find("nav", attrs={"aria-label": re.compile(r"breadcrumb|brødsmule|sti", re.I)})
+        # Fallback 3: <ol> or <ul> with breadcrumb-related attributes
+        if not bc_nav:
+            bc_nav = soup.find(["ol", "ul"], class_=re.compile(r"breadcrumb|crumb", re.I))
         if bc_nav:
+            # Try <a> links first, then <li> items, then <span> items
             bc_links = bc_nav.find_all("a")
             breadcrumbs = [a.get_text(strip=True) for a in bc_links if a.get_text(strip=True)]
+            if not breadcrumbs:
+                bc_items = bc_nav.find_all("li")
+                breadcrumbs = [li.get_text(strip=True) for li in bc_items if li.get_text(strip=True)]
+            if not breadcrumbs:
+                bc_spans = bc_nav.find_all("span")
+                breadcrumbs = [s.get_text(strip=True) for s in bc_spans if s.get_text(strip=True)]
             if breadcrumbs:
-                bc_source = f"HTML nav.breadcrumb ({bc_nav.name}.{bc_nav.get('class', [])})"
+                bc_source = f"HTML {bc_nav.name}.{bc_nav.get('class', [])} ({len(breadcrumbs)} items)"
             else:
-                logger.debug(f"{tag} breadcrumb: nav.breadcrumb found but no <a> links inside")
+                logger.debug(f"{tag} breadcrumb: nav element found but no links/items inside")
         else:
-            logger.debug(f"{tag} breadcrumb: no JSON-LD BreadcrumbList, no HTML nav.breadcrumb")
+            logger.debug(f"{tag} breadcrumb: no JSON-LD BreadcrumbList, no HTML breadcrumb element")
+    # Filter out empty/whitespace-only breadcrumb entries and generic separators
+    if breadcrumbs:
+        breadcrumbs = [b.strip() for b in breadcrumbs if b and b.strip() and b.strip() not in (">", "/", "»", "›")]
     if breadcrumbs:
         product.category_breadcrumb = breadcrumbs
-        product.category = breadcrumbs[-1] if breadcrumbs else None
+        product.category = breadcrumbs[-1]
         logger.debug(f"{tag} category: {bc_source} → {breadcrumbs}")
     else:
         logger.debug(f"{tag} category: MISSING — no breadcrumb source found")
@@ -661,11 +688,24 @@ def _parse_product_page(html: str, article_number: str) -> ProductData:
     pkg_source = None
     if specs:
         for key, val in specs.items():
-            key_lower = key.lower().rstrip(":")
-            if any(kw in key_lower for kw in ["antall i pakn", "antall per pakn", "pakningsstørrelse", "pack size"]):
+            # Normalize key: strip non-breaking spaces, collapse whitespace, lowercase
+            key_normalized = key.replace("\xa0", " ").replace("\u200b", "")
+            key_normalized = re.sub(r"\s+", " ", key_normalized).strip()
+            key_lower = key_normalized.lower().rstrip(":")
+            if any(kw in key_lower for kw in [
+                "antall i pakn", "antall per pakn", "antall pr pakn",
+                "antall i forpakn", "antall pr forpakn",
+                "pakningsstørrelse", "pack size", "enheter i pakn",
+                "enheter per pakn", "enheter pr pakn",
+                "stk i pakn", "stk per pakn", "stk pr pakn",
+                "antall i inner",
+            ]):
                 product.packaging_unit = val
                 pkg_parts.append(f"Antall i pakning: {val}")
-            elif any(kw in key_lower for kw in ["transport", "kolli"]):
+            elif any(kw in key_lower for kw in [
+                "transport", "kolli", "ytterforpakn",
+                "antall i trans", "antall pr trans",
+            ]):
                 product.transport_packaging = val
                 pkg_parts.append(f"Antall i transportpakke: {val}")
             elif "pall" in key_lower:
@@ -889,12 +929,17 @@ async def _check_cdn_image_exists(
 async def _find_product_url_via_sitemap(
     client: httpx.AsyncClient,
     article_number: str,
+    max_pages: int = 2000,
 ) -> Optional[str]:
     """Find the product page URL by scanning sitemap pages for matching SKU.
 
     Downloads product pages from the sitemap in batches and checks if
     the JSON-LD SKU matches the target article number.
     Results are cached in the _sku_to_url mapping.
+
+    Args:
+        max_pages: Maximum number of pages to scan (default 2000 for full discovery,
+                   use lower values like 200 for targeted scans).
     """
     # Check if we already have a mapping for this article number
     if article_number in _sku_to_url:
@@ -912,7 +957,7 @@ async def _find_product_url_via_sitemap(
     # Scan product pages in batches to find the matching SKU
     # Process in batches of 15 concurrent requests
     BATCH_SIZE = 20
-    MAX_PAGES_TO_CHECK = 2000  # Must be high enough for 9500+ product sitemap
+    MAX_PAGES_TO_CHECK = max_pages
 
     # Filter out URLs we've already indexed
     indexed_urls = set(_sku_to_url.values())
@@ -1061,6 +1106,47 @@ async def scrape_product(
                 logger.info(
                     f"{clean_num}: not in SKU index, skipping sitemap scan (strict input mode)"
                 )
+
+        # Strategy 3.5: Targeted sitemap scan for CDN-confirmed products
+        # When CDN confirms the product exists but the SKU index doesn't have it,
+        # do a limited sitemap scan to find the product page. This is much cheaper
+        # than full discovery (max 200 pages) and incrementally builds the index.
+        if cdn_exists and not enable_discovery:
+            logger.info(
+                f"{clean_num}: CDN confirmed, attempting targeted sitemap scan "
+                f"(max 200 pages)"
+            )
+            product_url = await _find_product_url_via_sitemap(
+                client, clean_num, max_pages=200
+            )
+            if product_url:
+                response = await _fetch_with_retry(client, product_url)
+                if response and response.status_code == 200:
+                    product = _parse_product_page(response.text, clean_num)
+                    product.product_url = str(response.url)
+                    v_status, v_evidence = _verify_sku_match(
+                        response.text, clean_num
+                    )
+                    product.verification_status = v_status
+                    product.verification_evidence = v_evidence
+                    if v_status == VerificationStatus.MISMATCH:
+                        logger.warning(
+                            f"SKU MISMATCH for {clean_num} at {product_url}: "
+                            f"{v_evidence}"
+                        )
+                        product.error = f"SKU-mismatch: {v_evidence}"
+                        product.found_on_onemed = False
+                        product.multiple_hits = True
+                    elif v_status == VerificationStatus.UNVERIFIED:
+                        logger.warning(
+                            f"SKU UNVERIFIED for {clean_num}: {v_evidence}"
+                        )
+                        product.error = (
+                            f"Identitet ikke verifisert: {v_evidence}"
+                        )
+                        product.multiple_hits = True
+                    _save_to_cache(product)
+                    return product
 
         # Strategy 4: If CDN image exists, product MAY be in the OneMed system
         # CDN image alone is WEAK evidence — mark as CDN_ONLY, not as fully verified.

@@ -288,7 +288,13 @@ def _create_overview_sheet(ws, results: list[ProductAnalysis]) -> None:
         _apply_status_style(status_cell, result.overall_status)
         ws.cell(row=row_idx, column=8, value=result.overall_comment or "")
         ws.cell(row=row_idx, column=9, value=pd.manufacturer or "")
-        ws.cell(row=row_idx, column=10, value=pd.category or "")
+        # Show full breadcrumb path when available, fall back to leaf category
+        cat_display = ""
+        if pd.category_breadcrumb:
+            cat_display = " > ".join(pd.category_breadcrumb)
+        elif pd.category:
+            cat_display = pd.category
+        ws.cell(row=row_idx, column=10, value=cat_display)
         # Image quality columns
         img_score = iq.get("avg_image_score", 0)
         img_status = iq.get("image_quality_status", "MISSING")
@@ -591,8 +597,9 @@ def _create_image_detail_sheet(ws, results: list[ProductAnalysis]) -> None:
     # Skip a row then add suggestion header
     sugg_start = row_idx + 2
     sugg_headers = [
-        "Artikkelnummer", "Nåværende status", "Foreslått bilde-URL",
-        "Bildekilde", "Kilde-URL", "Konfidensgrad", "Begrunnelse",
+        "Artikkelnummer", "Nåværende bilde-URL", "Nåværende status",
+        "Foreslått bilde-URL", "Bildekilde", "Kilde-URL",
+        "Konfidensgrad", "Begrunnelse",
     ]
     for col, h in enumerate(sugg_headers, 1):
         ws.cell(row=sugg_start, column=col, value=h)
@@ -604,12 +611,13 @@ def _create_image_detail_sheet(ws, results: list[ProductAnalysis]) -> None:
         if not img_sugg:
             continue
         _write_id_cell(ws, sugg_row, 1, result.article_number)
-        ws.cell(row=sugg_row, column=2, value=img_sugg.current_image_status or "")
-        ws.cell(row=sugg_row, column=3, value=img_sugg.suggested_image_url or "")
-        ws.cell(row=sugg_row, column=4, value=img_sugg.suggested_source or "")
-        ws.cell(row=sugg_row, column=5, value=img_sugg.suggested_source_url or "")
-        ws.cell(row=sugg_row, column=6, value=img_sugg.confidence if img_sugg.confidence else 0)
-        ws.cell(row=sugg_row, column=7, value=img_sugg.reason or "")
+        ws.cell(row=sugg_row, column=2, value=img_sugg.current_image_url or "")
+        ws.cell(row=sugg_row, column=3, value=img_sugg.current_image_status or "")
+        ws.cell(row=sugg_row, column=4, value=img_sugg.suggested_image_url or "")
+        ws.cell(row=sugg_row, column=5, value=img_sugg.suggested_source or "")
+        ws.cell(row=sugg_row, column=6, value=img_sugg.suggested_source_url or "")
+        ws.cell(row=sugg_row, column=7, value=img_sugg.confidence if img_sugg.confidence else 0)
+        ws.cell(row=sugg_row, column=8, value=img_sugg.reason or "")
         sugg_row += 1
 
 
