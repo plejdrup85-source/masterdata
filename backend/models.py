@@ -43,6 +43,34 @@ class VerificationStatus(str, Enum):
     MISMATCH = "feil_treff"               # Page SKU contradicts expected article number
     AMBIGUOUS = "tvetydig"                 # Multiple signals conflict
 
+    @staticmethod
+    def business_label(status: "VerificationStatus") -> str:
+        """Return a business-friendly Norwegian label for the verification status."""
+        labels = {
+            VerificationStatus.EXACT_MATCH: "Verifisert mot produktside",
+            VerificationStatus.NORMALIZED_MATCH: "Verifisert (etter normalisering)",
+            VerificationStatus.SKU_IN_PAGE: "Delvis verifisert (artikkelnr funnet i sidetekst)",
+            VerificationStatus.CDN_ONLY: "Kun bilde bekreftet — ingen produktside funnet",
+            VerificationStatus.UNVERIFIED: "Ikke verifisert — krever manuell sjekk",
+            VerificationStatus.MISMATCH: "Mulig feil produkt — artikkelnr stemmer ikke",
+            VerificationStatus.AMBIGUOUS: "Usikker identitet — motstridende signaler",
+        }
+        return labels.get(status, str(status))
+
+    @staticmethod
+    def business_evidence(status: "VerificationStatus", raw_evidence: str | None = None) -> str:
+        """Return a business-friendly explanation of the verification evidence."""
+        explanations = {
+            VerificationStatus.EXACT_MATCH: "Produktidentitet bekreftet: artikkelnummeret stemmer eksakt med produktsiden.",
+            VerificationStatus.NORMALIZED_MATCH: "Produktidentitet bekreftet etter normalisering av artikkelnummer.",
+            VerificationStatus.SKU_IN_PAGE: "Artikkelnummeret ble funnet i sideteksten, men ikke i produktets strukturerte data. Svakere bevis.",
+            VerificationStatus.CDN_ONLY: "Produktbilde ble funnet i bildekatalogen, men ingen produktside med detaljer ble funnet. Produktidentiteten er usikker.",
+            VerificationStatus.UNVERIFIED: "Produktet kunne ikke verifiseres mot nettstedet. Vurder manuelt om dataene er korrekte.",
+            VerificationStatus.MISMATCH: "Artikkelnummeret på produktsiden stemmer IKKE med forventet artikkel. Dataene kan tilhøre feil produkt.",
+            VerificationStatus.AMBIGUOUS: "Motstridende signaler gjør det uklart om dette er riktig produkt. Krever manuell vurdering.",
+        }
+        return explanations.get(status, raw_evidence or "")
+
 
 class EnrichmentSourceLevel(str, Enum):
     INTERNAL_PRODUCT_SHEET = "internal_product_sheet"

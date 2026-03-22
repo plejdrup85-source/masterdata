@@ -707,18 +707,72 @@
 
         <!-- Upload Section -->
         <div class="card" id="uploadCard">
-            <h2>Last opp produktliste</h2>
-            <div class="upload-area" id="uploadArea">
-                <svg class="upload-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
-                    <path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/>
-                    <polyline points="17 8 12 3 7 8"/>
-                    <line x1="12" y1="3" x2="12" y2="15"/>
-                </svg>
-                <p>Dra og slipp Excel-fil her, eller klikk for a velge</p>
-                <p style="font-size:0.8rem; margin-top:0.5rem; color:#94a3b8">.xlsx-fil med artikkelnumre (maks 1000 rader, 5 MB)</p>
-                <p class="filename hidden" id="fileName"></p>
-                <input type="file" id="fileInput" accept=".xlsx">
+            <h2>Kvalitetsanalyse &mdash; Velg datakilde</h2>
+
+            <!-- Input Source Selector -->
+            <div style="margin-bottom:1rem">
+                <div style="font-size:0.9rem;font-weight:600;margin-bottom:0.5rem">Datakilde</div>
+                <div style="display:flex;gap:0.4rem;flex-wrap:wrap">
+                    <button class="qa-source-btn" data-source="catalog_full" onclick="setQaSource('catalog_full')" style="padding:0.4rem 0.8rem;font-size:0.85rem;border-radius:6px;cursor:pointer;border:1px solid var(--border);background:var(--bg);color:var(--text);font-weight:500">Hele katalogen</button>
+                    <button class="qa-source-btn" data-source="catalog_random" onclick="setQaSource('catalog_random')" style="padding:0.4rem 0.8rem;font-size:0.85rem;border-radius:6px;cursor:pointer;border:1px solid var(--border);background:var(--bg);color:var(--text);font-weight:500">Tilfeldig utvalg</button>
+                    <button class="qa-source-btn" data-source="manual_articles" onclick="setQaSource('manual_articles')" style="padding:0.4rem 0.8rem;font-size:0.85rem;border-radius:6px;cursor:pointer;border:1px solid var(--border);background:var(--bg);color:var(--text);font-weight:500">Manuelt oppgitt</button>
+                    <button class="qa-source-btn active" data-source="upload_excel" onclick="setQaSource('upload_excel')" style="padding:0.4rem 0.8rem;font-size:0.85rem;border-radius:6px;cursor:pointer;border:1px solid var(--primary);background:#eff6ff;color:var(--primary);font-weight:500">Last opp Excel</button>
+                </div>
             </div>
+
+            <!-- Source: Full Catalog -->
+            <div id="qaSourceCatalogFull" class="qa-source-panel" style="display:none">
+                <div style="padding:1rem;background:#f0fdf4;border:1px solid #bbf7d0;border-radius:8px;font-size:0.85rem;color:#166534">
+                    <strong>Hele Jeeves-katalogen</strong> vil bli analysert mot onemed.no.
+                    <span id="qaCatalogCount" style="font-weight:600"></span>
+                    <br><span style="font-size:0.8rem;color:#15803d">Ingen Excel-opplasting nødvendig.</span>
+                </div>
+            </div>
+
+            <!-- Source: Random Sample -->
+            <div id="qaSourceCatalogRandom" class="qa-source-panel" style="display:none">
+                <div style="padding:1rem;background:#eff6ff;border:1px solid #bfdbfe;border-radius:8px;font-size:0.85rem;color:#1e40af">
+                    <strong>Tilfeldig kvalitetssjekk</strong> fra intern katalog. Ingen Excel nødvendig.
+                    <div style="margin-top:0.5rem;display:flex;gap:0.75rem;align-items:center;flex-wrap:wrap">
+                        <label>Antall produkter:
+                            <select id="qaRandomSize" style="padding:0.3rem 0.5rem;border:1px solid var(--border);border-radius:4px;font-size:0.85rem">
+                                <option value="10">10</option>
+                                <option value="25">25</option>
+                                <option value="50">50</option>
+                                <option value="100" selected>100</option>
+                                <option value="200">200</option>
+                                <option value="500">500</option>
+                            </select>
+                        </label>
+                        <span id="qaRandomInfo" style="font-size:0.82rem;color:var(--text-muted)"></span>
+                    </div>
+                </div>
+            </div>
+
+            <!-- Source: Manual Articles -->
+            <div id="qaSourceManualArticles" class="qa-source-panel" style="display:none">
+                <div style="padding:1rem;background:#fefce8;border:1px solid #fde68a;border-radius:8px;font-size:0.85rem;color:#854d0e">
+                    <strong>Skriv inn artikkelnumre</strong> direkte. Ingen Excel nødvendig.
+                    <textarea id="qaManualArticles" rows="4" placeholder="Skriv artikkelnumre separert med komma, mellomrom eller linjeskift&#10;F.eks: N558818305, N558818306, 12345" style="width:100%;margin-top:0.5rem;padding:0.5rem;border:1px solid var(--border);border-radius:4px;font-family:monospace;font-size:0.85rem;resize:vertical"></textarea>
+                    <div id="qaManualInfo" style="font-size:0.82rem;color:var(--text-muted);margin-top:0.3rem"></div>
+                </div>
+            </div>
+
+            <!-- Source: Excel Upload (existing) -->
+            <div id="qaSourceUploadExcel" class="qa-source-panel">
+                <div class="upload-area" id="uploadArea">
+                    <svg class="upload-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                        <path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/>
+                        <polyline points="17 8 12 3 7 8"/>
+                        <line x1="12" y1="3" x2="12" y2="15"/>
+                    </svg>
+                    <p>Dra og slipp Excel-fil her, eller klikk for a velge</p>
+                    <p style="font-size:0.8rem; margin-top:0.5rem; color:#94a3b8">.xlsx-fil med artikkelnumre (maks 1000 rader, 5 MB)</p>
+                    <p class="filename hidden" id="fileName"></p>
+                    <input type="file" id="fileInput" accept=".xlsx">
+                </div>
+            </div>
+
             <div class="upload-options">
                 <label>
                     <input type="checkbox" id="skipCacheCheckbox">
@@ -1117,6 +1171,8 @@
         let currentJobId = null;
         let pollInterval = null;
         let selectedFile = null;
+        let qaSourceMode = 'upload_excel';  // catalog_full, catalog_random, manual_articles, upload_excel
+        let catalogInfo = { loaded: false, count: 0 };
         let lastMasterdataArticles = []; // Task 3: authoritative article list for handoff
 
         // ── Module Navigation ──
@@ -1782,15 +1838,75 @@
             }
         }
 
+        function setQaSource(mode) {
+            qaSourceMode = mode;
+            document.querySelectorAll('.qa-source-btn').forEach(b => {
+                const active = b.dataset.source === mode;
+                b.style.border = active ? '1px solid var(--primary)' : '1px solid var(--border)';
+                b.style.background = active ? '#eff6ff' : 'var(--bg)';
+                b.style.color = active ? 'var(--primary)' : 'var(--text)';
+                if (active) b.classList.add('active'); else b.classList.remove('active');
+            });
+            document.querySelectorAll('.qa-source-panel').forEach(p => p.style.display = 'none');
+            const panelMap = {
+                catalog_full: 'qaSourceCatalogFull',
+                catalog_random: 'qaSourceCatalogRandom',
+                manual_articles: 'qaSourceManualArticles',
+                upload_excel: 'qaSourceUploadExcel',
+            };
+            const panel = document.getElementById(panelMap[mode]);
+            if (panel) panel.style.display = '';
+            // Hide batch controls for non-upload modes (they use their own controls)
+            const batchSection = document.querySelector('[id="batchRangeOpts"]')?.closest('div[style*="background:var(--bg)"]');
+            // Update catalog count display
+            if (mode !== 'upload_excel' && catalogInfo.loaded) {
+                document.getElementById('qaCatalogCount').textContent = `(${catalogInfo.count} produkter i katalogen)`;
+                document.getElementById('qaRandomInfo').textContent = `${catalogInfo.count} produkter tilgjengelig i katalogen`;
+            }
+            updateStartBtnState();
+        }
+
+        // Load catalog info on page load
+        async function loadCatalogInfo() {
+            try {
+                const resp = await fetch(`${API_BASE}/api/catalog-info`);
+                catalogInfo = await resp.json();
+                if (catalogInfo.loaded) {
+                    document.getElementById('qaCatalogCount').textContent = `(${catalogInfo.count} produkter i katalogen)`;
+                    document.getElementById('qaRandomInfo').textContent = `${catalogInfo.count} produkter tilgjengelig i katalogen`;
+                }
+            } catch(e) { console.warn('Could not load catalog info:', e); }
+        }
+        loadCatalogInfo();
+
         function updateStartBtnState() {
-            const hasFile = !!selectedFile;
             const analysisMode = document.querySelector('input[name="analysisMode"]:checked').value;
             let focusOk = true;
             if (analysisMode === 'focused_scan') {
                 focusOk = document.querySelectorAll('.focusAreaCb:checked').length > 0;
             }
-            startBtn.disabled = !hasFile || !focusOk;
+            let sourceOk = false;
+            if (qaSourceMode === 'upload_excel') {
+                sourceOk = !!selectedFile;
+            } else if (qaSourceMode === 'catalog_full') {
+                sourceOk = catalogInfo.loaded && catalogInfo.count > 0;
+            } else if (qaSourceMode === 'catalog_random') {
+                sourceOk = catalogInfo.loaded && catalogInfo.count > 0;
+            } else if (qaSourceMode === 'manual_articles') {
+                const text = (document.getElementById('qaManualArticles')?.value || '').trim();
+                sourceOk = text.length > 0;
+            }
+            startBtn.disabled = !sourceOk || !focusOk;
         }
+
+        // Update manual articles count on input
+        document.getElementById('qaManualArticles')?.addEventListener('input', function() {
+            const arts = this.value.trim().split(/[\s,;\n]+/).filter(Boolean);
+            const unique = [...new Set(arts)];
+            document.getElementById('qaManualInfo').textContent =
+                unique.length > 0 ? `${unique.length} artikkelnumre (${arts.length - unique.length} duplikater fjernet)` : '';
+            updateStartBtnState();
+        });
 
         let currentAnalysisMode = 'full_enrichment';
         let currentFocusAreas = [];
@@ -1865,8 +1981,6 @@
 
         // Start analysis
         startBtn.addEventListener('click', async () => {
-            if (!selectedFile) return;
-
             // Validate focused mode
             const analysisMode = document.querySelector('input[name="analysisMode"]:checked').value;
             if (analysisMode === 'focused_scan') {
@@ -1882,21 +1996,44 @@
             lastMasterdataArticles = []; // Clear stale handoff data when starting new run
 
             startBtn.disabled = true;
-            startBtn.innerHTML = '<span class="spinner"></span> Laster opp...';
-
-            const formData = new FormData();
-            formData.append('file', selectedFile);
+            startBtn.innerHTML = '<span class="spinner"></span> Starter...';
 
             const skipCache = skipCacheCheckbox.checked;
-            const batchParams = getBatchParams();
-            if (skipCache) batchParams.set('skip_cache', 'true');
-            const url = `${API_BASE}/api/upload?${batchParams.toString()}`;
 
             try {
-                const resp = await fetch(url, {
-                    method: 'POST',
-                    body: formData,
-                });
+                let resp;
+
+                if (qaSourceMode === 'upload_excel') {
+                    // Existing Excel upload flow
+                    if (!selectedFile) { startBtn.disabled = false; startBtn.textContent = 'Start analyse'; return; }
+                    const formData = new FormData();
+                    formData.append('file', selectedFile);
+                    const batchParams = getBatchParams();
+                    if (skipCache) batchParams.set('skip_cache', 'true');
+                    batchParams.set('analysis_mode', analysisMode);
+                    if (currentFocusAreas.length) batchParams.set('focus_areas', currentFocusAreas.join(','));
+                    const url = `${API_BASE}/api/upload?${batchParams.toString()}`;
+                    resp = await fetch(url, { method: 'POST', body: formData });
+                } else {
+                    // Catalog-based modes (no upload required)
+                    const body = {
+                        source_mode: qaSourceMode,
+                        analysis_mode: analysisMode,
+                        focus_areas: currentFocusAreas,
+                        skip_cache: skipCache,
+                    };
+                    if (qaSourceMode === 'catalog_random') {
+                        body.sample_size = parseInt(document.getElementById('qaRandomSize').value) || 100;
+                    } else if (qaSourceMode === 'manual_articles') {
+                        const text = (document.getElementById('qaManualArticles')?.value || '').trim();
+                        body.article_numbers = text.split(/[\s,;\n]+/).filter(Boolean);
+                    }
+                    resp = await fetch(`${API_BASE}/api/analyze-catalog`, {
+                        method: 'POST',
+                        headers: {'Content-Type': 'application/json'},
+                        body: JSON.stringify(body),
+                    });
+                }
 
                 if (!resp.ok) {
                     const err = await resp.json();

@@ -311,7 +311,7 @@ def _verify_sku_match(html: str, expected_article_number: str) -> tuple[Verifica
         if clean_page == clean_expected:
             return (
                 VerificationStatus.EXACT_MATCH,
-                f"JSON-LD SKU '{page_sku}' matcher artikkelnummer eksakt",
+                f"Produktidentitet bekreftet: artikkelnummeret stemmer eksakt med produktsiden.",
             )
 
         # Normalized match (strip leading N, case-insensitive)
@@ -320,26 +320,26 @@ def _verify_sku_match(html: str, expected_article_number: str) -> tuple[Verifica
         if norm_page == norm_expected:
             return (
                 VerificationStatus.NORMALIZED_MATCH,
-                f"JSON-LD SKU '{page_sku}' matcher etter normalisering (forventet '{expected_article_number}')",
+                f"Produktidentitet bekreftet etter normalisering av artikkelnummer ('{page_sku}' ≈ '{expected_article_number}').",
             )
 
         # SKU present but DIFFERENT — this is a definite mismatch
         return (
             VerificationStatus.MISMATCH,
-            f"JSON-LD SKU '{page_sku}' avviker fra forventet '{expected_article_number}' — mulig feil produkt",
+            f"Mulig feil produkt: artikkelnummeret på produktsiden ('{page_sku}') stemmer ikke med forventet ('{expected_article_number}'). Dataene kan tilhøre feil produkt.",
         )
 
     # No SKU in JSON-LD — weaker signals only
     if clean_expected in html:
         return (
             VerificationStatus.SKU_IN_PAGE,
-            f"Artikkelnummer '{clean_expected}' funnet i sidetekst (ikke i JSON-LD — svakere bevis)",
+            f"Artikkelnummeret ble funnet i sideteksten, men ikke i produktets strukturerte data. Svakere verifisering.",
         )
 
     # Cannot verify — do NOT assume match. For medical products, unverified = unverified.
     return (
         VerificationStatus.UNVERIFIED,
-        f"Kunne ikke verifisere artikkelnummer '{expected_article_number}' på produktsiden",
+        f"Produktet kunne ikke verifiseres mot nettstedet. Vurder manuelt om dataene er korrekte.",
     )
 
 
@@ -438,7 +438,28 @@ def _parse_product_page(html: str, article_number: str) -> ProductData:
                 f"{tag} description: div.description fallback → {len(product.description)} chars (structured)"
             )
         else:
-            logger.debug(f"{tag} description: MISSING — no JSON-LD, no accordion, no div.description")
+            # Fallback: <meta name="description"> tag
+            meta_desc = soup.find("meta", attrs={"name": "description"})
+            if meta_desc and meta_desc.get("content", "").strip():
+                meta_text = meta_desc["content"].strip()
+                if len(meta_text) > 20:
+                    product.description = meta_text
+                    logger.debug(f"{tag} description: <meta description> fallback → {len(meta_text)} chars")
+                else:
+                    logger.debug(f"{tag} description: meta description too short ({len(meta_text)} chars)")
+            else:
+                # Fallback: any section/article with substantial text within main content
+                main_content = soup.find("main") or soup.find("article") or soup.find(id=re.compile(r"product|content", re.I))
+                if main_content:
+                    paragraphs = main_content.find_all("p")
+                    long_texts = [p.get_text(strip=True) for p in paragraphs if len(p.get_text(strip=True)) > 30]
+                    if long_texts:
+                        product.description = "\n".join(long_texts[:3])  # Take up to 3 substantial paragraphs
+                        logger.debug(f"{tag} description: <main> paragraphs fallback → {len(product.description)} chars")
+                    else:
+                        logger.debug(f"{tag} description: MISSING — no JSON-LD, no accordion, no div, no meta, no paragraphs")
+                else:
+                    logger.debug(f"{tag} description: MISSING — no JSON-LD, no accordion, no div.description, no meta")
 
     # ── Image ──
     product.image_url = ld_info.get("image")
@@ -477,7 +498,17 @@ def _parse_product_page(html: str, article_number: str) -> ProductData:
     if product.manufacturer:
         logger.debug(f"{tag} manufacturer: JSON-LD brand → {repr(product.manufacturer)}")
     else:
-        logger.debug(f"{tag} manufacturer: MISSING — no JSON-LD brand")
+        # Fallback: look for manufacturer in spec tables or dedicated elements
+        mfr_el = soup.find(class_=re.compile(r"brand|manufacturer|producer|supplier", re.I))
+        if mfr_el:
+            mfr_text = mfr_el.get_text(strip=True)
+            if mfr_text and len(mfr_text) < 100:
+                product.manufacturer = mfr_text
+                logger.debug(f"{tag} manufacturer: class-based fallback → {repr(mfr_text)}")
+        # Note: specs dict is populated later in the function, so manufacturer
+        # extraction from specs will be done in a second pass after specs are built.
+        if not product.manufacturer:
+            logger.debug(f"{tag} manufacturer: MISSING at initial pass — will re-check after specs extraction")
 
     # ── Product URL ──
     product.product_url = ld_info.get("url")
@@ -678,6 +709,15 @@ def _parse_product_page(html: str, article_number: str) -> ProductData:
 
     if not product.packaging_info:
         logger.debug(f"{tag} packaging: MISSING — no spec keys matched, no regex matched")
+
+    # ── Manufacturer from specs (second pass after specs are built) ──
+    if not product.manufacturer and specs:
+        for key, val in specs.items():
+            key_lower = key.lower()
+            if any(kw in key_lower for kw in ["produsent", "manufacturer", "leverandør", "supplier", "brand", "merke"]):
+                product.manufacturer = val
+                logger.debug(f"{tag} manufacturer: spec key '{key}' → {repr(val)}")
+                break
 
     # ── Manufacturer article number ──
     # NOTE: page_text is intentionally flattened — used only for regex extraction
@@ -1035,8 +1075,8 @@ async def scrape_product(
                 image_quality_ok=True,
                 verification_status=VerificationStatus.CDN_ONLY,
                 verification_evidence=(
-                    f"Kun CDN-bilde bekreftet for '{clean_num}'. "
-                    f"Ingen produktside funnet — identitet ikke verifisert."
+                    f"Produktbilde funnet i bildekatalogen for '{clean_num}'. "
+                    f"Ingen produktside med detaljer ble funnet — produktidentiteten er usikker."
                 ),
                 error=None,
             )

@@ -13,6 +13,7 @@ from backend.models import (
     ProductAnalysis,
     ProductData,
     QualityStatus,
+    VerificationStatus,
 )
 
 logger = logging.getLogger(__name__)
@@ -47,6 +48,17 @@ def _source_label(website_val, jeeves_val, website_label="nettside", jeeves_labe
     elif has_jeeves:
         return f"{jeeves_label} kun"
     return None
+
+
+def _no_page_reason(product: ProductData) -> str:
+    """Return an explanation when website value is missing due to no product page."""
+    if product.verification_status == VerificationStatus.CDN_ONLY:
+        return "Ingen produktside funnet på nettstedet (kun bilde bekreftet via CDN)"
+    elif not product.found_on_onemed:
+        return "Produktet ble ikke funnet på nettstedet"
+    elif product.verification_status == VerificationStatus.MISMATCH:
+        return "Produktsiden tilhører et annet produkt (SKU-avvik)"
+    return "Nettstedet mangler denne verdien"
 
 
 SPEC_KEYWORDS = {
@@ -89,7 +101,7 @@ def _analyze_product_name(product: ProductData, jeeves: JeevesData = None) -> Fi
     if not name and jeeves_name:
         analysis.status = QualityStatus.OK
         analysis.comment = f"Produktnavn fra Jeeves: {jeeves_name}"
-        analysis.status_reason = "Jeeves har produktnavn, nettside mangler"
+        analysis.status_reason = f"Produktnavn fra Jeeves. {_no_page_reason(product)}"
         return analysis
 
     issues = []
@@ -161,7 +173,7 @@ def _analyze_description(product: ProductData, jeeves: JeevesData = None) -> Fie
     if not desc and jeeves_desc:
         analysis.status = QualityStatus.OK
         analysis.comment = f"Beskrivelse fra Jeeves ({len(jeeves_desc)} tegn)"
-        analysis.status_reason = "Jeeves har beskrivelse, nettside mangler"
+        analysis.status_reason = f"Beskrivelse fra Jeeves. {_no_page_reason(product)}"
         return analysis
 
     issues = []
@@ -279,7 +291,7 @@ def _analyze_specification(product: ProductData, jeeves: JeevesData = None) -> F
         if jeeves_spec:
             analysis.status = QualityStatus.OK
             analysis.comment = f"Spesifikasjon fra Jeeves: {jeeves_spec}"
-            analysis.status_reason = "Jeeves har spesifikasjon, nettside mangler"
+            analysis.status_reason = f"Spesifikasjon fra Jeeves. {_no_page_reason(product)}"
             return analysis
         if has_tech_in_desc:
             analysis.status = QualityStatus.WEAK
@@ -375,7 +387,7 @@ def _analyze_manufacturer(product: ProductData, jeeves: JeevesData = None) -> Fi
     if not mfr and jeeves_supplier:
         analysis.status = QualityStatus.OK
         analysis.comment = f"Produsent fra Jeeves: {jeeves_supplier}"
-        analysis.status_reason = "Jeeves har produsent, nettside mangler"
+        analysis.status_reason = f"Produsent fra Jeeves. {_no_page_reason(product)}"
         return analysis
 
     issues = []
@@ -430,7 +442,7 @@ def _analyze_manufacturer_article_number(product: ProductData, jeeves: JeevesDat
     if not mfr_num and jeeves_num:
         analysis.status = QualityStatus.OK
         analysis.comment = f"Produsentens varenummer fra Jeeves: {jeeves_num}"
-        analysis.status_reason = "Jeeves har varenummer, nettside mangler"
+        analysis.status_reason = f"Varenummer fra Jeeves. {_no_page_reason(product)}"
         return analysis
 
     analysis.status = QualityStatus.OK

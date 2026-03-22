@@ -13,7 +13,7 @@ from datetime import datetime
 from pathlib import Path
 from typing import Optional
 
-from fastapi import FastAPI, File, HTTPException, Query, Request, UploadFile
+from fastapi import Body, FastAPI, File, HTTPException, Query, Request, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse, HTMLResponse
 
@@ -64,7 +64,7 @@ app.add_middleware(
     CORSMiddleware,
     allow_origins=ALLOWED_ORIGINS,
     allow_credentials=True,
-    allow_methods=["GET", "POST", "DELETE"],
+    allow_methods=["GET", "POST", "PUT", "DELETE"],
     allow_headers=["*"],
 )
 
@@ -531,6 +531,188 @@ async def upload_excel(
         "estimated_time": est_str,
         "jeeves_loaded": _jeeves_index is not None and _jeeves_index.loaded,
         "message": f"{mode_label}{focus_label}: {n} produkter ({batch_info}). Estimert tid: {est_str}{jeeves_status}",
+    }
+
+
+@app.post("/api/analyze-catalog")
+async def analyze_from_catalog(
+    request: Request,
+    data: dict = Body(...),
+):
+    """Start analysis from the internal Jeeves catalog without Excel upload.
+
+    Supports multiple input modes:
+    - catalog_full: all products in the catalog
+    - catalog_random: random sample from catalog
+    - manual_articles: user-provided article numbers
+
+    Body: {
+        "source_mode": "catalog_full"|"catalog_random"|"manual_articles",
+        "sample_size": 100,       # for catalog_random
+        "article_numbers": [...], # for manual_articles
+        "analysis_mode": "full_enrichment"|"audit_only"|"focused_scan",
+        "focus_areas": [...],     # for focused_scan
+        "skip_cache": false
+    }
+    """
+    _cleanup_old_jobs()
+
+    client_ip = request.client.host if request.client else "unknown"
+    if not _check_rate_limit(client_ip):
+        raise HTTPException(
+            429,
+            f"For mange analyser. Maks {RATE_LIMIT_MAX} per {RATE_LIMIT_WINDOW} sekunder."
+        )
+
+    if not _jeeves_index or not _jeeves_index.loaded:
+        raise HTTPException(400, "Jeeves-katalog er ikke lastet inn. Kan ikke kjøre katalogbasert analyse.")
+
+    active_jobs = sum(
+        1 for j in jobs.values()
+        if j.status in (JobStatus.PENDING, JobStatus.RUNNING)
+    )
+    if active_jobs >= MAX_CONCURRENT_JOBS:
+        raise HTTPException(
+            429,
+            f"For mange samtidige analyser ({active_jobs}). Vent til en er ferdig."
+        )
+
+    source_mode = data.get("source_mode", "catalog_full")
+    analysis_mode = data.get("analysis_mode", AnalysisMode.FULL_ENRICHMENT.value)
+    focus_areas_raw = data.get("focus_areas", [])
+    skip_cache = data.get("skip_cache", False)
+
+    # Validate analysis_mode
+    valid_modes = [m.value for m in AnalysisMode]
+    if analysis_mode not in valid_modes:
+        raise HTTPException(400, f"Ugyldig analysemodus: {analysis_mode}")
+
+    parsed_focus_areas = []
+    if analysis_mode == AnalysisMode.FOCUSED_SCAN.value:
+        parsed_focus_areas = [a.strip() for a in focus_areas_raw if a.strip()]
+        if not parsed_focus_areas:
+            raise HTTPException(400, "Fokusert modus krever minst ett valgt område")
+
+    all_catalog_articles = _jeeves_index.all_article_numbers()
+    catalog_total = len(all_catalog_articles)
+
+    if source_mode == "catalog_full":
+        selected_articles = all_catalog_articles
+        batch_info = f"Hele katalogen: {catalog_total} artikler"
+        source_filename = "jeeves_katalog_full"
+
+    elif source_mode == "catalog_random":
+        sample_size = data.get("sample_size", 100)
+        if sample_size < 1:
+            raise HTTPException(400, "sample_size må være minst 1")
+        sample_size = min(sample_size, catalog_total)
+        seed = int(time.time())
+        rng = random.Random(seed)
+        selected_articles = rng.sample(all_catalog_articles, sample_size)
+        batch_info = f"Tilfeldig utvalg: {sample_size} av {catalog_total} (seed={seed})"
+        source_filename = f"jeeves_katalog_random_{sample_size}"
+
+    elif source_mode == "manual_articles":
+        raw_articles = data.get("article_numbers", [])
+        if not raw_articles:
+            raise HTTPException(400, "Ingen artikkelnumre oppgitt")
+        # Deduplicate and normalize
+        from backend.identifiers import normalize_identifier
+        seen = set()
+        selected_articles = []
+        for art in raw_articles:
+            norm = normalize_identifier(art)
+            if norm and norm not in seen:
+                seen.add(norm)
+                selected_articles.append(norm)
+        if not selected_articles:
+            raise HTTPException(400, "Ingen gyldige artikkelnumre etter validering")
+        batch_info = f"Manuelt oppgitt: {len(selected_articles)} artikler"
+        source_filename = f"manuell_{len(selected_articles)}_artikler"
+
+    else:
+        raise HTTPException(400, f"Ugyldig source_mode: {source_mode}. Bruk: catalog_full, catalog_random, manual_articles")
+
+    if not selected_articles:
+        raise HTTPException(400, "Ingen artikler å analysere")
+
+    if len(selected_articles) > MAX_ARTICLES:
+        raise HTTPException(
+            400,
+            f"For mange artikler ({len(selected_articles)}). Maks {MAX_ARTICLES} per analyse. Bruk tilfeldig utvalg."
+        )
+
+    # Create job
+    job_id = str(uuid.uuid4())[:8]
+    job = AnalysisJob(
+        job_id=job_id,
+        status=JobStatus.PENDING,
+        total_products=len(selected_articles),
+        created_at=time.time(),
+        batch_mode=source_mode,
+        batch_info=batch_info,
+        analysis_mode=analysis_mode,
+        focus_areas=parsed_focus_areas,
+        source_filename=source_filename,
+    )
+    jobs[job_id] = job
+
+    task = asyncio.create_task(
+        _run_analysis(job_id, selected_articles, skip_cache,
+                      analysis_mode=analysis_mode, focus_areas=parsed_focus_areas)
+    )
+    _background_tasks.add(task)
+    task.add_done_callback(_background_tasks.discard)
+
+    n = len(selected_articles)
+    if analysis_mode == AnalysisMode.AUDIT_ONLY.value:
+        est_seconds = n * 3 // SCRAPE_CONCURRENCY
+    elif analysis_mode == AnalysisMode.FOCUSED_SCAN.value:
+        est_seconds = n * 2 // SCRAPE_CONCURRENCY
+    else:
+        est_seconds = n * 5 // SCRAPE_CONCURRENCY
+    if est_seconds < 60:
+        est_str = f"~{est_seconds} sekunder"
+    elif est_seconds < 3600:
+        est_str = f"~{est_seconds // 60} minutter"
+    else:
+        est_str = f"~{est_seconds // 3600} timer {(est_seconds % 3600) // 60} minutter"
+
+    mode_labels = {
+        AnalysisMode.FULL_ENRICHMENT.value: "Full berikelse",
+        AnalysisMode.AUDIT_ONLY.value: "Kvalitetsrevisjon",
+        AnalysisMode.FOCUSED_SCAN.value: "Fokusert sjekk",
+    }
+    mode_label = mode_labels.get(analysis_mode, analysis_mode)
+
+    return {
+        "job_id": job_id,
+        "total_products": n,
+        "source_mode": source_mode,
+        "batch_info": batch_info,
+        "analysis_mode": analysis_mode,
+        "focus_areas": parsed_focus_areas,
+        "estimated_time": est_str,
+        "catalog_total": catalog_total,
+        "jeeves_loaded": True,
+        "message": f"{mode_label}: {n} produkter ({batch_info}). Estimert tid: {est_str}",
+    }
+
+
+@app.get("/api/catalog-info")
+async def get_catalog_info():
+    """Return info about the internal catalog for the frontend."""
+    if not _jeeves_index or not _jeeves_index.loaded:
+        return {
+            "loaded": False,
+            "count": 0,
+            "sample": [],
+        }
+    all_arts = _jeeves_index.all_article_numbers()
+    return {
+        "loaded": True,
+        "count": len(all_arts),
+        "sample": all_arts[:5],
     }
 
 
@@ -1948,14 +2130,32 @@ def _build_image_suggestion(
             reason=f"Norengros-bilde funnet ({current_status}). Konkurrentkilde — krever manuell godkjenning.",
         )
 
-    # No better image available — just report the issue
+    # No better image available — report the issue with producer search suggestion
     if current_status != "ok":
+        # Build a producer search hint using available catalog info
+        search_hint = None
+        producer = product_data.manufacturer
+        supplier_item = product_data.manufacturer_article_number
+        if producer:
+            search_terms = [producer]
+            if supplier_item:
+                search_terms.append(supplier_item)
+            elif product_data.product_name:
+                search_terms.append(product_data.product_name)
+            search_hint = " ".join(search_terms)
+
+        reason = f"Bildestatus: {current_status}. Ingen bedre bildekilde funnet automatisk."
+        if search_hint:
+            reason += f" Foreslått søk hos produsent: \"{search_hint}\""
+
         return ImageSuggestion(
             current_image_url=current_url,
             current_image_status=current_status,
+            suggested_source="producer_search" if producer else None,
+            suggested_source_url=None,
             confidence=0.0,
             review_required=True,
-            reason=f"Bildestatus: {current_status}. Ingen bedre bildekilde funnet automatisk.",
+            reason=reason,
         )
 
     return None
@@ -2131,8 +2331,8 @@ async def _run_analysis(
                     ):
                         product_data.verification_status = VerificationStatus.CDN_ONLY
                         product_data.verification_evidence = (
-                            f"Produkt bekreftet kun via CDN-bilde. "
-                            f"Ingen produktside tilgjengelig for identitetsverifisering."
+                            f"Produktbilde funnet i bildekatalogen, men ingen produktside med detaljer ble funnet. "
+                            f"Produktidentiteten er usikker — vurder manuelt."
                         )
                     logger.info(
                         f"[{job_id}] {article_number} found via CDN image "
@@ -2244,9 +2444,26 @@ async def _run_analysis(
                         analysis.norengros_lookup = norengros_data
 
                     # Step 5b: Image suggestion logic
+                    # Also pass Jeeves data to enrich producer search hints
                     analysis.image_suggestion = _build_image_suggestion(
                         product_data, image_summary, mfr_data, norengros_data,
                     )
+                    # Step 5b+: For low-quality images without a suggested replacement,
+                    # try to find a better image from the producer if we have catalog info
+                    if (analysis.image_suggestion
+                            and analysis.image_suggestion.current_image_status in ("low_quality", "missing")
+                            and not analysis.image_suggestion.suggested_image_url
+                            and jeeves_data):
+                        # Use Jeeves supplier + supplier_item_no for a targeted search hint
+                        producer = jeeves_data.supplier or product_data.manufacturer
+                        supplier_item = jeeves_data.supplier_item_no or product_data.manufacturer_article_number
+                        if producer and supplier_item:
+                            analysis.image_suggestion.reason = (
+                                f"Bildekvalitet lav ({analysis.image_suggestion.current_image_status}). "
+                                f"Søk hos produsent anbefalt: {producer} (art.nr: {supplier_item}). "
+                                f"Produsentens nettside bør prioriteres som bildekilde."
+                            )
+                            analysis.image_suggestion.suggested_source = "producer_search"
 
                     # Apply enrichment suggestions to field_analyses (PDF takes priority)
                     _apply_enrichment_to_analysis(analysis)

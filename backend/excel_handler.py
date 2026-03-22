@@ -269,18 +269,20 @@ def _create_overview_sheet(ws, results: list[ProductAnalysis]) -> None:
         _write_id_cell(ws, row_idx, 1, result.article_number)
         ws.cell(row=row_idx, column=2, value=pd.product_name or "")
         ws.cell(row=row_idx, column=3, value="Ja" if pd.found_on_onemed else "Nei")
-        # Verification status and evidence (P0-2 fix)
-        v_status = pd.verification_status.value if hasattr(pd.verification_status, 'value') else str(pd.verification_status)
-        v_cell = ws.cell(row=row_idx, column=4, value=v_status)
-        # Color-code verification: green=exact, yellow=weak, red=mismatch
+        # Verification status and evidence — business-friendly labels (Task 7)
         from backend.models import VerificationStatus as VS
+        v_label = VS.business_label(pd.verification_status)
+        v_cell = ws.cell(row=row_idx, column=4, value=v_label)
+        # Color-code verification: green=exact, yellow=weak, red=mismatch
         if pd.verification_status in (VS.EXACT_MATCH, VS.NORMALIZED_MATCH):
             v_cell.fill = PatternFill(start_color="C6EFCE", end_color="C6EFCE", fill_type="solid")
         elif pd.verification_status in (VS.CDN_ONLY, VS.UNVERIFIED, VS.SKU_IN_PAGE):
             v_cell.fill = PatternFill(start_color="FFEB9C", end_color="FFEB9C", fill_type="solid")
         elif pd.verification_status in (VS.MISMATCH, VS.AMBIGUOUS):
             v_cell.fill = PatternFill(start_color="FFC7CE", end_color="FFC7CE", fill_type="solid")
-        ws.cell(row=row_idx, column=5, value=pd.verification_evidence or "")
+        # Business-friendly evidence text
+        v_evidence = VS.business_evidence(pd.verification_status, pd.verification_evidence)
+        ws.cell(row=row_idx, column=5, value=v_evidence)
         ws.cell(row=row_idx, column=6, value=result.total_score)
         status_cell = ws.cell(row=row_idx, column=7, value=result.overall_status.value)
         _apply_status_style(status_cell, result.overall_status)
@@ -584,6 +586,31 @@ def _create_image_detail_sheet(ws, results: list[ProductAnalysis]) -> None:
     ws.freeze_panes = "A2"
     if row_idx > 2:
         ws.auto_filter.ref = f"A1:{get_column_letter(len(headers))}{row_idx - 1}"
+
+    # Add image suggestion summary section below main data
+    # Skip a row then add suggestion header
+    sugg_start = row_idx + 2
+    sugg_headers = [
+        "Artikkelnummer", "Nåværende status", "Foreslått bilde-URL",
+        "Bildekilde", "Kilde-URL", "Konfidensgrad", "Begrunnelse",
+    ]
+    for col, h in enumerate(sugg_headers, 1):
+        ws.cell(row=sugg_start, column=col, value=h)
+    _style_header(ws, sugg_start, len(sugg_headers))
+
+    sugg_row = sugg_start + 1
+    for result in results:
+        img_sugg = result.image_suggestion
+        if not img_sugg:
+            continue
+        _write_id_cell(ws, sugg_row, 1, result.article_number)
+        ws.cell(row=sugg_row, column=2, value=img_sugg.current_image_status or "")
+        ws.cell(row=sugg_row, column=3, value=img_sugg.suggested_image_url or "")
+        ws.cell(row=sugg_row, column=4, value=img_sugg.suggested_source or "")
+        ws.cell(row=sugg_row, column=5, value=img_sugg.suggested_source_url or "")
+        ws.cell(row=sugg_row, column=6, value=img_sugg.confidence if img_sugg.confidence else 0)
+        ws.cell(row=sugg_row, column=7, value=img_sugg.reason or "")
+        sugg_row += 1
 
 
 def _create_image_issues_sheet(ws, results: list[ProductAnalysis]) -> None:
@@ -1594,195 +1621,185 @@ def _determine_enrichment_status(result: ProductAnalysis) -> tuple[str, bool, st
     return "No Change", False, "Ingen endringer nødvendig"
 
 
+def _is_material_change(current: str | None, suggested: str | None) -> bool:
+    """Check if a suggested value is materially different from the current value.
+
+    Returns False if values are identical, near-identical, or if suggestion is empty.
+    """
+    if not suggested:
+        return False
+    if not current:
+        return True  # New value where none existed
+    # Normalize for comparison
+    cv = current.strip().lower()
+    sv = suggested.strip().lower()
+    if cv == sv:
+        return False
+    # Check if one is a substring of the other (minor variant)
+    if len(cv) > 10 and len(sv) > 10:
+        if cv in sv or sv in cv:
+            # Only material if significantly more content
+            if abs(len(cv) - len(sv)) < min(len(cv), len(sv)) * 0.2:
+                return False
+    return True
+
+
 def _create_inriver_import_sheet(ws, results: list[ProductAnalysis]) -> None:
     """Create the Inriver Import staging sheet.
 
-    One row per product with existing values, suggested values, and import workflow columns.
-    Designed as a real staging layer for business users before Inriver import.
+    Only includes rows where at least one field has a genuine improvement.
+    Each field has an approval column (Godkjent/Ikke godkjent).
+    Export logic: a value is included in the import only if:
+    1. There is a suggested improvement
+    2. The suggestion is materially different from the current value
+    3. The approval column is set to 'Godkjent'
+
+    Unchanged values and empty placeholders are NOT exported.
     """
-    headers = [
-        "Artikkelnummer",
-        "Produktnavn_eksisterende",
-        "Produktnavn_forslag",
-        "Beskrivelse_eksisterende",
-        "Beskrivelse_forslag",
-        "Spesifikasjon_eksisterende",
-        "Spesifikasjon_forslag",
-        "Kategori_eksisterende",
-        "Kategori_forslag",
-        "Pakningsinformasjon_eksisterende",
-        "Pakningsinformasjon_forslag",
-        "Produsent_eksisterende",
-        "Produsent_forslag",
-        "Produsent_artnr_eksisterende",
-        "Produsent_artnr_forslag",
+    # Field definitions for the import sheet
+    import_fields = [
+        ("Produktnavn", lambda r: r.product_data.product_name or ""),
+        ("Beskrivelse", lambda r: r.product_data.description or ""),
+        ("Spesifikasjon", lambda r: r.product_data.specification or (
+            "; ".join(f"{k}: {v}" for k, v in r.product_data.technical_details.items())
+            if r.product_data.technical_details else "")),
+        ("Kategori", lambda r: r.product_data.category or (
+            " > ".join(r.product_data.category_breadcrumb)
+            if r.product_data.category_breadcrumb else "")),
+        ("Pakningsinformasjon", lambda r: r.product_data.packaging_info or r.product_data.packaging_unit or ""),
+        ("Produsent", lambda r: r.product_data.manufacturer or ""),
+        ("Produsentens varenummer", lambda r: r.product_data.manufacturer_article_number or ""),
+    ]
+
+    headers = ["Artikkelnummer"]
+    for field_name, _ in import_fields:
+        headers.append(f"{field_name}_nåværende")
+        headers.append(f"{field_name}_forslag")
+        headers.append(f"{field_name}_godkjent")
+    headers.extend([
         "Datablad_URL",
         "Bilde_URL",
         "Quality_Score",
         "Enrichment_Status",
-        "Review_Required",
-        "Import_Approved",
-        "Import_Batch",
         "Kommentar",
         "Kilde",
         "Sist_oppdatert",
-    ]
+    ])
 
     # Write headers
     for col, header in enumerate(headers, 1):
         ws.cell(row=1, column=col, value=header)
     _style_header(ws, 1, len(headers))
 
+    # Style the approval columns differently
+    approval_fill = PatternFill(start_color="FFF2CC", end_color="FFF2CC", fill_type="solid")
+
     now_str = datetime.now().strftime("%Y-%m-%d %H:%M")
-    batch_id = f"Batch_{datetime.now().strftime('%Y_%m_%d')}"
 
     wrap_alignment = Alignment(wrap_text=True, vertical="top")
     top_alignment = Alignment(vertical="top")
 
-    for row_idx, result in enumerate(results, 2):
+    # Only include rows where at least one field has a material improvement
+    row_idx = 2
+    for result in results:
         pd = result.product_data
 
         # Determine enrichment status
-        enrichment_status, review_required, comment = _determine_enrichment_status(result)
+        enrichment_status, _review_req, comment = _determine_enrichment_status(result)
 
         # Collect all sources for this product
         sources = set()
         if pd.found_on_onemed:
             sources.add("onemed.no")
         if result.pdf_available:
-            sources.add("product datasheet")
-        if result.ai_enrichment or result.ai_score:
-            sources.add("AI suggestion")
+            sources.add("produktdatablad")
         for er in result.enrichment_results:
             if er.match_status != "NOT_FOUND":
                 if er.source_level == "internal_product_sheet":
-                    sources.add("product datasheet")
+                    sources.add("produktdatablad")
                 elif er.source_level == "manufacturer_source":
-                    sources.add("manufacturer website")
+                    sources.add("produsentens nettside")
         if not sources:
-            sources.add("existing catalog")
+            sources.add("eksisterende katalog")
+
+        # Check each field for material changes
+        has_any_change = False
+        field_data = []
+        for field_name, current_fn in import_fields:
+            current_val = current_fn(result)
+            suggested_val = _get_suggestion_for_field(result, field_name) or ""
+            # For specification, also check AI missing_specifications
+            if field_name == "Spesifikasjon" and not suggested_val:
+                ai = result.ai_enrichment or {}
+                missing_specs = ai.get("missing_specifications", [])
+                if missing_specs:
+                    suggested_val = "Manglende: " + ", ".join(missing_specs)
+            is_material = _is_material_change(current_val, suggested_val)
+            # Only include the suggestion if it's a material change
+            display_suggestion = suggested_val if is_material else ""
+            approval_default = "Ikke godkjent"  # Conservative default
+            if is_material:
+                has_any_change = True
+            field_data.append((current_val, display_suggestion, approval_default))
+
+        # Skip products with no material changes — do not pollute the import sheet
+        if not has_any_change:
+            continue
 
         # Col 1: Artikkelnummer
         _write_id_cell(ws, row_idx, 1, result.article_number, top_alignment)
 
-        # Col 2-3: Produktnavn
-        ws.cell(row=row_idx, column=2, value=pd.product_name or "").alignment = top_alignment
-        ws.cell(row=row_idx, column=3, value=_get_suggestion_for_field(result, "Produktnavn") or "").alignment = top_alignment
+        # Write field triplets (current, suggestion, approval)
+        col = 2
+        for (current_val, display_suggestion, approval_default) in field_data:
+            ws.cell(row=row_idx, column=col, value=current_val).alignment = wrap_alignment
+            col += 1
+            sugg_cell = ws.cell(row=row_idx, column=col, value=display_suggestion)
+            sugg_cell.alignment = wrap_alignment
+            if display_suggestion:
+                sugg_cell.fill = PatternFill(start_color="E2EFDA", end_color="E2EFDA", fill_type="solid")
+            col += 1
+            approval_cell = ws.cell(row=row_idx, column=col, value=approval_default)
+            approval_cell.alignment = top_alignment
+            approval_cell.fill = approval_fill
+            col += 1
 
-        # Col 4-5: Beskrivelse
-        ws.cell(row=row_idx, column=4, value=pd.description or "").alignment = wrap_alignment
-        ws.cell(row=row_idx, column=5, value=_get_suggestion_for_field(result, "Beskrivelse") or "").alignment = wrap_alignment
-
-        # Col 6-7: Spesifikasjon
-        spec_existing = pd.specification or ""
-        if not spec_existing and pd.technical_details:
-            spec_existing = "; ".join(f"{k}: {v}" for k, v in pd.technical_details.items())
-        ws.cell(row=row_idx, column=6, value=spec_existing).alignment = wrap_alignment
-
-        # Spec suggestion: combine AI missing_specifications with enrichment
-        spec_suggestion = _get_suggestion_for_field(result, "Spesifikasjon") or ""
-        ai = result.ai_enrichment or {}
-        missing_specs = ai.get("missing_specifications", [])
-        if missing_specs and not spec_suggestion:
-            spec_suggestion = "Manglende: " + ", ".join(missing_specs)
-        ws.cell(row=row_idx, column=7, value=spec_suggestion).alignment = wrap_alignment
-
-        # Col 8-9: Kategori
-        cat_existing = pd.category or ""
-        if not cat_existing and pd.category_breadcrumb:
-            cat_existing = " > ".join(pd.category_breadcrumb)
-        ws.cell(row=row_idx, column=8, value=cat_existing).alignment = top_alignment
-        ws.cell(row=row_idx, column=9, value=_get_suggestion_for_field(result, "Kategori") or "").alignment = top_alignment
-
-        # Col 10-11: Pakningsinformasjon
-        pkg_existing = pd.packaging_info or pd.packaging_unit or ""
-        ws.cell(row=row_idx, column=10, value=pkg_existing).alignment = top_alignment
-        ws.cell(row=row_idx, column=11, value=_get_suggestion_for_field(result, "Pakningsinformasjon") or "").alignment = top_alignment
-
-        # Col 12-13: Produsent
-        ws.cell(row=row_idx, column=12, value=pd.manufacturer or "").alignment = top_alignment
-        ws.cell(row=row_idx, column=13, value=_get_suggestion_for_field(result, "Produsent") or "").alignment = top_alignment
-
-        # Col 14-15: Produsent artnr
-        ws.cell(row=row_idx, column=14, value=pd.manufacturer_article_number or "").alignment = top_alignment
-        ws.cell(row=row_idx, column=15, value=_get_suggestion_for_field(result, "Produsentens varenummer") or "").alignment = top_alignment
-
-        # Col 16: Datablad URL
-        ws.cell(row=row_idx, column=16, value=result.pdf_url or "").alignment = top_alignment
-
-        # Col 17: Bilde URL
-        ws.cell(row=row_idx, column=17, value=pd.image_url or "").alignment = top_alignment
-
-        # Col 18: Quality Score
+        # Trailing columns
+        ws.cell(row=row_idx, column=col, value=result.pdf_url or "").alignment = top_alignment; col += 1
+        ws.cell(row=row_idx, column=col, value=pd.image_url or "").alignment = top_alignment; col += 1
+        # Quality Score
         score = result.total_score
-        # Incorporate AI score if available
         if result.ai_score and "overall_score" in result.ai_score:
-            ai_score = result.ai_score["overall_score"]
-            score = round(score * 0.4 + ai_score * 0.6, 1)
-        ws.cell(row=row_idx, column=18, value=score).alignment = top_alignment
-
-        # Col 19: Enrichment_Status
-        status_cell = ws.cell(row=row_idx, column=19, value=enrichment_status)
+            ai_score_val = result.ai_score["overall_score"]
+            score = round(score * 0.4 + ai_score_val * 0.6, 1)
+        ws.cell(row=row_idx, column=col, value=score).alignment = top_alignment; col += 1
+        # Enrichment_Status
+        status_cell = ws.cell(row=row_idx, column=col, value=enrichment_status)
         status_cell.alignment = top_alignment
         if enrichment_status in INRIVER_STATUS_COLORS:
             status_cell.fill = INRIVER_STATUS_COLORS[enrichment_status]
             status_cell.font = INRIVER_STATUS_FONTS.get(enrichment_status, Font())
+        col += 1
+        ws.cell(row=row_idx, column=col, value=comment).alignment = wrap_alignment; col += 1
+        ws.cell(row=row_idx, column=col, value="; ".join(sorted(sources))).alignment = top_alignment; col += 1
+        ws.cell(row=row_idx, column=col, value=now_str).alignment = top_alignment; col += 1
 
-        # Col 20: Review_Required
-        ws.cell(row=row_idx, column=20, value="Yes" if review_required else "No").alignment = top_alignment
+        row_idx += 1
 
-        # Col 21: Import_Approved (always No by default)
-        ws.cell(row=row_idx, column=21, value="No").alignment = top_alignment
+    if row_idx == 2:
+        ws.cell(row=2, column=1, value="Ingen produkter med forbedringsforslag")
 
-        # Col 22: Import_Batch
-        ws.cell(row=row_idx, column=22, value=batch_id).alignment = top_alignment
-
-        # Col 23: Kommentar
-        ws.cell(row=row_idx, column=23, value=comment).alignment = wrap_alignment
-
-        # Col 24: Kilde
-        ws.cell(row=row_idx, column=24, value="; ".join(sorted(sources))).alignment = top_alignment
-
-        # Col 25: Sist_oppdatert
-        ws.cell(row=row_idx, column=25, value=now_str).alignment = top_alignment
-
-    # Column widths - readable for business users
-    col_widths = {
-        1: 16,   # Artikkelnummer
-        2: 30,   # Produktnavn_eksisterende
-        3: 30,   # Produktnavn_forslag
-        4: 40,   # Beskrivelse_eksisterende
-        5: 40,   # Beskrivelse_forslag
-        6: 35,   # Spesifikasjon_eksisterende
-        7: 35,   # Spesifikasjon_forslag
-        8: 25,   # Kategori_eksisterende
-        9: 25,   # Kategori_forslag
-        10: 22,  # Pakningsinformasjon_eksisterende
-        11: 22,  # Pakningsinformasjon_forslag
-        12: 20,  # Produsent_eksisterende
-        13: 20,  # Produsent_forslag
-        14: 20,  # Produsent_artnr_eksisterende
-        15: 20,  # Produsent_artnr_forslag
-        16: 30,  # Datablad_URL
-        17: 30,  # Bilde_URL
-        18: 14,  # Quality_Score
-        19: 20,  # Enrichment_Status
-        20: 16,  # Review_Required
-        21: 16,  # Import_Approved
-        22: 20,  # Import_Batch
-        23: 40,  # Kommentar
-        24: 25,  # Kilde
-        25: 18,  # Sist_oppdatert
-    }
-    for col, width in col_widths.items():
-        ws.column_dimensions[get_column_letter(col)].width = width
+    # Auto-size columns based on header length
+    for col in range(1, len(headers) + 1):
+        header_text = headers[col - 1]
+        ws.column_dimensions[get_column_letter(col)].width = max(14, min(40, len(header_text) + 4))
 
     # Freeze header row
     ws.freeze_panes = "A2"
 
     # Enable auto-filter on all columns
-    if len(results) > 0:
-        ws.auto_filter.ref = f"A1:{get_column_letter(len(headers))}{len(results) + 1}"
+    if row_idx > 2:
+        ws.auto_filter.ref = f"A1:{get_column_letter(len(headers))}{row_idx - 1}"
 
 
 
