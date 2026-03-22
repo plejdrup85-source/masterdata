@@ -1613,10 +1613,11 @@ def _create_family_sheet(ws, results: list[ProductAnalysis]) -> None:
 
     sorted_members = sorted(all_members, key=sort_key)
 
-    # Headers
+    # Headers — P1-1: added Spesifikasjon column so users can see what differentiates children
     headers = [
         "Artikkelnummer",
         "Produktnavn",
+        "Spesifikasjon",
         "Familie_ID",
         "Familienavn",
         "Rolle",
@@ -1667,6 +1668,7 @@ def _create_family_sheet(ws, results: list[ProductAnalysis]) -> None:
         row_data = [
             member.article_number,
             member.product_name,
+            member.specification or "",
             member.family_id or "",
             member.family_name or "",
             {"mother": "Mor", "child": "Barn", "standalone": "Frittstående"}.get(member.role, member.role),
@@ -1690,7 +1692,7 @@ def _create_family_sheet(ws, results: list[ProductAnalysis]) -> None:
 
         for val in row_data:
             cell = ws.cell(row=row_idx, column=c, value=val)
-            cell.alignment = wrap_align if c in (2, 14, 18, 19, 20, 21) else top_align
+            cell.alignment = wrap_align if c in (2, 3, 15, 19, 20, 21, 22) else top_align
             # Apply role-based styling
             if member.role == "mother":
                 cell.fill = mother_fill
@@ -1702,11 +1704,11 @@ def _create_family_sheet(ws, results: list[ProductAnalysis]) -> None:
 
         row_idx += 1
 
-    # Column widths
+    # Column widths (22 columns: +1 for Spesifikasjon at col 3)
     col_widths = {
-        1: 18, 2: 35, 3: 12, 4: 30, 5: 14, 6: 18, 7: 10,
-        8: 18, 9: 14, 10: 18, 11: 14, 12: 18, 13: 14,
-        14: 30, 15: 25, 16: 14, 17: 14, 18: 40, 19: 35, 20: 40, 21: 30,
+        1: 18, 2: 35, 3: 35, 4: 12, 5: 30, 6: 14, 7: 18, 8: 10,
+        9: 18, 10: 14, 11: 18, 12: 14, 13: 18, 14: 14,
+        15: 30, 16: 25, 17: 14, 18: 14, 19: 40, 20: 35, 21: 40, 22: 30,
     }
     for col, width in col_widths.items():
         ws.column_dimensions[get_column_letter(col)].width = width

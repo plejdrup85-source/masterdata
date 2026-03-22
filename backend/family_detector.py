@@ -244,7 +244,11 @@ def _extract_variant_dimensions(
 ) -> list[VariantDimension]:
     """Extract all variant dimensions from a product's data.
 
-    Checks name, specification text, and structured technical details.
+    Checks product name, specification text, and structured technical details.
+    In real Jeeves data, variant info (size, gauge, color, dimensions) often
+    lives in the Specification field rather than the Item Description.
+    All three sources are parsed with the same regex patterns.
+
     Returns list of detected variant dimensions.
     """
     dims = []
@@ -252,61 +256,81 @@ def _extract_variant_dimensions(
     spec = specification or ""
     td = technical_details or {}
 
-    # ── From product name ──
+    def _already_has(dim_name: str) -> bool:
+        return any(d.dimension_name == dim_name for d in dims)
 
-    # Size labels (S/M/L/XL)
-    m = _SIZE_PATTERN.search(name)
-    if m:
-        dims.append(VariantDimension("Størrelse", m.group(0).upper(), "name"))
+    # ── Helper: apply patterns to a text field ──
+    def _extract_from_text(text: str, source_label: str) -> None:
+        """Apply all variant regex patterns to a text field."""
+        if not text:
+            return
 
-    # Numbered sizes (str 4, størrelse 6)
-    m = _NUMBERED_SIZE_PATTERN.search(name)
-    if m:
-        dims.append(VariantDimension("Størrelse", m.group(1), "name"))
+        # Size labels (S/M/L/XL) — only at word boundary
+        if not _already_has("Størrelse"):
+            m = _SIZE_PATTERN.search(text)
+            if m:
+                dims.append(VariantDimension("Størrelse", m.group(0).upper(), source_label))
 
-    # Gauge
-    m = _GAUGE_PATTERN.search(name)
-    if m:
-        dims.append(VariantDimension("Gauge", f"{m.group(1)}G", "name"))
+        # Numbered sizes (str 4, størrelse 6)
+        if not _already_has("Størrelse"):
+            m = _NUMBERED_SIZE_PATTERN.search(text)
+            if m:
+                dims.append(VariantDimension("Størrelse", m.group(1), source_label))
 
-    # Dimensions (5x5cm)
-    m = _DIMENSION_PATTERN.search(name)
-    if m:
-        unit = m.group(2) or ""
-        dims.append(VariantDimension("Dimensjon", f"{m.group(1)}{unit}", "name"))
+        # Gauge (18G, 21G)
+        if not _already_has("Gauge"):
+            m = _GAUGE_PATTERN.search(text)
+            if m:
+                dims.append(VariantDimension("Gauge", f"{m.group(1)}G", source_label))
 
-    # Volume (2ml)
-    m = _VOLUME_PATTERN.search(name)
-    if m:
-        dims.append(VariantDimension("Volum", f"{m.group(1)}{m.group(2)}", "name"))
+        # Dimensions (5x5cm, 10x20cm)
+        if not _already_has("Dimensjon"):
+            m = _DIMENSION_PATTERN.search(text)
+            if m:
+                unit = m.group(2) or ""
+                dims.append(VariantDimension("Dimensjon", f"{m.group(1)}{unit}", source_label))
 
-    # CH/French size
-    m = _CH_PATTERN.search(name)
-    if m:
-        dims.append(VariantDimension("CH", f"CH{m.group(1)}", "name"))
+        # Volume (30ml, 2ml)
+        if not _already_has("Volum"):
+            m = _VOLUME_PATTERN.search(text)
+            if m:
+                dims.append(VariantDimension("Volum", f"{m.group(1)}{m.group(2)}", source_label))
 
-    # Suture thread size
-    m = _SUTURE_SIZE_PATTERN.search(name)
-    if m:
-        dims.append(VariantDimension("Trådstørrelse", m.group(1), "name"))
+        # CH/French size (CH12)
+        if not _already_has("CH"):
+            m = _CH_PATTERN.search(text)
+            if m:
+                dims.append(VariantDimension("CH", f"CH{m.group(1)}", source_label))
 
-    # Length (if not already captured as part of dimension)
-    if not any(d.dimension_name == "Dimensjon" for d in dims):
-        m = _LENGTH_PATTERN.search(name)
-        if m:
-            dims.append(VariantDimension("Lengde", f"{m.group(1)}{m.group(2)}", "name"))
+        # Suture thread size (3-0, 4/0)
+        if not _already_has("Trådstørrelse"):
+            m = _SUTURE_SIZE_PATTERN.search(text)
+            if m:
+                dims.append(VariantDimension("Trådstørrelse", m.group(1), source_label))
 
-    # Color
-    name_lower = name.lower()
-    for color in _COLOR_WORDS:
-        if re.search(rf"\b{re.escape(color)}\b", name_lower):
-            dims.append(VariantDimension("Farge", color.capitalize(), "name"))
-            break  # Only one color per product
+        # Length (25mm, 40cm) — only if no dimension already captured
+        if not _already_has("Dimensjon") and not _already_has("Lengde"):
+            m = _LENGTH_PATTERN.search(text)
+            if m:
+                dims.append(VariantDimension("Lengde", f"{m.group(1)}{m.group(2)}", source_label))
 
-    # Laterality
-    m = _LATERALITY_PATTERN.search(name)
-    if m:
-        dims.append(VariantDimension("Sidevalg", m.group(1).capitalize(), "name"))
+        # Color
+        if not _already_has("Farge"):
+            text_lower = text.lower()
+            for color in _COLOR_WORDS:
+                if re.search(rf"\b{re.escape(color)}\b", text_lower):
+                    dims.append(VariantDimension("Farge", color.capitalize(), source_label))
+                    break
+
+        # Laterality (venstre/høyre)
+        if not _already_has("Sidevalg"):
+            m = _LATERALITY_PATTERN.search(text)
+            if m:
+                dims.append(VariantDimension("Sidevalg", m.group(1).capitalize(), source_label))
+
+    # ── Apply patterns: name first (highest priority), then specification ──
+    _extract_from_text(name, "name")
+    _extract_from_text(spec, "spec")
 
     # ── From technical_details (structured key-value) ──
     td_lower = {k.lower().strip(): v for k, v in td.items()}
@@ -323,8 +347,7 @@ def _extract_variant_dimensions(
     ]:
         for k, v in td_lower.items():
             if re.search(key_pattern, k, re.IGNORECASE) and v.strip():
-                # Only add if not already detected from name
-                if not any(d.dimension_name == dim_name for d in dims):
+                if not _already_has(dim_name):
                     dims.append(VariantDimension(dim_name, v.strip(), "technical_details"))
                 break
 
@@ -410,12 +433,18 @@ def _score_family(members: list[_ProductRecord]) -> tuple[float, str, list[str]]
     """Score a candidate family's grouping quality.
 
     Returns (confidence, reason, signals).
+
+    Key constraints:
+    - P0-2: families with zero detected variant dimensions are capped at 0.40
+    - P0-3: unknown-brand families are penalized and require stronger evidence
+    - P1-2: families >15 members get a size warning
     """
     if len(members) < 2:
         return 0.0, "Kun ett produkt — ikke en familie", []
 
     signals = []
     score = 0.0
+    has_brand = False
 
     # ── Signal 1: Multiple products share exact base name ──
     base_names = {m.base_name for m in members}
@@ -423,7 +452,6 @@ def _score_family(members: list[_ProductRecord]) -> tuple[float, str, list[str]]
         score += 0.30
         signals.append("Alle deler samme basenavn")
     else:
-        # Base names differ slightly — weaker signal
         score += 0.10
         signals.append("Basenavn varierer noe")
 
@@ -431,12 +459,13 @@ def _score_family(members: list[_ProductRecord]) -> tuple[float, str, list[str]]
     brands = {m.brand for m in members if m.brand}
     if len(brands) == 1:
         score += 0.20
+        has_brand = True
         signals.append(f"Felles merkevare: {brands.pop()}")
     elif len(brands) == 0:
-        # No brand info — neutral
-        signals.append("Ingen merkevare tilgjengelig")
+        # P0-3: Unknown brand — penalize to require stronger evidence
+        score -= 0.10
+        signals.append("ADVARSEL: Ingen merkevare — krever sterkere bevis for gruppering")
     else:
-        # Multiple brands — probably wrong grouping
         score -= 0.20
         signals.append(f"Ulike merkevarer: {brands} — mulig feilgruppering")
 
@@ -449,12 +478,15 @@ def _score_family(members: list[_ProductRecord]) -> tuple[float, str, list[str]]
             for d in m.variant_dims:
                 all_dim_names.add(d.dimension_name)
 
-    if members_with_dims >= 2 and all_dim_names:
+    has_variant_dims = members_with_dims >= 2 and len(all_dim_names) > 0
+    if has_variant_dims:
         score += 0.25
         signals.append(f"Variantdimensjoner: {', '.join(sorted(all_dim_names))}")
     elif members_with_dims == 1:
         score += 0.05
         signals.append("Bare én variant har dimensjonsdata")
+    else:
+        signals.append("ADVARSEL: Ingen variantdimensjoner oppdaget")
 
     # ── Signal 4: Shared product type keyword ──
     shared_types = set()
@@ -475,21 +507,22 @@ def _score_family(members: list[_ProductRecord]) -> tuple[float, str, list[str]]
         signals.append(f"Ulike kategorier: {categories}")
 
     # ── Signal 6: Family size ──
-    # Very large families (>20) are suspicious
-    if len(members) > 20:
-        score -= 0.10
-        signals.append(f"Stor familie ({len(members)} produkter) — verifiser")
+    if len(members) > 15:
+        # P1-2: Large family warning
+        score -= 0.05
+        signals.append(
+            f"ADVARSEL: Stor familie ({len(members)} produkter) — "
+            f"kan trenge oppdeling i underfamilier"
+        )
     elif len(members) >= 3:
         score += 0.05
         signals.append(f"Rimelig familiestørrelse ({len(members)})")
 
     # ── Signal 7: Variant dimension consistency ──
-    # Good families have the SAME dimension type(s) across members
     dim_counter: dict[str, int] = defaultdict(int)
     for m in members:
         for d in m.variant_dims:
             dim_counter[d.dimension_name] += 1
-    # Dimension is consistent if it appears in majority of members
     consistent_dims = [
         name for name, count in dim_counter.items()
         if count >= len(members) * 0.6
@@ -498,8 +531,19 @@ def _score_family(members: list[_ProductRecord]) -> tuple[float, str, list[str]]
         score += 0.10
         signals.append(f"Konsistente dimensjoner: {', '.join(consistent_dims)}")
 
-    # Clamp
+    # ── P0-2 ENFORCEMENT: Cap confidence when no variant dimensions detected ──
+    # Without variant dimensions, the family structure is not actionable for
+    # Inriver/webshop — even if the name match is perfect.
     score = max(0.0, min(1.0, score))
+    if not has_variant_dims:
+        score = min(score, 0.40)
+        signals.append("Konfidenstak: maks 0.40 uten variantdimensjoner")
+
+    # ── P0-3 ENFORCEMENT: Extra penalty for unknown-brand families ──
+    # Without brand, require both product type keyword AND variant dims to score well
+    if not has_brand and not has_variant_dims:
+        score = min(score, 0.30)
+        signals.append("Konfidenstak: maks 0.30 uten merkevare og uten varianter")
 
     # Build reason
     if score >= 0.7:
@@ -557,23 +601,32 @@ def _choose_mother(
 
 
 def _build_family_name(members: list[_ProductRecord]) -> str:
-    """Build a human-readable family name from the shared base title."""
+    """Build a human-readable family name from the original product names.
+
+    Uses the original product name (not the normalized base name) for proper
+    capitalization and readability. Picks the most common original name,
+    or if all are identical, uses that directly.
+    """
     if not members:
         return ""
 
-    # Use the most common base_name
+    # Count original product names to find the most common one
+    name_counts: dict[str, int] = defaultdict(int)
+    for m in members:
+        if m.product_name:
+            name_counts[m.product_name.strip()] += 1
+
+    if name_counts:
+        # Use the most frequent original name (preserves original capitalization)
+        best_name = max(name_counts, key=name_counts.get)
+        return best_name
+
+    # Fallback to base name with title case
     base_names = [m.base_name for m in members if m.base_name]
-    if not base_names:
-        return members[0].product_name or ""
+    if base_names:
+        return max(base_names, key=len).title()
 
-    # Pick the longest base name (most descriptive)
-    best_base = max(base_names, key=len)
-
-    # Capitalize first letter
-    if best_base:
-        best_base = best_base[0].upper() + best_base[1:]
-
-    return best_base
+    return ""
 
 
 # ── Main API ──
@@ -643,7 +696,14 @@ def detect_families(
         family_name = _build_family_name(group_records)
         variant_dim_names = _determine_variant_dimensions_for_family(group_records)
         mother_article = _choose_mother(group_records)
-        review_required = confidence < 0.65
+
+        # P0-2: Enforce confidence cap and review when no variant dimensions detected.
+        # _score_family may see "some members have dims" but if those dims don't have
+        # 2+ distinct values, variant_dim_names is empty and the family isn't actionable.
+        has_dims = len(variant_dim_names) > 0
+        if not has_dims:
+            confidence = min(confidence, 0.40)
+        review_required = confidence < 0.65 or not has_dims
 
         family = ProductFamily(
             family_id=family_id,
@@ -709,12 +769,14 @@ def detect_families(
 
     all_members = list(member_lookup.values())
 
-    # Step 5: Summary logging
-    family_products = sum(f.confidence >= min_confidence for f in families)
+    # Step 5: Summary logging and diagnostics
     total_in_families = sum(len(f.members) for f in families)
     standalone_count = sum(1 for m in all_members if m.role == "standalone")
     strong_families = sum(1 for f in families if f.confidence >= 0.65)
     weak_families = sum(1 for f in families if f.confidence < 0.65)
+    families_with_dims = sum(1 for f in families if f.variant_dimension_names)
+    families_without_dims = len(families) - families_with_dims
+    large_families = sum(1 for f in families if len(f.members) > 15)
 
     logger.info(
         f"Family detection complete: "
@@ -722,6 +784,29 @@ def detect_families(
         f"{total_in_families} products in families, "
         f"{standalone_count} standalone"
     )
+    logger.info(
+        f"Variant dimensions: {families_with_dims} families with dimensions, "
+        f"{families_without_dims} without"
+    )
+
+    # P1-4: Summary-level warning when no dimensions are detected
+    if families and families_without_dims == len(families):
+        logger.warning(
+            "ADVARSEL: Ingen familier har variantdimensjoner! "
+            "Spesifikasjonsdata kan mangle eller ikke bli gjenkjent. "
+            "Familiestrukturen er ikke handlingsbar for Inriver/webshop uten varianter."
+        )
+    elif families_without_dims > 0:
+        logger.warning(
+            f"{families_without_dims} av {len(families)} familier mangler "
+            f"variantdimensjoner — disse krever manuell gjennomgang"
+        )
+
+    if large_families:
+        logger.warning(
+            f"{large_families} familier har mer enn 15 medlemmer — "
+            f"vurder oppdeling i underfamilier"
+        )
 
     return families, all_members
 
