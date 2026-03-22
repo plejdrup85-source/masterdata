@@ -1107,47 +1107,6 @@ async def scrape_product(
                     f"{clean_num}: not in SKU index, skipping sitemap scan (strict input mode)"
                 )
 
-        # Strategy 3.5: Targeted sitemap scan for CDN-confirmed products
-        # When CDN confirms the product exists but the SKU index doesn't have it,
-        # do a limited sitemap scan to find the product page. This is much cheaper
-        # than full discovery (max 200 pages) and incrementally builds the index.
-        if cdn_exists and not enable_discovery:
-            logger.info(
-                f"{clean_num}: CDN confirmed, attempting targeted sitemap scan "
-                f"(max 200 pages)"
-            )
-            product_url = await _find_product_url_via_sitemap(
-                client, clean_num, max_pages=200
-            )
-            if product_url:
-                response = await _fetch_with_retry(client, product_url)
-                if response and response.status_code == 200:
-                    product = _parse_product_page(response.text, clean_num)
-                    product.product_url = str(response.url)
-                    v_status, v_evidence = _verify_sku_match(
-                        response.text, clean_num
-                    )
-                    product.verification_status = v_status
-                    product.verification_evidence = v_evidence
-                    if v_status == VerificationStatus.MISMATCH:
-                        logger.warning(
-                            f"SKU MISMATCH for {clean_num} at {product_url}: "
-                            f"{v_evidence}"
-                        )
-                        product.error = f"SKU-mismatch: {v_evidence}"
-                        product.found_on_onemed = False
-                        product.multiple_hits = True
-                    elif v_status == VerificationStatus.UNVERIFIED:
-                        logger.warning(
-                            f"SKU UNVERIFIED for {clean_num}: {v_evidence}"
-                        )
-                        product.error = (
-                            f"Identitet ikke verifisert: {v_evidence}"
-                        )
-                        product.multiple_hits = True
-                    _save_to_cache(product)
-                    return product
-
         # Strategy 4: If CDN image exists, product MAY be in the OneMed system
         # CDN image alone is WEAK evidence — mark as CDN_ONLY, not as fully verified.
         # found_on_onemed=True allows the pipeline to continue, but verification_status
