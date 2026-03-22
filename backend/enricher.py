@@ -1058,6 +1058,26 @@ def final_quality_gate(suggestions: list[EnrichmentSuggestion]) -> list[Enrichme
                 )
                 continue
 
+        # Containment check: if suggested text contains most of current text's
+        # tokens, the "improvement" is just existing text + noise (variant data,
+        # metadata, etc.) — not a real improvement.
+        if s.current_value and len(s.current_value) > 30:
+            current_tokens = set(s.current_value.lower().split())
+            suggested_tokens = set(val.lower().split())
+            if current_tokens:
+                containment = len(current_tokens & suggested_tokens) / len(current_tokens)
+                if containment > 0.85:
+                    new_tokens = suggested_tokens - current_tokens
+                    new_ratio = len(new_tokens) / len(suggested_tokens) if suggested_tokens else 0
+                    if new_ratio < 0.20:
+                        logger.info(
+                            f"[quality-gate] {s.field_name} dropped: suggestion contains "
+                            f"{containment:.0%} of existing content with only "
+                            f"{len(new_tokens)} new tokens ({new_ratio:.0%}) — "
+                            f"not a meaningful addition"
+                        )
+                        continue
+
         # Run field validation one more time
         is_valid, reason = _validate_suggestion_value(val, s.field_name)
         if not is_valid:

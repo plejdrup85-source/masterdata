@@ -111,7 +111,16 @@ Din oppgave er å foreslå forbedringer til produktdata basert på det som aller
   - Forbedre pakningsinformasjon basert på tilgjengelig info
 - Merk tydelig hva som er FORSLAG vs. FAKTA
 - Vær konservativ - dette er medisinske produkter
-- Svar ALLTID med gyldig JSON"""
+- Svar ALLTID med gyldig JSON
+
+## KRITISK: VARIANTDATA OG DUPLIKATER
+- ALDRI inkluder informasjon om ANDRE varianter/størrelser av produktet i beskrivelsen.
+  PDF-datablader lister ofte alle varianter (alle størrelser, farger, REF-numre).
+  Beskrivelsen skal KUN gjelde det spesifikke produktet som analyseres — ikke søskenprodukter.
+- ALDRI gjenta innhold som allerede finnes i den eksisterende beskrivelsen uten vesentlig forbedring.
+  Hvis eksisterende beskrivelse allerede dekker informasjonen godt, returner improved_description: null.
+- Fjern alltid: varianttabeller, artikkelnumre for andre produkter, pakningsratioer (f.eks. "120 / 7200"),
+  "Salgsenhet:", "Produktdatablad", og lignende PDF-metadata."""
 
 ENRICHMENT_USER_TEMPLATE = """Foreslå forbedringer for følgende produktdata:
 
@@ -450,6 +459,18 @@ Hvis NOEN av følgende fjernes eller svekkes:
 - materialegenskaper
 - beskyttelsesnivå
 → Sett "verdict": "REJECTED_CONTENT_DEGRADATION"
+
+### 3. Variantdatasjekk
+Hvis foreslått tekst inneholder artikkelnumre, størrelseslister, pakningsinformasjon
+eller spesifikasjoner for ANDRE produktvarianter enn det aktuelle produktet:
+→ Sett "verdict": "REJECTED_CONTENT_DEGRADATION"
+→ reject_reason: "Inneholder variantdata for andre produkter"
+Eksempler på variantdata: "222001 SELEFA® ... 120 / 10800", "6415 Undersøkelseshansker ... XS"
+
+### 4. Duplikatsjekk mot eksisterende
+Hvis foreslått tekst i hovedsak gjentar eksisterende webshop-innhold uten vesentlig
+ny informasjon, bedre struktur, eller klarere språk:
+→ Sett "verdict": "NO_MEANINGFUL_IMPROVEMENT"
 
 ## KONTEKST
 Produkttype: Medisinske forbruksvarer

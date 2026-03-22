@@ -72,6 +72,16 @@ _TABLE_ROW_PATTERN = re.compile(
     r"^\s*(?:\d[\d.,]*\s+){2,}"
 )
 
+# Variant row: article number + product text + packaging ratio (e.g. "222001 SELEFA® ... 120 / 10800")
+_VARIANT_ROW_INLINE = re.compile(
+    r"\b\d{4,7}\s+\S+.*?\d+\s*/\s*\d+"
+)
+
+# Section markers that signal end of description content
+_SECTION_END_MARKERS = re.compile(
+    r"(?i)\b(?:salgsenhet|transportkartong|produktdatablad)\b"
+)
+
 
 def _is_junk_line(line: str) -> bool:
     """Determine if a line is non-description content that should be dropped."""
@@ -105,10 +115,19 @@ def _is_junk_line(line: str) -> bool:
     if _TABLE_ROW_PATTERN.match(stripped):
         return True
 
+    # Section-end markers: "Salgsenhet:", "Transportkartong", "Produktdatablad"
+    if _SECTION_END_MARKERS.search(stripped):
+        return True
+
     # Lines starting with "Produsent:", "Antall pr", "Art.nr" etc. — metadata, not description
     if re.match(r"(?i)^\s*(?:produsent|manufacturer|leverandør|supplier)\s*:", stripped):
         return True
     if re.match(r"(?i)^\s*antall\s*(?:pr|per|i|/)\s*", stripped):
+        return True
+
+    # Variant row inline: article number + text + packaging ratio anywhere in line
+    # e.g. "222001 SELEFA® Optimia gaskompresser, Hvit 120 / 10800"
+    if _VARIANT_ROW_INLINE.search(stripped):
         return True
 
     # >40% of tokens are numeric → probably a data row
@@ -132,6 +151,52 @@ def _is_junk_line(line: str) -> bool:
     return False
 
 
+def _strip_variant_blocks(text: str) -> str:
+    """Remove inline variant table data that PDF extraction merged into description text.
+
+    Medical product PDFs list all size/color variants in a table. When pdfplumber
+    extracts this, the table rows can merge with description text into one block:
+      "...beskyttelse osv. 222001 SELEFA® Optimia gaskompresser, Hvit 120 / 10800
+       7,5 x 7,5 cm, 222002 SELEFA® ..."
+
+    This function detects sequences of article-number + packaging-ratio patterns
+    embedded in text and removes the variant block while preserving descriptive text
+    both before and after it.
+    """
+    # Pattern: 4-7 digit article number followed by text and packaging ratio (N/N)
+    # This catches variant rows like "222001 SELEFA® Optimia gaskompresser, Hvit 120 / 10800"
+    variant_entry = re.compile(
+        r"\b(\d{4,7})\s+[A-ZÆØÅa-zæøå®].{5,}?\d+\s*/\s*\d+"
+    )
+
+    matches = list(variant_entry.finditer(text))
+    if len(matches) >= 2:
+        # Multiple variant entries found — likely a variant table block.
+        # Remove the region from first variant to last variant (inclusive),
+        # keeping text before AND after the block.
+        first_start = matches[0].start()
+        last_end = matches[-1].end()
+
+        before = text[:first_start].rstrip()
+        after = text[last_end:].lstrip()
+
+        # Strip trailing table headers before the variant block
+        before = re.sub(r"\s*(?:Beskrivelse|Størrelse|Total|Antall|REF)\s*$",
+                        "", before, flags=re.IGNORECASE).rstrip()
+
+        parts = [p for p in [before, after] if p.strip()]
+        if parts:
+            result = "\n".join(parts)
+            logger.debug(
+                f"Stripped variant block: {len(matches)} variant entries removed, "
+                f"kept {len(result)} of {len(text)} chars"
+            )
+            return result
+        # If nothing meaningful remains, return original for _is_junk_line to handle
+
+    return text
+
+
 def clean_description_source(raw_text: str) -> Optional[str]:
     """Filter raw PDF/web text to extract only clean descriptive content.
 
@@ -142,6 +207,7 @@ def clean_description_source(raw_text: str) -> Optional[str]:
     - PDF metadata (page numbers, dates, URLs)
     - Duplicated and fragmented lines
     - Lines that are mostly numeric
+    - Variant table blocks (other sizes/colors of same product)
 
     Keeps:
     - Full sentences describing the product
@@ -152,6 +218,9 @@ def clean_description_source(raw_text: str) -> Optional[str]:
     """
     if not raw_text or not raw_text.strip():
         return None
+
+    # Step 0: Strip inline variant blocks before line-by-line filtering
+    raw_text = _strip_variant_blocks(raw_text)
 
     lines = raw_text.split("\n")
 
@@ -228,6 +297,9 @@ _REJECT_PATTERNS = [
     re.compile(r"(?i)(?:størrelseskode|dispenser\s*/\s*kartong|bestillingsnummer)"),
     # Raw technical sheet references
     re.compile(r"(?i)produktdatablad"),
+    # Section markers that should not be in descriptions
+    re.compile(r"(?i)\bsalgsenhet\b"),
+    re.compile(r"(?i)\btransportkartong\b"),
 ]
 
 
