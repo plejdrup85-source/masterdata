@@ -723,6 +723,18 @@
                 </label>
             </div>
 
+            <!-- Quick Presets -->
+            <div style="margin-top:1rem;padding:0.75rem 1rem;background:#faf5ff;border-radius:8px;border:1px solid #e9d5ff">
+                <div style="font-size:0.9rem;font-weight:600;margin-bottom:0.5rem;color:#7c3aed">Hurtigvalg</div>
+                <div style="display:flex;gap:0.4rem;flex-wrap:wrap">
+                    <button class="btn-outline preset-btn" data-preset="full_audit" style="padding:0.3rem 0.7rem;font-size:0.8rem;border-radius:6px;cursor:pointer;border:1px solid #d8b4fe;background:#fff;color:#6b21a8">Full revisjon</button>
+                    <button class="btn-outline preset-btn" data-preset="description_cleanup" style="padding:0.3rem 0.7rem;font-size:0.8rem;border-radius:6px;cursor:pointer;border:1px solid #d8b4fe;background:#fff;color:#6b21a8">Beskrivelsessjekk</button>
+                    <button class="btn-outline preset-btn" data-preset="specification_cleanup" style="padding:0.3rem 0.7rem;font-size:0.8rem;border-radius:6px;cursor:pointer;border:1px solid #d8b4fe;background:#fff;color:#6b21a8">Spesifikasjonssjekk</button>
+                    <button class="btn-outline preset-btn" data-preset="missing_images" style="padding:0.3rem 0.7rem;font-size:0.8rem;border-radius:6px;cursor:pointer;border:1px solid #d8b4fe;background:#fff;color:#6b21a8">Manglende bilder</button>
+                    <button class="btn-outline preset-btn" data-preset="full_enrichment" style="padding:0.3rem 0.7rem;font-size:0.8rem;border-radius:6px;cursor:pointer;border:1px solid #d8b4fe;background:#fff;color:#6b21a8">Full berikelse</button>
+                </div>
+            </div>
+
             <!-- Analysis Mode Selector -->
             <div style="margin-top:1rem;padding:1rem;background:#f0f9ff;border-radius:8px;border:1px solid #bae6fd">
                 <div style="font-size:0.9rem;font-weight:600;margin-bottom:0.5rem;color:#0369a1">Analysemodus</div>
@@ -836,18 +848,29 @@
 
             <div class="card">
                 <h2>Produktoversikt <span style="font-weight:400;font-size:0.85rem;color:var(--text-muted)">(klikk en rad for detaljer)</span></h2>
+                <!-- Threshold Filter -->
+                <div id="thresholdFilterBar" style="display:flex;align-items:center;gap:0.75rem;margin-bottom:0.75rem;padding:0.5rem 0.75rem;background:var(--bg);border-radius:6px;border:1px solid var(--border);flex-wrap:wrap">
+                    <label style="font-size:0.82rem;font-weight:500;white-space:nowrap">
+                        <input type="checkbox" id="thresholdEnabled"> Vis kun produkter med score under:
+                    </label>
+                    <input type="number" id="thresholdValue" value="70" min="0" max="100" style="width:60px;padding:0.25rem;border:1px solid var(--border);border-radius:4px;font-size:0.85rem" disabled>
+                    <span id="thresholdCount" style="font-size:0.78rem;color:var(--text-muted)"></span>
+                    <label style="font-size:0.78rem;color:var(--text-muted);margin-left:auto">
+                        <input type="checkbox" id="thresholdExportOnly"> Eksporter kun filtrerte
+                    </label>
+                </div>
                 <div style="overflow-x:auto">
                     <table class="results-table">
                         <thead>
                             <tr>
                                 <th>Artikkelnr</th>
                                 <th>Produktnavn</th>
+                                <th>Prioritet</th>
                                 <th>Score</th>
                                 <th>AI Score</th>
                                 <th>Bilde</th>
                                 <th>Status</th>
-                                <th>Produsent</th>
-                                <th>Kommentar</th>
+                                <th>Forklaring</th>
                             </tr>
                         </thead>
                         <tbody id="resultsBody"></tbody>
@@ -1672,6 +1695,71 @@
             });
         });
 
+        // ── Presets ──
+        const PRESETS = {
+            full_audit: { mode: 'audit_only', areas: [] },
+            description_cleanup: { mode: 'focused_scan', areas: ['description'] },
+            specification_cleanup: { mode: 'focused_scan', areas: ['specification'] },
+            missing_images: { mode: 'focused_scan', areas: ['images'] },
+            full_enrichment: { mode: 'full_enrichment', areas: [] },
+        };
+
+        document.querySelectorAll('.preset-btn').forEach(btn => {
+            btn.addEventListener('click', () => {
+                const preset = PRESETS[btn.dataset.preset];
+                if (!preset) return;
+                // Highlight active preset
+                document.querySelectorAll('.preset-btn').forEach(b => b.style.background = '#fff');
+                btn.style.background = '#ede9fe';
+                // Set analysis mode
+                const modeRadio = document.querySelector(`input[name="analysisMode"][value="${preset.mode}"]`);
+                if (modeRadio) { modeRadio.checked = true; modeRadio.dispatchEvent(new Event('change')); }
+                // Set focus areas
+                document.querySelectorAll('.focusAreaCb').forEach(cb => {
+                    cb.checked = preset.areas.includes(cb.value);
+                });
+                if (preset.mode === 'focused_scan') {
+                    document.getElementById('focusAreaPanel').style.display = '';
+                }
+                updateStartBtnState();
+            });
+        });
+
+        // ── Threshold filter ──
+        let allResultsData = []; // Stored for re-filtering
+
+        document.getElementById('thresholdEnabled').addEventListener('change', (e) => {
+            document.getElementById('thresholdValue').disabled = !e.target.checked;
+            applyThresholdFilter();
+        });
+        document.getElementById('thresholdValue').addEventListener('input', () => {
+            applyThresholdFilter();
+        });
+
+        function applyThresholdFilter() {
+            if (!allResultsData.length) return;
+            const enabled = document.getElementById('thresholdEnabled').checked;
+            const threshold = parseInt(document.getElementById('thresholdValue').value) || 70;
+            const rows = document.querySelectorAll('#resultsBody tr.expandable');
+            const details = document.querySelectorAll('#resultsBody tr.detail-row');
+            let shown = 0;
+            rows.forEach((row, i) => {
+                const score = allResultsData[i] ? allResultsData[i].score : 100;
+                const areaScore = allResultsData[i]?.ai_score?.area_scores?.overall_score;
+                const effectiveScore = areaScore !== undefined ? areaScore : score;
+                const visible = !enabled || effectiveScore < threshold;
+                row.style.display = visible ? '' : 'none';
+                if (details[i]) details[i].style.display = 'none'; // collapse all on filter change
+                if (visible) shown++;
+            });
+            const countEl = document.getElementById('thresholdCount');
+            if (enabled) {
+                countEl.textContent = `${shown} av ${rows.length} produkter vist`;
+            } else {
+                countEl.textContent = '';
+            }
+        }
+
         function updateStartBtnState() {
             const hasFile = !!selectedFile;
             const analysisMode = document.querySelector('input[name="analysisMode"]:checked').value;
@@ -1902,7 +1990,18 @@
                 const data = await resp.json();
 
 
-                const results = data.results;
+                // Sort by priority (Critical first) then by score ascending
+                const PRIORITY_ORDER = {'Kritisk': 0, 'Høy': 1, 'Middels': 2, 'Lav': 3, '': 4};
+                const results = (data.results || []).sort((a, b) => {
+                    const pa = PRIORITY_ORDER[a.priority_level] ?? 4;
+                    const pb = PRIORITY_ORDER[b.priority_level] ?? 4;
+                    if (pa !== pb) return pa - pb;
+                    return a.score - b.score;
+                });
+
+                // Store for threshold filter
+                allResultsData = results;
+
                 // Restore analysis mode from server (survives page refresh)
                 if (data.analysis_mode) currentAnalysisMode = data.analysis_mode;
                 if (data.focus_areas) currentFocusAreas = data.focus_areas;
@@ -2018,6 +2117,18 @@
                             </div>
                         `;
                     }
+                }
+
+                // Priority distribution stats
+                const priorityCounts = {Kritisk: 0, 'Høy': 0, Middels: 0, Lav: 0};
+                results.forEach(r => { if (r.priority_level && r.priority_level in priorityCounts) priorityCounts[r.priority_level]++; });
+                if (priorityCounts.Kritisk + priorityCounts['Høy'] + priorityCounts.Middels + priorityCounts.Lav > 0) {
+                    statsGrid.innerHTML += `
+                        ${priorityCounts.Kritisk > 0 ? `<div class="stat-card danger"><div class="value">${priorityCounts.Kritisk}</div><div class="label">Kritisk</div></div>` : ''}
+                        ${priorityCounts['Høy'] > 0 ? `<div class="stat-card warning"><div class="value">${priorityCounts['Høy']}</div><div class="label">H\u00f8y prioritet</div></div>` : ''}
+                        ${priorityCounts.Middels > 0 ? `<div class="stat-card"><div class="value">${priorityCounts.Middels}</div><div class="label">Middels</div></div>` : ''}
+                        ${priorityCounts.Lav > 0 ? `<div class="stat-card success"><div class="value">${priorityCounts.Lav}</div><div class="label">Lav (OK)</div></div>` : ''}
+                    `;
                 }
 
                 // Enrichment stats (only for full enrichment mode)
@@ -2144,16 +2255,22 @@
                         aiDetailHtml += '</div>';
                     }
 
+                    // Priority badge
+                    const priorityColors = {'Kritisk':'#dc2626','Høy':'#ea580c','Middels':'#d97706','Lav':'#16a34a'};
+                    const priorityBg = {'Kritisk':'#fef2f2','Høy':'#fff7ed','Middels':'#fffbeb','Lav':'#f0fdf4'};
+                    const pl = r.priority_level || '';
+                    const priorityBadge = pl ? `<span style="display:inline-block;padding:0.15rem 0.5rem;border-radius:4px;font-size:0.75rem;font-weight:600;color:${priorityColors[pl]||'#64748b'};background:${priorityBg[pl]||'#f1f5f9'}">${escapeHtml(pl)}</span>` : '-';
+
                     return `
                         <tr class="expandable" data-idx="${idx}" onclick="toggleDetail(${idx})">
                             <td>${escapeHtml(r.article_number)}</td>
                             <td title="${escapeHtml(r.product_name || '')}">${escapeHtml(r.product_name || '-')}</td>
+                            <td>${priorityBadge}</td>
                             <td>${r.score}%</td>
                             <td>${aiScore !== null ? `<span class="status-badge ${aiScoreClass}">${aiScoreDisplay}</span>` : '<span style="color:var(--text-muted)">-</span>'}</td>
                             <td><span class="status-badge ${imgClass}" title="${imgStatus}: ${imgCount} bilde(r)">${imgLabel}</span></td>
                             <td><span class="status-badge ${getStatusClass(r.status)}">${escapeHtml(r.status)}</span></td>
-                            <td>${escapeHtml(r.manufacturer || '-')}</td>
-                            <td title="${escapeHtml(r.comment || '')}">${escapeHtml(r.comment || '-')}</td>
+                            <td title="${escapeHtml(r.why_low || r.comment || '')}" style="max-width:250px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;font-size:0.8rem;color:${r.why_low ? '#dc2626' : 'var(--text-muted)'}">${escapeHtml(r.why_low || r.comment || '-')}</td>
                         </tr>
                         <tr class="detail-row" id="detail-${idx}">
                             <td colspan="8">
@@ -2195,6 +2312,11 @@
                 // Show results
                 progressSection.classList.remove('active');
                 resultsSection.classList.add('active');
+
+                // Reset threshold filter
+                document.getElementById('thresholdEnabled').checked = false;
+                document.getElementById('thresholdValue').disabled = true;
+                document.getElementById('thresholdCount').textContent = '';
 
             } catch (e) {
                 console.error('Load results error:', e);

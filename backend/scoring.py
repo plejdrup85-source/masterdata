@@ -130,6 +130,8 @@ class ProductScoreResult:
     area_scores: list[AreaScore] = field(default_factory=list)
     missing_areas: list[str] = field(default_factory=list)
     issue_summary: str = ""
+    priority_level: str = ""  # Kritisk / Høy / Middels / Lav
+    why_low: str = ""  # Human-readable explainability text
 
     def to_dict(self) -> dict:
         return {
@@ -140,6 +142,8 @@ class ProductScoreResult:
             "area_scores": [a.to_dict() for a in self.area_scores],
             "missing_areas": self.missing_areas,
             "issue_summary": self.issue_summary,
+            "priority_level": self.priority_level,
+            "why_low": self.why_low,
         }
 
 
@@ -171,6 +175,52 @@ SEVERITY_THRESHOLDS = {
     "high": 50,       # < 50
     "medium": 75,     # < 75
     # >= 75 → Low
+}
+
+# Priority classification thresholds (centralized, easy to tune)
+PRIORITY_THRESHOLDS = {
+    "critical_score": 40,      # overall score < 40 → Critical
+    "high_score": 60,          # overall score 40-60 → High
+    "medium_score": 80,        # overall score 60-80 → Medium
+    # >= 80 → Low
+}
+
+# Key fields whose absence escalates to Critical regardless of score
+CRITICAL_MISSING_FIELDS = {AREA_DESCRIPTION, AREA_IMAGES}
+
+# ── Presets for quick mode configuration ──
+
+ANALYSIS_PRESETS = {
+    "full_audit": {
+        "label": "Full revisjon",
+        "description": "Sjekk alle omr\u00e5der for kvalitetsproblemer",
+        "analysis_mode": "audit_only",
+        "focus_areas": [],  # empty = all areas
+    },
+    "description_cleanup": {
+        "label": "Beskrivelsessjekk",
+        "description": "Finn produkter med manglende eller svake beskrivelser",
+        "analysis_mode": "focused_scan",
+        "focus_areas": ["description"],
+    },
+    "specification_cleanup": {
+        "label": "Spesifikasjonssjekk",
+        "description": "Finn produkter med manglende eller ufullstendige spesifikasjoner",
+        "analysis_mode": "focused_scan",
+        "focus_areas": ["specification"],
+    },
+    "missing_images": {
+        "label": "Manglende bilder",
+        "description": "Finn produkter som mangler bilder eller har d\u00e5rlig bildekvalitet",
+        "analysis_mode": "focused_scan",
+        "focus_areas": ["images"],
+    },
+    "full_enrichment": {
+        "label": "Full berikelse",
+        "description": "Full analyse med berikelsesforslag og AI-vurdering",
+        "analysis_mode": "full_enrichment",
+        "focus_areas": [],
+    },
 }
 
 # Description thresholds
@@ -837,6 +887,12 @@ def score_product_areas(
     if not summary_parts:
         summary_parts.append("Ingen vesentlige problemer funnet")
 
+    # Classify priority
+    priority = _classify_priority(overall_score, area_scores)
+
+    # Build explainability text
+    why_low = _build_why_low(overall_score, area_scores, missing_areas)
+
     return ProductScoreResult(
         article_number=product_data.article_number,
         product_name=product_data.product_name,
@@ -845,6 +901,8 @@ def score_product_areas(
         area_scores=area_scores,
         missing_areas=missing_areas,
         issue_summary=". ".join(summary_parts),
+        priority_level=priority,
+        why_low=why_low,
     )
 
 
@@ -875,3 +933,75 @@ def _build_explanation(area_name: str, score: float, issues: list[AreaIssue]) ->
         return f"{area_name} er god (score {score:.0f}/100)"
     issue_texts = [i.description for i in issues[:3]]
     return f"{area_name} score {score:.0f}/100: {'; '.join(issue_texts)}"
+
+
+def _classify_priority(overall_score: float, area_scores: list[AreaScore]) -> str:
+    """Classify product into priority bucket based on score and missing key fields.
+
+    Returns Norwegian priority label (Kritisk / Høy / Middels / Lav).
+    Logic is centralized here — adjust PRIORITY_THRESHOLDS and
+    CRITICAL_MISSING_FIELDS to tune.
+    """
+    # Check for critical missing fields (escalates regardless of score)
+    missing_critical = any(
+        a.status == AreaStatus.MISSING and a.area in CRITICAL_MISSING_FIELDS
+        for a in area_scores
+    )
+
+    if overall_score < PRIORITY_THRESHOLDS["critical_score"] or missing_critical:
+        return Severity.CRITICAL.value
+    elif overall_score < PRIORITY_THRESHOLDS["high_score"]:
+        return Severity.HIGH.value
+    elif overall_score < PRIORITY_THRESHOLDS["medium_score"]:
+        return Severity.MEDIUM.value
+    else:
+        return Severity.LOW.value
+
+
+def _build_why_low(
+    overall_score: float,
+    area_scores: list[AreaScore],
+    missing_areas: list[str],
+) -> str:
+    """Build a concise human-readable explanation of why the score is low.
+
+    Deterministic: based entirely on scoring data, not AI.
+    Returns empty string if score is good (>= 80).
+    """
+    if overall_score >= 80 and not missing_areas:
+        return ""
+
+    parts = []
+
+    # Missing areas first (most actionable)
+    if missing_areas:
+        if len(missing_areas) <= 3:
+            parts.append(f"Mangler: {', '.join(missing_areas)}")
+        else:
+            parts.append(f"Mangler {len(missing_areas)} omr\u00e5der inkl. {', '.join(missing_areas[:2])}")
+
+    # Weak areas (score < 75 but not missing)
+    weak = [a for a in area_scores
+            if a.status in (AreaStatus.WEAK, AreaStatus.NEEDS_IMPROVEMENT)]
+    if weak:
+        weak_names = [a.area_label for a in weak[:3]]
+        parts.append(f"Svak: {', '.join(weak_names)}")
+
+    # Top specific issues from low-scoring areas (pick the worst)
+    worst_issues = []
+    for a in sorted(area_scores, key=lambda x: x.score):
+        for issue in a.issues:
+            if issue.severity in (Severity.CRITICAL, Severity.HIGH):
+                worst_issues.append(issue.description)
+            if len(worst_issues) >= 2:
+                break
+        if len(worst_issues) >= 2:
+            break
+
+    if worst_issues:
+        parts.append("; ".join(worst_issues))
+
+    if not parts:
+        return ""
+
+    return ". ".join(parts)

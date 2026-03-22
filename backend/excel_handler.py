@@ -1002,33 +1002,70 @@ def _create_summary_sheet(ws, results: list[ProductAnalysis],
             s = fa.status.value
             field_status_counts[fa.field_name][s] = field_status_counts[fa.field_name].get(s, 0) + 1
 
+    # Priority distribution from area scoring
+    priority_counts = {"Kritisk": 0, "Høy": 0, "Middels": 0, "Lav": 0}
+    area_score_sums: dict[str, list[float]] = {}
+    for r in results:
+        asd = (r.ai_score or {}).get("area_scores", {})
+        pl = asd.get("priority_level", "")
+        if pl in priority_counts:
+            priority_counts[pl] += 1
+        for a in asd.get("area_scores", []):
+            label = a.get("area_label", "")
+            if label:
+                area_score_sums.setdefault(label, []).append(a.get("score", 0))
+
     # Build summary rows as (label, value, indent_level)
     rows: list[tuple[str, str | int | float, int]] = [
-        # General
-        ("GENERELT", "", 0),
+        # Run metadata
+        ("KJØREMETADATA", "", 0),
+        ("Analysemodus", mode_titles.get(analysis_mode, analysis_mode), 1),
+        ("Dato/tid", datetime.now().strftime('%Y-%m-%d %H:%M'), 1),
         ("Totalt antall produkter", total, 1),
         ("Produkter i Jeeves", has_jeeves, 1),
         ("Gjennomsnittlig kvalitetsscore", f"{avg_score:.1f}%", 1),
         ("", "", 0),
-        # Website coverage
-        ("NETTSIDE-DEKNING", "", 0),
-        ("Funnet på onemed.no", found, 1),
-        ("Ikke funnet på onemed.no", not_found, 1),
-        ("Med nettside-beskrivelse", web_desc, 1),
-        ("Med nettside-spesifikasjon", web_spec, 1),
-        ("Med pakningsinformasjon", web_pkg, 1),
-        ("Med bilde", web_img, 1),
-        ("Med kategori/breadcrumb", web_cat, 1),
+        # Priority distribution
+        ("PRIORITETSFORDELING", "", 0),
+        ("Kritisk", priority_counts["Kritisk"], 1),
+        ("Høy", priority_counts["Høy"], 1),
+        ("Middels", priority_counts["Middels"], 1),
+        ("Lav", priority_counts["Lav"], 1),
         ("", "", 0),
-        # Enrichment
-        ("BERIKELSE OG FORSLAG", "", 0),
-        ("Produkter med forslag", products_with_suggestions, 1),
-        ("Totalt antall forslag", total_suggestions, 1),
-        ("Krever manuell gjennomgang", manual_review, 1),
-        ("", "", 0),
-        # Status distribution
-        ("STATUSFORDELING (OVERORDNET)", "", 0),
+        # Average area scores
+        ("GJENNOMSNITTLIG OMRÅDESCORE", "", 0),
     ]
+    for area_label, scores in sorted(area_score_sums.items()):
+        avg = sum(scores) / len(scores) if scores else 0
+        rows.append((area_label, f"{avg:.1f}/100", 1))
+
+    rows.append(("", "", 0))
+
+    # Issue summary (missing fields)
+    rows.append(("MANGLENDE FELTER", "", 0))
+    rows.append(("Mangler beskrivelse", total - web_desc, 1))
+    rows.append(("Mangler spesifikasjon", total - web_spec, 1))
+    rows.append(("Mangler bilde", total - web_img, 1))
+    rows.append(("Mangler kategori", total - web_cat, 1))
+    rows.append(("Mangler pakningsinformasjon", total - web_pkg, 1))
+    rows.append(("", "", 0))
+
+    # Website coverage
+    rows.append(("NETTSIDE-DEKNING", "", 0))
+    rows.append(("Funnet på onemed.no", found, 1))
+    rows.append(("Ikke funnet på onemed.no", not_found, 1))
+    rows.append(("", "", 0))
+
+    if analysis_mode == "full_enrichment":
+        # Enrichment
+        rows.append(("BERIKELSE OG FORSLAG", "", 0))
+        rows.append(("Produkter med forslag", products_with_suggestions, 1))
+        rows.append(("Totalt antall forslag", total_suggestions, 1))
+        rows.append(("Krever manuell gjennomgang", manual_review, 1))
+        rows.append(("", "", 0))
+
+    # Status distribution
+    rows.append(("STATUSFORDELING (OVERORDNET)", "", 0))
     for status_name, count in sorted(status_counts.items()):
         rows.append((status_name, count, 1))
 
@@ -1078,8 +1115,8 @@ def _create_area_scores_sheet(ws, results: list[ProductAnalysis],
     # Determine which areas to show
     areas_to_show = focus_areas if focus_areas else ALL_AREAS
 
-    # Build headers: Article Number, Product Name, Overall Score, then per-area columns
-    headers = ["Artikkelnummer", "Produktnavn", "Totalscore", "Alvorlighetsgrad"]
+    # Build headers: Article Number, Product Name, Priority, Overall Score, Why Low, then per-area columns
+    headers = ["Artikkelnummer", "Produktnavn", "Prioritet", "Totalscore", "Alvorlighetsgrad", "Forklaring"]
     for area in areas_to_show:
         label = AREA_LABELS.get(area, area)
         headers.append(f"{label} Score")
@@ -1104,6 +1141,8 @@ def _create_area_scores_sheet(ws, results: list[ProductAnalysis],
         overall_severity = ""
         missing_areas = []
         issue_summary = ""
+        priority_level = ""
+        why_low = ""
 
         if result.ai_score and "area_scores" in result.ai_score:
             asd = result.ai_score["area_scores"]
@@ -1111,12 +1150,26 @@ def _create_area_scores_sheet(ws, results: list[ProductAnalysis],
             overall_severity = asd.get("overall_severity", "")
             missing_areas = asd.get("missing_areas", [])
             issue_summary = asd.get("issue_summary", "")
+            priority_level = asd.get("priority_level", "")
+            why_low = asd.get("why_low", "")
             for a in asd.get("area_scores", []):
                 area_score_data[a["area"]] = a
 
-        ws.cell(row=row_idx, column=3, value=round(overall_score, 1))
-        # Color-code overall score
-        score_cell = ws.cell(row=row_idx, column=3)
+        # Priority column with color-coding
+        priority_cell = ws.cell(row=row_idx, column=3, value=priority_level)
+        priority_colors = {
+            "Kritisk": ("FF6B6B", "FFFFFF"),
+            "Høy": ("FFC7CE", "9C0006"),
+            "Middels": ("FFEB9C", "9C6500"),
+            "Lav": ("C6EFCE", "006100"),
+        }
+        if priority_level in priority_colors:
+            bg, fg = priority_colors[priority_level]
+            priority_cell.fill = PatternFill(start_color=bg, end_color=bg, fill_type="solid")
+            priority_cell.font = Font(color=fg, bold=True)
+
+        # Overall score with color-coding
+        score_cell = ws.cell(row=row_idx, column=4, value=round(overall_score, 1))
         if overall_score >= 75:
             score_cell.fill = PatternFill(start_color="C6EFCE", end_color="C6EFCE", fill_type="solid")
         elif overall_score >= 50:
@@ -1124,9 +1177,10 @@ def _create_area_scores_sheet(ws, results: list[ProductAnalysis],
         else:
             score_cell.fill = PatternFill(start_color="FFC7CE", end_color="FFC7CE", fill_type="solid")
 
-        ws.cell(row=row_idx, column=4, value=overall_severity)
+        ws.cell(row=row_idx, column=5, value=overall_severity)
+        ws.cell(row=row_idx, column=6, value=why_low)
 
-        col = 5
+        col = 7
         for area in areas_to_show:
             a_data = area_score_data.get(area, {})
             a_score = a_data.get("score", 0)

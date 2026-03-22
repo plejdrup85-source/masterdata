@@ -35,7 +35,7 @@ from backend.models import (
     AnalysisJob, AnalysisMode, BatchMode, ImageSuggestion, JobStatus,
     ProductAnalysis, ProductData, QualityStatus, VerificationStatus,
 )
-from backend.scoring import score_product_areas, FOCUS_AREAS, ALL_AREAS, AREA_LABELS
+from backend.scoring import score_product_areas, FOCUS_AREAS, ALL_AREAS, AREA_LABELS, ANALYSIS_PRESETS
 from backend.pdf_enricher import run_enrichment_pipeline
 from backend.scraper import scrape_product, _load_sitemap, _sitemap_loaded, _sku_to_url
 
@@ -202,6 +202,11 @@ async def health_check():
         "focus_areas": [
             {"value": a, "label": AREA_LABELS[a]} for a in FOCUS_AREAS
         ],
+        "presets": {
+            k: {"label": v["label"], "description": v["description"],
+                "analysis_mode": v["analysis_mode"], "focus_areas": v["focus_areas"]}
+            for k, v in ANALYSIS_PRESETS.items()
+        },
     }
 
 
@@ -532,6 +537,8 @@ async def get_results(job_id: str):
                     e for e in r.enrichment_results
                     if e.match_status == "FOUND_IN_BOTH_CONFLICT"
                 ]),
+                "priority_level": (r.ai_score or {}).get("area_scores", {}).get("priority_level", ""),
+                "why_low": (r.ai_score or {}).get("area_scores", {}).get("why_low", ""),
                 "ai_score": r.ai_score,
                 "ai_enrichment": r.ai_enrichment,
                 "enrichment_suggestions": [
