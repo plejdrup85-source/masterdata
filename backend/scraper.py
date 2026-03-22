@@ -375,30 +375,62 @@ def _parse_product_page(html: str, article_number: str) -> ProductData:
             logger.debug(f"{tag} product_name: MISSING — no JSON-LD name, no <h1>")
 
     # ── Description ──
-    product.description = ld_info.get("description")
-    if product.description:
-        logger.debug(f"{tag} description: JSON-LD → {len(product.description)} chars")
-    if not product.description:
-        # Fallback 1: OneMed accordion section for description
-        # Use _get_structured_text to preserve paragraphs and bullet points
-        desc_accordion = soup.find(id="accordionItem_descriptionAndDocuments")
+    # P0 FIX: Always check the accordion section, even if JSON-LD has a description.
+    # JSON-LD descriptions are often short summaries. The accordion contains the full
+    # rich description visible to users. Prefer the longer/richer source.
+    ld_desc = ld_info.get("description")
+    accordion_desc = None
+
+    # Check all known OneMed accordion IDs for description content
+    for acc_id in ("accordionItem_descriptionAndDocuments",
+                   "accordionItem_description",
+                   "accordion-description"):
+        desc_accordion = soup.find(id=acc_id)
         if desc_accordion:
-            desc_text = _get_structured_text(desc_accordion)
-            if desc_text and len(desc_text) > 10:
-                product.description = desc_text
+            acc_text = _get_structured_text(desc_accordion)
+            if acc_text and len(acc_text) > 10:
+                accordion_desc = acc_text
                 logger.debug(
-                    f"{tag} description: #accordionItem_descriptionAndDocuments → "
-                    f"{len(desc_text)} chars (structured)"
+                    f"{tag} description: #{acc_id} → "
+                    f"{len(acc_text)} chars (structured)"
                 )
+                break
             else:
                 logger.debug(
-                    f"{tag} description: accordion found but too short "
-                    f"({len(desc_text) if desc_text else 0} chars)"
+                    f"{tag} description: accordion #{acc_id} found but too short "
+                    f"({len(acc_text) if acc_text else 0} chars)"
                 )
+
+    # Also check generic accordion containers with description-like content
+    if not accordion_desc:
+        for acc_el in soup.find_all(class_=re.compile(r"accordion.*desc|desc.*accordion", re.I)):
+            acc_text = _get_structured_text(acc_el)
+            if acc_text and len(acc_text) > 20:
+                accordion_desc = acc_text
+                logger.debug(f"{tag} description: accordion class match → {len(acc_text)} chars")
+                break
+
+    # Choose the richer source: prefer accordion over JSON-LD when it has more content
+    if accordion_desc and ld_desc:
+        if len(accordion_desc) > len(ld_desc) * 1.3:
+            product.description = accordion_desc
+            logger.debug(
+                f"{tag} description: accordion preferred over JSON-LD "
+                f"({len(accordion_desc)} vs {len(ld_desc)} chars)"
+            )
         else:
-            logger.debug(f"{tag} description: accordion #accordionItem_descriptionAndDocuments not found")
+            product.description = ld_desc
+            logger.debug(f"{tag} description: JSON-LD → {len(ld_desc)} chars (accordion not richer)")
+    elif accordion_desc:
+        product.description = accordion_desc
+    elif ld_desc:
+        product.description = ld_desc
+        logger.debug(f"{tag} description: JSON-LD → {len(ld_desc)} chars (no accordion found)")
+    else:
+        logger.debug(f"{tag} description: no JSON-LD or accordion found")
+
     if not product.description:
-        # Fallback 2: generic description class
+        # Fallback: generic description class
         desc_el = soup.find("div", class_=re.compile(r"description|product-desc", re.I))
         if desc_el:
             product.description = _get_structured_text(desc_el)
@@ -453,6 +485,56 @@ def _parse_product_page(html: str, article_number: str) -> ProductData:
     # ── Specifications ──
     specs = {}
     spec_sources = {}  # key → source selector
+
+    # P0 FIX: Check specification accordion sections FIRST (OneMed-specific).
+    # These contain structured spec content that generic selectors often miss.
+    spec_accordion_text = None
+    for spec_acc_id in ("accordionItem_specifications",
+                        "accordionItem_specification",
+                        "accordionItem_spesifikasjon",
+                        "accordion-specifications",
+                        "accordion-specification"):
+        spec_acc = soup.find(id=spec_acc_id)
+        if spec_acc:
+            # Try structured extraction from tables/dl within the accordion first
+            acc_tables = spec_acc.find_all("table")
+            for table in acc_tables:
+                for row in table.find_all("tr"):
+                    cells = row.find_all(["td", "th"])
+                    if len(cells) >= 2:
+                        key = cells[0].get_text(strip=True)
+                        val = cells[1].get_text(strip=True)
+                        if key and val and len(key) < 100:
+                            specs[key] = val
+                            spec_sources[key] = f"spec-accordion#{spec_acc_id}>table"
+            for dl in spec_acc.find_all("dl"):
+                for dt, dd in zip(dl.find_all("dt"), dl.find_all("dd")):
+                    key = dt.get_text(strip=True).rstrip(":")
+                    val = dd.get_text(strip=True)
+                    if key and val:
+                        specs[key] = val
+                        spec_sources[key] = f"spec-accordion#{spec_acc_id}>dl"
+            # If no structured data, get as text
+            if not specs:
+                spec_accordion_text = _get_structured_text(spec_acc)
+            if specs:
+                logger.debug(
+                    f"{tag} specs: accordion #{spec_acc_id} → {len(specs)} key-value pairs"
+                )
+            elif spec_accordion_text and len(spec_accordion_text) > 10:
+                logger.debug(
+                    f"{tag} specs: accordion #{spec_acc_id} → {len(spec_accordion_text)} chars (text)"
+                )
+            break
+
+    # Also check generic accordion elements with spec-like classes
+    if not specs and not spec_accordion_text:
+        for acc_el in soup.find_all(class_=re.compile(r"accordion.*spec|spec.*accordion", re.I)):
+            acc_text = _get_structured_text(acc_el)
+            if acc_text and len(acc_text) > 20:
+                spec_accordion_text = acc_text
+                logger.debug(f"{tag} specs: accordion class match → {len(acc_text)} chars")
+                break
 
     # Source 1: HTML tables
     spec_tables = soup.find_all("table")
@@ -520,21 +602,28 @@ def _parse_product_page(html: str, article_number: str) -> ProductData:
             f"{set(spec_sources.values())}"
         )
     else:
-        # Source 4: If no structured specs found, check for spec text
-        spec_block = soup.find(["div", "section"], class_=re.compile(
-            r"spec|technical|egenskap", re.I
-        ))
-        if spec_block:
-            spec_text = _get_structured_text(spec_block)
-            if spec_text and len(spec_text) > 10:
-                product.specification = spec_text
-                logger.debug(
-                    f"{tag} specification: free-text block → {len(spec_text)} chars"
-                )
-            else:
-                logger.debug(f"{tag} specification: MISSING — spec block found but too short")
+        # P0 FIX: Use spec accordion text if available (extracted earlier)
+        if spec_accordion_text and len(spec_accordion_text) > 10:
+            product.specification = spec_accordion_text
+            logger.debug(
+                f"{tag} specification: accordion text fallback → {len(spec_accordion_text)} chars"
+            )
         else:
-            logger.debug(f"{tag} specification: MISSING — no tables, dl, kv-divs, or spec blocks")
+            # Source 4: If no structured specs found, check for spec text
+            spec_block = soup.find(["div", "section"], class_=re.compile(
+                r"spec|technical|egenskap", re.I
+            ))
+            if spec_block:
+                spec_text = _get_structured_text(spec_block)
+                if spec_text and len(spec_text) > 10:
+                    product.specification = spec_text
+                    logger.debug(
+                        f"{tag} specification: free-text block → {len(spec_text)} chars"
+                    )
+                else:
+                    logger.debug(f"{tag} specification: MISSING — spec block found but too short")
+            else:
+                logger.debug(f"{tag} specification: MISSING — no tables, dl, kv-divs, or spec blocks")
 
     # ── Packaging ──
     pkg_parts = []
@@ -612,6 +701,29 @@ def _parse_product_page(html: str, article_number: str) -> ProductData:
 
     # ── Image accessibility check ──
     product.image_quality_ok = product.image_url is not None
+
+    # ── P0 FIX: Normalize all text fields — strip HTML artifacts, excessive whitespace ──
+    for field in ("product_name", "description", "specification", "manufacturer",
+                  "manufacturer_article_number", "category", "packaging_info"):
+        val = getattr(product, field, None)
+        if val and isinstance(val, str):
+            # Strip common HTML leftovers
+            cleaned = val.strip()
+            # Collapse runs of spaces/tabs within lines
+            cleaned = re.sub(r"[ \t]+", " ", cleaned)
+            # Remove zero-width chars and non-breaking spaces
+            cleaned = cleaned.replace("\u200b", "").replace("\ufeff", "")
+            cleaned = cleaned.replace("\xa0", " ")
+            # Collapse excessive newlines
+            cleaned = re.sub(r"\n{3,}", "\n\n", cleaned)
+            # Strip again after cleanup
+            cleaned = cleaned.strip()
+            if cleaned != val:
+                setattr(product, field, cleaned)
+                logger.debug(f"{tag} normalized {field}: {len(val)} → {len(cleaned)} chars")
+            # Treat whitespace-only as missing
+            if not cleaned:
+                setattr(product, field, None)
 
     # ── Final summary ──
     filled = sum(1 for v in [

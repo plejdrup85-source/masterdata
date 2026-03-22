@@ -1997,7 +1997,7 @@ def _apply_enrichment_to_analysis(analysis: ProductAnalysis) -> None:
         for fa in analysis.field_analyses:
             if fa.field_name == fa_name:
                 # Only suggest if field is currently missing/poor and enrichment has value
-                if fa.status in (QualityStatus.MISSING, QualityStatus.SHOULD_IMPROVE, QualityStatus.PROBABLE_ERROR):
+                if fa.status in (QualityStatus.MISSING, QualityStatus.WEAK, QualityStatus.SHOULD_IMPROVE, QualityStatus.PROBABLE_ERROR, QualityStatus.MANUAL_REVIEW):
                     # Don't overwrite existing manufacturer suggestion with lower-confidence PDF
                     if fa.suggested_value and fa.confidence and fa.confidence > er.confidence:
                         continue

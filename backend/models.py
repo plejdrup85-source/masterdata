@@ -8,11 +8,24 @@ from pydantic import BaseModel, Field
 
 
 class QualityStatus(str, Enum):
-    OK = "OK"
-    MISSING = "Mangler"
-    SHOULD_IMPROVE = "B\u00f8r forbedres"
-    PROBABLE_ERROR = "Sannsynlig feil"
-    REQUIRES_MANUFACTURER = "Krever produsent"
+    """Field quality classification — drives whether suggestions are created.
+
+    Hierarchy (best → worst):
+      STRONG → OK → WEAK → SHOULD_IMPROVE → PROBABLE_ERROR → MISSING → REQUIRES_MANUFACTURER
+    Suggestion policy:
+      STRONG/OK: no suggestion unless dramatically better evidence exists
+      WEAK: suggestion only if materially better source found
+      SHOULD_IMPROVE/PROBABLE_ERROR/MISSING: suggestion if any evidence available
+      REQUIRES_MANUFACTURER: always flag for manufacturer contact
+    """
+    STRONG = "Sterk"                            # Present, well-structured, no action needed
+    OK = "OK"                                   # Acceptable quality, no enrichment
+    WEAK = "Svak"                               # Present but thin/short — only improve with strong evidence
+    SHOULD_IMPROVE = "B\u00f8r forbedres"       # Clear quality issues
+    PROBABLE_ERROR = "Sannsynlig feil"          # Likely incorrect data
+    MISSING = "Mangler"                         # Field is empty/absent
+    REQUIRES_MANUFACTURER = "Krever produsent"  # Cannot resolve without manufacturer
+    MANUAL_REVIEW = "Manuell vurdering"         # Ambiguous — human must decide
 
 
 class VerificationStatus(str, Enum):
@@ -85,6 +98,13 @@ class FieldAnalysis(BaseModel):
     confidence: Optional[float] = None
     status: QualityStatus = QualityStatus.OK
     comment: Optional[str] = None
+    # P1 FIX: Traceability fields — explain WHY each result exists
+    website_value: Optional[str] = None         # Raw value from OneMed scraping
+    jeeves_value: Optional[str] = None          # Raw value from Jeeves ERP
+    value_origin: Optional[str] = None          # Which source provided current_value
+    status_reason: Optional[str] = None         # Why this status was assigned
+    suggestion_reason: Optional[str] = None     # Why suggestion was/wasn't created
+    suggestion_source: Optional[str] = None     # What evidence supports the suggestion
 
 
 class JeevesData(BaseModel):

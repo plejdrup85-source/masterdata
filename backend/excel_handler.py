@@ -17,19 +17,25 @@ logger = logging.getLogger(__name__)
 
 # Color scheme for statuses
 STATUS_COLORS = {
-    QualityStatus.OK: "C6EFCE",
-    QualityStatus.SHOULD_IMPROVE: "FFEB9C",
-    QualityStatus.MISSING: "FFC7CE",
-    QualityStatus.PROBABLE_ERROR: "FF6B6B",
-    QualityStatus.REQUIRES_MANUFACTURER: "B4C7E7",
+    QualityStatus.STRONG: "92D050",              # Bright green — strong quality
+    QualityStatus.OK: "C6EFCE",                  # Light green — acceptable
+    QualityStatus.WEAK: "FFF2CC",                # Light yellow — present but thin
+    QualityStatus.SHOULD_IMPROVE: "FFEB9C",      # Yellow — clear issues
+    QualityStatus.MISSING: "FFC7CE",             # Red — absent
+    QualityStatus.PROBABLE_ERROR: "FF6B6B",      # Dark red — likely wrong
+    QualityStatus.REQUIRES_MANUFACTURER: "B4C7E7",  # Blue — needs manufacturer
+    QualityStatus.MANUAL_REVIEW: "E2BFFF",       # Purple — human must decide
 }
 
 STATUS_FONT_COLORS = {
+    QualityStatus.STRONG: "006100",
     QualityStatus.OK: "006100",
+    QualityStatus.WEAK: "9C6500",
     QualityStatus.SHOULD_IMPROVE: "9C6500",
     QualityStatus.MISSING: "9C0006",
     QualityStatus.PROBABLE_ERROR: "FFFFFF",
     QualityStatus.REQUIRES_MANUFACTURER: "003380",
+    QualityStatus.MANUAL_REVIEW: "4B0082",
 }
 
 
@@ -131,33 +137,30 @@ def create_output_excel(
         _create_detail_sheet(ws_detail, results)
 
     if not is_audit and not is_focused:
-        # Enrichment-only sheets
-        ws_comparison = wb.create_sheet("Comparison_And_Enrichment")
-        _create_comparison_and_enrichment_sheet(ws_comparison, results)
-
-        ws_debug = wb.create_sheet("Debug_Log")
-        _create_debug_log_sheet(ws_debug, results)
+        # P2 FIX: Simplified sheet structure for full_enrichment mode.
+        # Removed: Comparison_And_Enrichment (merged into Feltanalyse with traceability)
+        # Removed: Debug_Log (merged into Feltanalyse with traceability)
+        # Removed: Kildekonflikter (conflicts shown in Forbedringsforslag)
 
         ws_improvements = wb.create_sheet("Forbedringsforslag")
         _create_improvements_sheet(ws_improvements, results)
 
-        ws_manufacturer = wb.create_sheet("Produsentoppf\u00f8lging")
-        _create_manufacturer_sheet(ws_manufacturer, results)
-
-        ws_conflicts = wb.create_sheet("Kildekonflikter")
-        _create_conflicts_sheet(ws_conflicts, results)
-
         ws_inriver = wb.create_sheet("Inriver Import")
         _create_inriver_import_sheet(ws_inriver, results)
 
-    # Image sheets: include for audit, full enrichment, and focused with images
+        # Produsentoppfølging: only include if there are actual manufacturer-contact items
+        mfr_contact_results = [
+            r for r in results if r.requires_manufacturer_contact
+        ]
+        if mfr_contact_results:
+            ws_manufacturer = wb.create_sheet("Produsentoppfølging")
+            _create_manufacturer_sheet(ws_manufacturer, results)
+
+    # Image sheet: single combined sheet (merged Bildeanalyse + Bildeproblemer)
     include_images = (not is_focused) or (focus_areas and "images" in focus_areas)
     if include_images:
         ws_images = wb.create_sheet("Bildeanalyse")
         _create_image_detail_sheet(ws_images, results)
-
-        ws_img_issues = wb.create_sheet("Bildeproblemer")
-        _create_image_issues_sheet(ws_img_issues, results)
 
     # Save directly to file
     wb.save(output_path)
@@ -313,16 +316,19 @@ def _create_overview_sheet(ws, results: list[ProductAnalysis]) -> None:
 
 
 def _create_detail_sheet(ws, results: list[ProductAnalysis]) -> None:
-    """Create detailed field analysis sheet."""
+    """Create detailed field analysis sheet with traceability."""
     headers = [
         "Artikkelnummer",
         "Produktnavn",
         "Felt",
-        "N\u00e5v\u00e6rende verdi",
+        "Nåværende verdi",
         "Status",
-        "Kommentar",
-        "Foresl\u00e5tt verdi",
-        "Kilde",
+        "Statusårsak",
+        "Verdikilde",
+        "Nettside-verdi",
+        "Jeeves-verdi",
+        "Foreslått verdi",
+        "Forslag-kilde",
         "Confidence",
     ]
 
@@ -339,10 +345,14 @@ def _create_detail_sheet(ws, results: list[ProductAnalysis]) -> None:
             ws.cell(row=row_idx, column=4, value=fa.current_value or "")
             status_cell = ws.cell(row=row_idx, column=5, value=fa.status.value)
             _apply_status_style(status_cell, fa.status)
-            ws.cell(row=row_idx, column=6, value=fa.comment or "")
-            ws.cell(row=row_idx, column=7, value=fa.suggested_value or "")
-            ws.cell(row=row_idx, column=8, value=fa.source or "")
-            ws.cell(row=row_idx, column=9, value=fa.confidence if fa.confidence else "")
+            # P1 FIX: Traceability columns
+            ws.cell(row=row_idx, column=6, value=fa.status_reason or fa.comment or "")
+            ws.cell(row=row_idx, column=7, value=fa.value_origin or fa.source or "")
+            ws.cell(row=row_idx, column=8, value=fa.website_value or "")
+            ws.cell(row=row_idx, column=9, value=fa.jeeves_value or "")
+            ws.cell(row=row_idx, column=10, value=fa.suggested_value or "")
+            ws.cell(row=row_idx, column=11, value=fa.suggestion_source or fa.source or "")
+            ws.cell(row=row_idx, column=12, value=fa.confidence if fa.confidence else "")
             row_idx += 1
 
     for col in range(1, len(headers) + 1):
@@ -382,8 +392,17 @@ def _create_improvements_sheet(ws, results: list[ProductAnalysis]) -> None:
         # Track which fields already have enrichment suggestions (to avoid duplicates)
         enriched_fields = set()
 
-        # First: enrichment suggestions (higher priority, with evidence)
+        # P2 FIX: Only show enrichment suggestions that are meaningful.
+        # Skip suggestions that are identical to current value after normalization.
         for es in result.enrichment_suggestions:
+            if not es.suggested_value:
+                continue
+            # Skip if suggestion equals current value (redundant)
+            if es.current_value and es.suggested_value:
+                cv = es.current_value.strip().lower()
+                sv = es.suggested_value.strip().lower()
+                if cv == sv:
+                    continue
             if es.suggested_value:
                 _write_id_cell(ws, row_idx, 1, result.article_number)
                 ws.cell(row=row_idx, column=2, value=result.product_data.product_name or "")
@@ -787,12 +806,14 @@ def _create_comparison_and_enrichment_sheet(ws, results: list[ProductAnalysis]) 
             if fa.field_name in ("Konsistens mellom felter",):
                 continue
             src = fa.source or ""
-            if fa.status == QualityStatus.OK and "Jeeves kun" in src:
+            if fa.status in (QualityStatus.STRONG, QualityStatus.OK) and "Jeeves kun" in src:
                 field_comment_parts.append(f"{fa.field_name}: present in Jeeves only")
-            elif fa.status == QualityStatus.OK and "nettside kun" in src:
+            elif fa.status in (QualityStatus.STRONG, QualityStatus.OK) and "nettside kun" in src:
                 field_comment_parts.append(f"{fa.field_name}: present on website only")
             elif fa.status == QualityStatus.MISSING:
                 field_comment_parts.append(f"{fa.field_name}: missing in both sources")
+            elif fa.status == QualityStatus.WEAK:
+                field_comment_parts.append(f"{fa.field_name}: present but weak — {fa.comment}")
             elif fa.status == QualityStatus.SHOULD_IMPROVE:
                 field_comment_parts.append(f"{fa.field_name}: {fa.comment}")
 
@@ -1322,9 +1343,9 @@ def _create_debug_log_sheet(ws, results: list[ProductAnalysis]) -> None:
             elif fa.status == QualityStatus.MISSING:
                 debug_parts.append(f"{fa.field_name} missing in both")
 
-        # Note weak fields
+        # Note weak/poor fields
         for fa in result.field_analyses:
-            if fa.status == QualityStatus.SHOULD_IMPROVE:
+            if fa.status in (QualityStatus.WEAK, QualityStatus.SHOULD_IMPROVE):
                 debug_parts.append(f"{fa.field_name}: {fa.comment}")
 
         # Raw website extraction values
@@ -1516,7 +1537,7 @@ def _determine_enrichment_status(result: ProductAnalysis) -> tuple[str, bool, st
     ]
     improve_fields = [
         fa.field_name for fa in result.field_analyses
-        if fa.status == QualityStatus.SHOULD_IMPROVE
+        if fa.status in (QualityStatus.WEAK, QualityStatus.SHOULD_IMPROVE)
         and fa.field_name not in ("Bildekvalitet", "Konsistens mellom felter")
     ]
 

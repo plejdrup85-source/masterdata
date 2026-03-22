@@ -196,13 +196,9 @@ def apply_enrichment_suggestions(
     for suggestion in suggestions:
         for fa in analysis.field_analyses:
             if fa.field_name == suggestion.field_name:
-                # Only enrich if field is currently not OK
-                if fa.status not in (
-                    QualityStatus.MISSING,
-                    QualityStatus.SHOULD_IMPROVE,
-                    QualityStatus.PROBABLE_ERROR,
-                    QualityStatus.REQUIRES_MANUFACTURER,
-                ):
+                # P1 FIX: Only enrich if field needs improvement.
+                # STRONG and OK fields must never be overwritten.
+                if fa.status in (QualityStatus.STRONG, QualityStatus.OK):
                     break
 
                 # Don't overwrite a higher-confidence suggestion
@@ -230,7 +226,8 @@ def _enrich_product_name(
 ) -> Optional[EnrichmentSuggestion]:
     """Enrich product name if missing or weak."""
     fa = _get_field_analysis(analysis, "Produktnavn")
-    if fa and fa.status == QualityStatus.OK:
+    # P1 FIX: STRONG and OK fields should never get suggestions
+    if fa and fa.status in (QualityStatus.STRONG, QualityStatus.OK):
         return None
 
     current = product.product_name
@@ -338,10 +335,11 @@ def _enrich_description(
 ) -> Optional[EnrichmentSuggestion]:
     """Enrich description: improve/rewrite to concise factual Norwegian."""
     fa = _get_field_analysis(analysis, "Beskrivelse")
-    if fa and fa.status == QualityStatus.OK:
-        # Even if OK, check if we can improve a short description
-        if product.description and len(product.description) >= 80:
-            return None
+    # P1 FIX: STRONG and OK fields should never get suggestions.
+    # The old code overrode OK status for short descriptions, generating
+    # unnecessary suggestions for descriptions the analyzer deemed acceptable.
+    if fa and fa.status in (QualityStatus.STRONG, QualityStatus.OK):
+        return None
 
     current = product.description
 
@@ -480,7 +478,8 @@ def _enrich_specification(
 ) -> Optional[EnrichmentSuggestion]:
     """Enrich specification by structuring source data into key-value pairs."""
     fa = _get_field_analysis(analysis, "Spesifikasjon")
-    if fa and fa.status == QualityStatus.OK:
+    # P1 FIX: STRONG and OK fields should never get suggestions
+    if fa and fa.status in (QualityStatus.STRONG, QualityStatus.OK):
         return None
 
     current_specs = product.technical_details or {}
@@ -537,7 +536,7 @@ def _enrich_category(
 ) -> Optional[EnrichmentSuggestion]:
     """Suggest category only if source evidence supports it."""
     fa = _get_field_analysis(analysis, "Kategori")
-    if fa and fa.status == QualityStatus.OK:
+    if fa and fa.status in (QualityStatus.STRONG, QualityStatus.OK):
         return None
 
     current = product.category
@@ -578,7 +577,7 @@ def _enrich_packaging(
     usage descriptions, marketing text, and random PDF fragments.
     """
     fa = _get_field_analysis(analysis, "Pakningsinformasjon")
-    if fa and fa.status == QualityStatus.OK:
+    if fa and fa.status in (QualityStatus.STRONG, QualityStatus.OK):
         return None
 
     current = product.packaging_info or product.packaging_unit
@@ -619,7 +618,7 @@ def _enrich_manufacturer(
 ) -> Optional[EnrichmentSuggestion]:
     """Enrich manufacturer from PDF, manufacturer lookup, or brand in specs."""
     fa = _get_field_analysis(analysis, "Produsent")
-    if fa and fa.status == QualityStatus.OK:
+    if fa and fa.status in (QualityStatus.STRONG, QualityStatus.OK):
         return None
 
     current = product.manufacturer
@@ -683,7 +682,7 @@ def _enrich_manufacturer_article_number(
 ) -> Optional[EnrichmentSuggestion]:
     """Enrich manufacturer article number from PDF or manufacturer source."""
     fa = _get_field_analysis(analysis, "Produsentens varenummer")
-    if fa and fa.status == QualityStatus.OK:
+    if fa and fa.status in (QualityStatus.STRONG, QualityStatus.OK):
         return None
 
     current = product.manufacturer_article_number
@@ -884,6 +883,25 @@ def _infer_manufacturer_from_url(url: str) -> Optional[str]:
 # ── Final Quality Gate ──
 
 
+def _normalize_for_comparison(text: str) -> str:
+    """Normalize text for comparison purposes.
+
+    P1 FIX: Strips formatting differences so that equivalent content
+    with different whitespace, bullets, or line breaks is recognized as equal.
+    """
+    if not text:
+        return ""
+    # Normalize bullet markers to a common form
+    result = re.sub(r"^\s*[•\-\*►▸‣⁃]\s*", "- ", text, flags=re.MULTILINE)
+    # Collapse all whitespace (spaces, tabs, newlines) to single space
+    result = re.sub(r"\s+", " ", result)
+    # Remove zero-width chars
+    result = result.replace("\u200b", "").replace("\ufeff", "").replace("\xa0", " ")
+    # Lowercase
+    result = result.lower().strip()
+    return result
+
+
 def _text_similarity(a: str, b: str) -> float:
     """Compute simple token-overlap similarity between two texts (0.0-1.0).
 
@@ -1043,9 +1061,18 @@ def final_quality_gate(suggestions: list[EnrichmentSuggestion]) -> list[Enrichme
             )
             continue
 
-        # Reject if value is identical to current (no improvement)
-        if s.current_value and val.strip().lower() == s.current_value.strip().lower():
-            continue
+        # P1 FIX: Reject if value is identical to current after normalization.
+        # This catches cases where content is the same but formatting differs
+        # (different whitespace, bullet styles, line breaks, etc.)
+        if s.current_value:
+            norm_current = _normalize_for_comparison(s.current_value)
+            norm_suggested = _normalize_for_comparison(val)
+            if norm_current and norm_suggested and norm_current == norm_suggested:
+                logger.info(
+                    f"[quality-gate] {s.field_name} dropped: normalized content "
+                    f"is identical to current value"
+                )
+                continue
 
         # Reject near-paraphrases: if suggested is >80% similar to current,
         # it's not a meaningful improvement (addresses paraphrase padding)

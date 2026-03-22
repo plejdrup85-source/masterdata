@@ -69,21 +69,27 @@ def _analyze_product_name(product: ProductData, jeeves: JeevesData = None) -> Fi
     # Use website name, fall back to Jeeves
     effective_name = name or jeeves_name
     source_info = _source_label(name, jeeves_name, "nettside", "Jeeves")
+    origin = "nettside" if name else ("Jeeves" if jeeves_name else None)
 
     analysis = FieldAnalysis(
         field_name="Produktnavn",
         current_value=effective_name,
         source=source_info,
+        website_value=name,
+        jeeves_value=jeeves_name,
+        value_origin=origin,
     )
 
     if not effective_name:
         analysis.status = QualityStatus.MISSING
         analysis.comment = "Produktnavn mangler i både Jeeves og nettside"
+        analysis.status_reason = "Ingen kilde har produktnavn"
         return analysis
 
     if not name and jeeves_name:
         analysis.status = QualityStatus.OK
         analysis.comment = f"Produktnavn fra Jeeves: {jeeves_name}"
+        analysis.status_reason = "Jeeves har produktnavn, nettside mangler"
         return analysis
 
     issues = []
@@ -102,20 +108,29 @@ def _analyze_product_name(product: ProductData, jeeves: JeevesData = None) -> Fi
     name_lower = name.lower()
     english_count = sum(1 for word in english_indicators if word in name_lower)
     if english_count >= 2:
-        issues.append("Navn ser ut til \u00e5 v\u00e6re p\u00e5 engelsk, b\u00f8r vurderes for norsk oversettelse")
+        issues.append("Navn ser ut til å være på engelsk, bør vurderes for norsk oversettelse")
 
     if name == name.upper() and len(name) > 3:
-        issues.append("Navn er i STORE BOKSTAVER, b\u00f8r ha normal casing")
+        issues.append("Navn er i STORE BOKSTAVER, bør ha normal casing")
 
     if not issues:
-        analysis.status = QualityStatus.OK
-        analysis.comment = "Produktnavn ser bra ut"
+        # P1 FIX: Distinguish STRONG from OK based on name length and structure
+        if len(name) >= 10 and not name.isupper():
+            analysis.status = QualityStatus.STRONG
+            analysis.comment = "Produktnavn er godt"
+            analysis.status_reason = "Godt produktnavn med tilstrekkelig lengde og struktur"
+        else:
+            analysis.status = QualityStatus.OK
+            analysis.comment = "Produktnavn ser bra ut"
+            analysis.status_reason = "Akseptabelt produktnavn"
     elif any("mangler" in i.lower() or "kun tall" in i.lower() for i in issues):
         analysis.status = QualityStatus.PROBABLE_ERROR
         analysis.comment = "; ".join(issues)
+        analysis.status_reason = "; ".join(issues)
     else:
         analysis.status = QualityStatus.SHOULD_IMPROVE
         analysis.comment = "; ".join(issues)
+        analysis.status_reason = "; ".join(issues)
 
     return analysis
 
@@ -126,21 +141,27 @@ def _analyze_description(product: ProductData, jeeves: JeevesData = None) -> Fie
     jeeves_desc = jeeves.web_text if jeeves else None
     effective_desc = desc or jeeves_desc
     source_info = _source_label(desc, jeeves_desc, "nettside", "Jeeves")
+    origin = "nettside" if desc else ("Jeeves" if jeeves_desc else None)
 
     analysis = FieldAnalysis(
         field_name="Beskrivelse",
         current_value=effective_desc,
         source=source_info,
+        website_value=desc,
+        jeeves_value=jeeves_desc,
+        value_origin=origin,
     )
 
     if not effective_desc:
         analysis.status = QualityStatus.MISSING
         analysis.comment = "Beskrivelse mangler i både Jeeves og nettside"
+        analysis.status_reason = "Ingen kilde har beskrivelse"
         return analysis
 
     if not desc and jeeves_desc:
         analysis.status = QualityStatus.OK
         analysis.comment = f"Beskrivelse fra Jeeves ({len(jeeves_desc)} tegn)"
+        analysis.status_reason = "Jeeves har beskrivelse, nettside mangler"
         return analysis
 
     issues = []
@@ -155,11 +176,27 @@ def _analyze_description(product: ProductData, jeeves: JeevesData = None) -> Fie
         issues.append("Beskrivelse inneholder hovedsakelig artikkelnummer")
 
     if not issues:
-        analysis.status = QualityStatus.OK
-        analysis.comment = "Beskrivelse OK"
+        # P1 FIX: Distinguish STRONG from OK based on content richness
+        has_sentences = len(re.findall(r'[.!?]\s', desc)) >= 1
+        if len(desc) >= 80 and has_sentences:
+            analysis.status = QualityStatus.STRONG
+            analysis.comment = f"Beskrivelse er god ({len(desc)} tegn, strukturert)"
+            analysis.status_reason = f"Beskrivelse har {len(desc)} tegn med fullstendige setninger"
+        else:
+            analysis.status = QualityStatus.OK
+            analysis.comment = "Beskrivelse OK"
+            analysis.status_reason = f"Beskrivelse akseptabel ({len(desc)} tegn)"
     else:
-        analysis.status = QualityStatus.SHOULD_IMPROVE
-        analysis.comment = "; ".join(issues)
+        # P1 FIX: Distinguish WEAK (present but thin) from SHOULD_IMPROVE (real problems)
+        is_only_short = (len(issues) == 1 and "for kort" in issues[0] and len(desc) >= 10)
+        if is_only_short:
+            analysis.status = QualityStatus.WEAK
+            analysis.comment = "; ".join(issues)
+            analysis.status_reason = f"Beskrivelse finnes men er kort ({len(desc)} tegn)"
+        else:
+            analysis.status = QualityStatus.SHOULD_IMPROVE
+            analysis.comment = "; ".join(issues)
+            analysis.status_reason = "; ".join(issues)
 
     return analysis
 
@@ -211,19 +248,21 @@ def _analyze_specification(product: ProductData, jeeves: JeevesData = None) -> F
     jeeves_spec = jeeves.specification if jeeves else None
 
     # Build current_value from all available sources
-    display_value = spec
-    if details and not display_value:
-        display_value = "; ".join(f"{k}: {v}" for k, v in details.items())
+    web_spec = spec or ("; ".join(f"{k}: {v}" for k, v in details.items()) if details else None)
+    display_value = web_spec
     if not display_value and jeeves_spec:
         display_value = jeeves_spec
 
-    source_info = _source_label(spec or ("; ".join(f"{k}: {v}" for k, v in details.items()) if details else None),
-                                jeeves_spec, "nettside", "Jeeves")
+    source_info = _source_label(web_spec, jeeves_spec, "nettside", "Jeeves")
+    origin = "nettside" if web_spec else ("Jeeves" if jeeves_spec else None)
 
     analysis = FieldAnalysis(
         field_name="Spesifikasjon",
         current_value=display_value,
         source=source_info,
+        website_value=web_spec,
+        jeeves_value=jeeves_spec,
+        value_origin=origin,
     )
 
     # Count structured attributes from technical_details
@@ -240,16 +279,19 @@ def _analyze_specification(product: ProductData, jeeves: JeevesData = None) -> F
         if jeeves_spec:
             analysis.status = QualityStatus.OK
             analysis.comment = f"Spesifikasjon fra Jeeves: {jeeves_spec}"
+            analysis.status_reason = "Jeeves har spesifikasjon, nettside mangler"
             return analysis
         if has_tech_in_desc:
-            analysis.status = QualityStatus.SHOULD_IMPROVE
+            analysis.status = QualityStatus.WEAK
             analysis.comment = (
                 "Spesifikasjoner mangler som eget felt, men beskrivelsen inneholder "
                 "teknisk informasjon. Bør struktureres som egne spesifikasjonsfelter."
             )
+            analysis.status_reason = "Teknisk info finnes i beskrivelsen men ikke som eget felt"
         else:
             analysis.status = QualityStatus.MISSING
             analysis.comment = "Spesifikasjoner mangler i både Jeeves og nettside"
+            analysis.status_reason = "Ingen kilde har spesifikasjoner"
         return analysis
 
     issues = []
@@ -276,14 +318,29 @@ def _analyze_specification(product: ProductData, jeeves: JeevesData = None) -> F
             issues.append("Mangler vanlige spesifikasjoner (størrelse, materiale, farge, vekt)")
 
     if not issues:
-        analysis.status = QualityStatus.OK
-        if attr_count >= 2:
-            analysis.comment = f"Spesifikasjoner OK ({attr_count} attributter)"
+        # P1 FIX: STRONG if rich structured specs exist
+        if attr_count >= 4 or (attr_count >= 2 and has_tech_content):
+            analysis.status = QualityStatus.STRONG
+            analysis.comment = f"Spesifikasjoner er gode ({attr_count} attributter)"
+            analysis.status_reason = f"{attr_count} strukturerte attributter med teknisk innhold"
         else:
-            analysis.comment = "Spesifikasjoner OK (teknisk innhold funnet)"
+            analysis.status = QualityStatus.OK
+            if attr_count >= 2:
+                analysis.comment = f"Spesifikasjoner OK ({attr_count} attributter)"
+            else:
+                analysis.comment = "Spesifikasjoner OK (teknisk innhold funnet)"
+            analysis.status_reason = f"Akseptable spesifikasjoner ({attr_count} attributter)"
     else:
-        analysis.status = QualityStatus.SHOULD_IMPROVE
+        # P1 FIX: WEAK if only minor issues, SHOULD_IMPROVE if serious
+        serious = any("identisk" in i.lower() for i in issues)
+        if serious:
+            analysis.status = QualityStatus.SHOULD_IMPROVE
+        elif attr_count >= 1:
+            analysis.status = QualityStatus.WEAK
+        else:
+            analysis.status = QualityStatus.SHOULD_IMPROVE
         analysis.comment = "; ".join(issues)
+        analysis.status_reason = "; ".join(issues)
 
     return analysis
 
@@ -298,22 +355,27 @@ def _analyze_manufacturer(product: ProductData, jeeves: JeevesData = None) -> Fi
     jeeves_supplier = jeeves.supplier if jeeves else None
     effective_mfr = mfr or jeeves_supplier
     source_info = _source_label(mfr, jeeves_supplier, "nettside", "Jeeves")
+    origin = "nettside" if mfr else ("Jeeves" if jeeves_supplier else None)
 
     analysis = FieldAnalysis(
         field_name="Produsent",
         current_value=effective_mfr,
         source=source_info,
+        website_value=mfr,
+        jeeves_value=jeeves_supplier,
+        value_origin=origin,
     )
 
     if not effective_mfr:
         analysis.status = QualityStatus.MISSING
         analysis.comment = "Produsentinformasjon mangler i både Jeeves og nettside"
+        analysis.status_reason = "Ingen kilde har produsentinfo"
         return analysis
 
     if not mfr and jeeves_supplier:
-        # Present in Jeeves only — this is fine, not missing
         analysis.status = QualityStatus.OK
         analysis.comment = f"Produsent fra Jeeves: {jeeves_supplier}"
+        analysis.status_reason = "Jeeves har produsent, nettside mangler"
         return analysis
 
     issues = []
@@ -348,25 +410,32 @@ def _analyze_manufacturer_article_number(product: ProductData, jeeves: JeevesDat
     jeeves_num = jeeves.supplier_item_no if jeeves else None
     effective_num = mfr_num or jeeves_num
     source_info = _source_label(mfr_num, jeeves_num, "nettside", "Jeeves")
+    origin = "nettside" if mfr_num else ("Jeeves" if jeeves_num else None)
 
     analysis = FieldAnalysis(
         field_name="Produsentens varenummer",
         current_value=effective_num,
         source=source_info,
+        website_value=mfr_num,
+        jeeves_value=jeeves_num,
+        value_origin=origin,
     )
 
     if not effective_num:
         analysis.status = QualityStatus.MISSING
         analysis.comment = "Produsentens varenummer mangler i både Jeeves og nettside"
+        analysis.status_reason = "Ingen kilde har produsentens varenummer"
         return analysis
 
     if not mfr_num and jeeves_num:
         analysis.status = QualityStatus.OK
         analysis.comment = f"Produsentens varenummer fra Jeeves: {jeeves_num}"
+        analysis.status_reason = "Jeeves har varenummer, nettside mangler"
         return analysis
 
     analysis.status = QualityStatus.OK
     analysis.comment = "Produsentens varenummer finnes"
+    analysis.status_reason = "Varenummer finnes i minst én kilde"
     return analysis
 
 
@@ -637,11 +706,14 @@ def analyze_product(
 
     # Calculate weighted score
     score_map = {
+        QualityStatus.STRONG: 1.0,
         QualityStatus.OK: 1.0,
+        QualityStatus.WEAK: 0.65,
         QualityStatus.SHOULD_IMPROVE: 0.5,
         QualityStatus.MISSING: 0.0,
         QualityStatus.PROBABLE_ERROR: 0.0,
         QualityStatus.REQUIRES_MANUFACTURER: 0.25,
+        QualityStatus.MANUAL_REVIEW: 0.4,
     }
 
     weighted_sum = 0.0
@@ -665,6 +737,15 @@ def analyze_product(
             analysis.overall_status = QualityStatus.SHOULD_IMPROVE
     elif QualityStatus.SHOULD_IMPROVE in statuses:
         analysis.overall_status = QualityStatus.SHOULD_IMPROVE
+    elif QualityStatus.WEAK in statuses:
+        analysis.overall_status = QualityStatus.WEAK
+    elif all(s in (QualityStatus.STRONG, QualityStatus.OK) for s in statuses):
+        # All fields are strong or OK
+        strong_count = statuses.count(QualityStatus.STRONG)
+        if strong_count >= len(statuses) // 2:
+            analysis.overall_status = QualityStatus.STRONG
+        else:
+            analysis.overall_status = QualityStatus.OK
     else:
         analysis.overall_status = QualityStatus.OK
 
