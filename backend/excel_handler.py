@@ -136,6 +136,10 @@ def create_output_excel(
     ws_inriver = wb.create_sheet("Inriver Import")
     _create_inriver_import_sheet(ws_inriver, results)
 
+    # Sheet 12: Product Families / Variant Structure
+    ws_families = wb.create_sheet("Produktfamilier")
+    _create_family_sheet(ws_families, results)
+
     # Save directly to file
     wb.save(output_path)
     logger.info(f"Excel output saved to {output_path}")
@@ -1545,3 +1549,135 @@ def _create_inriver_import_sheet(ws, results: list[ProductAnalysis]) -> None:
     # Enable auto-filter on all columns
     if len(results) > 0:
         ws.auto_filter.ref = f"A1:{get_column_letter(len(headers))}{len(results) + 1}"
+
+
+def _create_family_sheet(ws, results: list[ProductAnalysis]) -> None:
+    """Create Sheet 12: Product Family / Variant Structure.
+
+    Runs family detection on the analyzed products and outputs a reviewable
+    table with Mother/Child/Standalone assignments and variant dimensions.
+    """
+    from backend.family_detector import detect_families, products_from_analyses
+
+    # Build product dicts from analysis results
+    product_dicts = products_from_analyses(results)
+
+    # Run family detection
+    families, all_members = detect_families(product_dicts)
+
+    # Sort: families first (by family_id, then role), standalone last
+    def sort_key(m):
+        if m.family_id:
+            role_order = 0 if m.role == "mother" else 1
+            return (0, m.family_id, role_order, m.article_number)
+        return (1, "", 0, m.article_number)
+
+    sorted_members = sorted(all_members, key=sort_key)
+
+    # Headers
+    headers = [
+        "Artikkelnummer",
+        "Produktnavn",
+        "Familie_ID",
+        "Familienavn",
+        "Rolle",
+        "Mor_Artikkelnummer",
+        "Familiestr.",
+        "Variantdimensjon_1",
+        "Variantverdi_1",
+        "Variantdimensjon_2",
+        "Variantverdi_2",
+        "Variantdimensjon_3",
+        "Variantverdi_3",
+        "Felles_basetittel",
+        "Barnespesifikt",
+        "Konfidensgrad",
+        "Gjennomgang_påkrevd",
+        "Grupperingsgrunn",
+        "Søsken",
+        "Kilde_signaler",
+        "Merknader",
+    ]
+    top_align = Alignment(vertical="top", wrap_text=False)
+    wrap_align = Alignment(vertical="top", wrap_text=True)
+
+    header_fill = PatternFill(start_color="4472C4", end_color="4472C4", fill_type="solid")
+    header_font = Font(bold=True, color="FFFFFF", size=10)
+    family_fill = PatternFill(start_color="D9E2F3", end_color="D9E2F3", fill_type="solid")
+    mother_fill = PatternFill(start_color="E2EFDA", end_color="E2EFDA", fill_type="solid")
+    review_fill = PatternFill(start_color="FCE4D6", end_color="FCE4D6", fill_type="solid")
+
+    for col_idx, header in enumerate(headers, 1):
+        cell = ws.cell(row=1, column=col_idx, value=header)
+        cell.fill = header_fill
+        cell.font = header_font
+        cell.alignment = top_align
+
+    row_idx = 2
+    prev_family_id = None
+
+    for member in sorted_members:
+        c = 1
+        # Alternate family background for readability
+        is_new_family = member.family_id and member.family_id != prev_family_id
+        prev_family_id = member.family_id
+
+        # Get up to 3 variant dimensions
+        dims = member.variant_dimensions[:3] if member.variant_dimensions else []
+
+        row_data = [
+            member.article_number,
+            member.product_name,
+            member.family_id or "",
+            member.family_name or "",
+            {"mother": "Mor", "child": "Barn", "standalone": "Frittstående"}.get(member.role, member.role),
+            member.mother_article_number or "(abstrakt)",
+            member.family_size if member.family_id else "",
+            dims[0].dimension_name if len(dims) > 0 else "",
+            dims[0].value if len(dims) > 0 else "",
+            dims[1].dimension_name if len(dims) > 1 else "",
+            dims[1].value if len(dims) > 1 else "",
+            dims[2].dimension_name if len(dims) > 2 else "",
+            dims[2].value if len(dims) > 2 else "",
+            member.shared_base_title or "",
+            member.child_specific_title or "",
+            member.confidence,
+            "Ja" if member.review_required else "Nei",
+            member.grouping_reason,
+            "; ".join(member.candidate_siblings[:5]) if member.candidate_siblings else "",
+            "; ".join(member.source_signals) if member.source_signals else "",
+            member.notes,
+        ]
+
+        for val in row_data:
+            cell = ws.cell(row=row_idx, column=c, value=val)
+            cell.alignment = wrap_align if c in (2, 14, 18, 19, 20, 21) else top_align
+            # Apply role-based styling
+            if member.role == "mother":
+                cell.fill = mother_fill
+            elif member.family_id and member.review_required:
+                cell.fill = review_fill
+            elif member.family_id:
+                cell.fill = family_fill
+            c += 1
+
+        row_idx += 1
+
+    # Column widths
+    col_widths = {
+        1: 18, 2: 35, 3: 12, 4: 30, 5: 14, 6: 18, 7: 10,
+        8: 18, 9: 14, 10: 18, 11: 14, 12: 18, 13: 14,
+        14: 30, 15: 25, 16: 14, 17: 14, 18: 40, 19: 35, 20: 40, 21: 30,
+    }
+    for col, width in col_widths.items():
+        ws.column_dimensions[get_column_letter(col)].width = width
+
+    ws.freeze_panes = "C2"
+    if row_idx > 2:
+        ws.auto_filter.ref = f"A1:{get_column_letter(len(headers))}{row_idx - 1}"
+
+    logger.info(
+        f"Family sheet: {len(families)} families, "
+        f"{sum(1 for m in sorted_members if m.role != 'standalone')} in families, "
+        f"{sum(1 for m in sorted_members if m.role == 'standalone')} standalone"
+    )
