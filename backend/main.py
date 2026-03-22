@@ -33,7 +33,7 @@ from backend.manufacturer import (
 )
 from backend.models import (
     AnalysisJob, BatchMode, ImageSuggestion, JobStatus,
-    ProductAnalysis, ProductData, QualityStatus,
+    ProductAnalysis, ProductData, QualityStatus, VerificationStatus,
 )
 from backend.pdf_enricher import run_enrichment_pipeline
 from backend.scraper import scrape_product, _load_sitemap, _sitemap_loaded, _sku_to_url
@@ -848,11 +848,26 @@ async def _run_analysis(
                 if image_summary.main_image_exists and image_summary.image_analyses:
                     product_data.image_url = image_summary.image_analyses[0].image_url
 
-                # If scraper failed but images exist on CDN, mark product as found
+                # If scraper failed but images exist on CDN, mark as CDN-only (weak verification)
+                # This allows the enrichment pipeline to continue, but does NOT confirm identity.
                 if not product_data.found_on_onemed and image_summary.main_image_exists:
                     product_data.found_on_onemed = True
                     product_data.error = None
-                    logger.info(f"[{job_id}] {article_number} confirmed via CDN image")
+                    # Only downgrade verification — never upgrade from a confirmed mismatch
+                    if product_data.verification_status not in (
+                        VerificationStatus.MISMATCH,
+                        VerificationStatus.EXACT_MATCH,
+                        VerificationStatus.NORMALIZED_MATCH,
+                    ):
+                        product_data.verification_status = VerificationStatus.CDN_ONLY
+                        product_data.verification_evidence = (
+                            f"Produkt bekreftet kun via CDN-bilde. "
+                            f"Ingen produktside tilgjengelig for identitetsverifisering."
+                        )
+                    logger.info(
+                        f"[{job_id}] {article_number} found via CDN image "
+                        f"(verification: {product_data.verification_status.value})"
+                    )
 
                 # Step 3-5: enrichment pipeline
                 mfr_data = None

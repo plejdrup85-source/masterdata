@@ -706,7 +706,8 @@ def _build_description_from_specs(product: ProductData) -> Optional[str]:
     if len(parts) < 2:
         return None  # Not enough info to build a useful description
 
-    return " ".join(parts)
+    # Join with newlines to preserve paragraph structure in assembled descriptions
+    return "\n".join(parts)
 
 
 def _infer_category_from_sources(product: ProductData) -> Optional[str]:

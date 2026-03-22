@@ -10,6 +10,7 @@ from typing import Optional
 
 from openpyxl import load_workbook
 
+from backend.identifiers import normalize_identifier
 from backend.models import JeevesData
 
 logger = logging.getLogger(__name__)
@@ -79,6 +80,9 @@ class JeevesIndex:
 
         logger.debug(f"Jeeves column mapping: {col_to_field}")
 
+        # Identifier fields that must be normalized (not free text)
+        _IDENTIFIER_FIELDS = {"article_number", "gid", "supplier_item_no"}
+
         # Read data rows
         count = 0
         for row in rows:
@@ -86,11 +90,13 @@ class JeevesIndex:
             for col_idx, field_name in col_to_field.items():
                 cell_val = row[col_idx].value
                 if cell_val is not None:
-                    # Numeric fields (e.g., Supplier Item.no): strip trailing .0
-                    # from float-formatted integers (1029975.0 → "1029975")
-                    if isinstance(cell_val, float) and cell_val == int(cell_val):
-                        values[field_name] = str(int(cell_val))
+                    if field_name in _IDENTIFIER_FIELDS:
+                        # Identifier fields: normalize to prevent float coercion
+                        normalized = normalize_identifier(cell_val)
+                        if normalized:
+                            values[field_name] = normalized
                     else:
+                        # Text fields: simple string conversion
                         values[field_name] = str(cell_val).strip()
 
             artnr = values.get("article_number")
@@ -108,11 +114,15 @@ class JeevesIndex:
 
     def get(self, article_number: str) -> Optional[JeevesData]:
         """Look up Jeeves data for a given article number."""
-        return self._data.get(article_number)
+        key = normalize_identifier(article_number)
+        if key is None:
+            return None
+        return self._data.get(key)
 
     def has(self, article_number: str) -> bool:
         """Check if an article number exists in Jeeves."""
-        return article_number in self._data
+        key = normalize_identifier(article_number)
+        return key is not None and key in self._data
 
     def all_article_numbers(self) -> list[str]:
         """Return all article numbers in the index."""

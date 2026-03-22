@@ -24,7 +24,8 @@ from xml.etree import ElementTree
 import httpx
 from bs4 import BeautifulSoup
 
-from backend.models import ProductData
+from backend.identifiers import normalize_identifier
+from backend.models import ProductData, VerificationStatus
 
 logger = logging.getLogger(__name__)
 
@@ -46,6 +47,77 @@ HEADERS = {
 
 MAX_RETRIES = 3
 RETRY_DELAY_BASE = 2  # seconds
+
+
+def _get_structured_text(element) -> str:
+    """Extract text from a BeautifulSoup element while preserving paragraph and list structure.
+
+    Unlike .get_text(strip=True) which collapses everything into one line, this:
+    - Preserves paragraph breaks (double newline between <p>, <div> blocks)
+    - Converts <br> to single newlines
+    - Preserves bullet list structure (<ul>/<ol> → newline-separated items with bullet markers)
+    - Collapses excessive whitespace within lines (but NOT across paragraphs)
+    - Strips leading/trailing whitespace
+
+    Use for: descriptions, web text, specification blocks, accordion content.
+    Do NOT use for: product names, category names, single-value fields (use .get_text(strip=True) for those).
+    """
+    if element is None:
+        return ""
+
+    # Replace <br> with newlines before text extraction
+    for br in element.find_all("br"):
+        br.replace_with("\n")
+
+    parts = []
+
+    # Process block-level children to maintain paragraph structure
+    block_tags = {"p", "div", "h1", "h2", "h3", "h4", "h5", "h6", "section", "article", "blockquote"}
+    list_tags = {"ul", "ol"}
+
+    children = list(element.children)
+    has_block_children = any(
+        getattr(child, "name", None) in (block_tags | list_tags)
+        for child in children
+    )
+
+    if has_block_children:
+        for child in children:
+            tag_name = getattr(child, "name", None)
+            if tag_name in list_tags:
+                # Process list items
+                for li in child.find_all("li", recursive=False):
+                    li_text = li.get_text(strip=True)
+                    if li_text:
+                        parts.append(f"• {li_text}")
+            elif tag_name in block_tags:
+                block_text = child.get_text(strip=True)
+                if block_text:
+                    parts.append(block_text)
+            elif tag_name is None:
+                # NavigableString (raw text)
+                text = str(child).strip()
+                if text:
+                    parts.append(text)
+            else:
+                # Inline elements like <span>, <a>, <strong>
+                text = child.get_text(strip=True)
+                if text:
+                    parts.append(text)
+    else:
+        # No block children — get text but preserve explicit newlines
+        raw = element.get_text()
+        # Normalize spaces within lines but preserve newlines
+        lines = raw.split("\n")
+        for line in lines:
+            cleaned = re.sub(r"[ \t]+", " ", line).strip()
+            if cleaned:
+                parts.append(cleaned)
+
+    result = "\n".join(parts).strip()
+    # Collapse more than 2 consecutive newlines
+    result = re.sub(r"\n{3,}", "\n\n", result)
+    return result
 
 # Sitemap index: maps article_number -> product page URL
 # Built by downloading product pages and extracting SKU from JSON-LD
@@ -190,29 +262,58 @@ def _extract_sku_from_html(html: str) -> Optional[str]:
     return None
 
 
-def _verify_sku_match(html: str, expected_article_number: str) -> bool:
+def _verify_sku_match(html: str, expected_article_number: str) -> tuple[VerificationStatus, str]:
     """Verify that a product page actually belongs to the expected article number.
 
     Checks JSON-LD SKU and page text for the article number to prevent
     cross-contamination (wrong product data attributed to wrong article).
-    Returns True if match is confirmed or cannot be checked, False if mismatch detected.
+
+    For medical products, false-positive verification is dangerous.
+    If identity cannot be confirmed, we mark as UNVERIFIED (not as confirmed).
+
+    Returns:
+        (verification_status, evidence_description)
     """
+    clean_expected = normalize_identifier(expected_article_number) or expected_article_number.strip()
+
     page_sku = _extract_sku_from_html(html)
     if page_sku:
-        # Exact match
-        if page_sku == expected_article_number:
-            return True
+        clean_page = normalize_identifier(page_sku) or page_sku.strip()
+
+        # Exact match (strongest signal)
+        if clean_page == clean_expected:
+            return (
+                VerificationStatus.EXACT_MATCH,
+                f"JSON-LD SKU '{page_sku}' matcher artikkelnummer eksakt",
+            )
+
         # Normalized match (strip leading N, case-insensitive)
-        norm_page = page_sku.lstrip("N").lower()
-        norm_expected = expected_article_number.lstrip("N").lower()
+        norm_page = clean_page.lstrip("N").lower()
+        norm_expected = clean_expected.lstrip("N").lower()
         if norm_page == norm_expected:
-            return True
-        return False
-    # If no SKU in JSON-LD, check if article number appears anywhere in page text
-    if expected_article_number in html:
-        return True
-    # Cannot verify — assume OK to avoid false positives
-    return True
+            return (
+                VerificationStatus.NORMALIZED_MATCH,
+                f"JSON-LD SKU '{page_sku}' matcher etter normalisering (forventet '{expected_article_number}')",
+            )
+
+        # SKU present but DIFFERENT — this is a definite mismatch
+        return (
+            VerificationStatus.MISMATCH,
+            f"JSON-LD SKU '{page_sku}' avviker fra forventet '{expected_article_number}' — mulig feil produkt",
+        )
+
+    # No SKU in JSON-LD — weaker signals only
+    if clean_expected in html:
+        return (
+            VerificationStatus.SKU_IN_PAGE,
+            f"Artikkelnummer '{clean_expected}' funnet i sidetekst (ikke i JSON-LD — svakere bevis)",
+        )
+
+    # Cannot verify — do NOT assume match. For medical products, unverified = unverified.
+    return (
+        VerificationStatus.UNVERIFIED,
+        f"Kunne ikke verifisere artikkelnummer '{expected_article_number}' på produktsiden",
+    )
 
 
 def _parse_product_page(html: str, article_number: str) -> ProductData:
@@ -252,14 +353,15 @@ def _parse_product_page(html: str, article_number: str) -> ProductData:
         logger.debug(f"{tag} description: JSON-LD → {len(product.description)} chars")
     if not product.description:
         # Fallback 1: OneMed accordion section for description
+        # Use _get_structured_text to preserve paragraphs and bullet points
         desc_accordion = soup.find(id="accordionItem_descriptionAndDocuments")
         if desc_accordion:
-            desc_text = desc_accordion.get_text(strip=True)
+            desc_text = _get_structured_text(desc_accordion)
             if desc_text and len(desc_text) > 10:
                 product.description = desc_text
                 logger.debug(
                     f"{tag} description: #accordionItem_descriptionAndDocuments → "
-                    f"{len(desc_text)} chars"
+                    f"{len(desc_text)} chars (structured)"
                 )
             else:
                 logger.debug(
@@ -272,9 +374,9 @@ def _parse_product_page(html: str, article_number: str) -> ProductData:
         # Fallback 2: generic description class
         desc_el = soup.find("div", class_=re.compile(r"description|product-desc", re.I))
         if desc_el:
-            product.description = desc_el.get_text(strip=True)
+            product.description = _get_structured_text(desc_el)
             logger.debug(
-                f"{tag} description: div.description fallback → {len(product.description)} chars"
+                f"{tag} description: div.description fallback → {len(product.description)} chars (structured)"
             )
         else:
             logger.debug(f"{tag} description: MISSING — no JSON-LD, no accordion, no div.description")
@@ -385,7 +487,7 @@ def _parse_product_page(html: str, article_number: str) -> ProductData:
 
     if specs:
         product.technical_details = specs
-        product.specification = "; ".join(f"{k}: {v}" for k, v in specs.items())
+        product.specification = "\n".join(f"{k}: {v}" for k, v in specs.items())
         logger.debug(
             f"{tag} specification: {len(specs)} attrs from "
             f"{set(spec_sources.values())}"
@@ -396,7 +498,7 @@ def _parse_product_page(html: str, article_number: str) -> ProductData:
             r"spec|technical|egenskap", re.I
         ))
         if spec_block:
-            spec_text = spec_block.get_text(strip=True)
+            spec_text = _get_structured_text(spec_block)
             if spec_text and len(spec_text) > 10:
                 product.specification = spec_text
                 logger.debug(
@@ -718,12 +820,22 @@ async def scrape_product(
                 product = _parse_product_page(response.text, clean_num)
                 product.product_url = str(response.url)
                 # Verify SKU matches to prevent cross-contamination
-                if not _verify_sku_match(response.text, clean_num):
+                v_status, v_evidence = _verify_sku_match(response.text, clean_num)
+                product.verification_status = v_status
+                product.verification_evidence = v_evidence
+                if v_status == VerificationStatus.MISMATCH:
                     logger.warning(
-                        f"SKU mismatch for {clean_num} at {known_url} — "
-                        f"page SKU does not match requested article number"
+                        f"SKU MISMATCH for {clean_num} at {known_url}: {v_evidence}"
                     )
-                    product.error = "SKU-mismatch: nettside-data kan tilhøre feil produkt"
+                    product.error = f"SKU-mismatch: {v_evidence}"
+                    product.found_on_onemed = False  # Do NOT trust mismatched data
+                    product.multiple_hits = True  # Flag for review
+                elif v_status == VerificationStatus.UNVERIFIED:
+                    logger.warning(
+                        f"SKU UNVERIFIED for {clean_num} at {known_url}: {v_evidence}"
+                    )
+                    product.error = f"Identitet ikke verifisert: {v_evidence}"
+                    product.multiple_hits = True  # Flag for manual review
                 _save_to_cache(product)
                 return product
 
@@ -744,12 +856,18 @@ async def scrape_product(
                 if response and response.status_code == 200:
                     product = _parse_product_page(response.text, clean_num)
                     product.product_url = str(response.url)
-                    if not _verify_sku_match(response.text, clean_num):
-                        logger.warning(
-                            f"SKU mismatch for {clean_num} at {product_url} — "
-                            f"page SKU does not match requested article number"
-                        )
-                        product.error = "SKU-mismatch: nettside-data kan tilhøre feil produkt"
+                    v_status, v_evidence = _verify_sku_match(response.text, clean_num)
+                    product.verification_status = v_status
+                    product.verification_evidence = v_evidence
+                    if v_status == VerificationStatus.MISMATCH:
+                        logger.warning(f"SKU MISMATCH for {clean_num} at {product_url}: {v_evidence}")
+                        product.error = f"SKU-mismatch: {v_evidence}"
+                        product.found_on_onemed = False
+                        product.multiple_hits = True
+                    elif v_status == VerificationStatus.UNVERIFIED:
+                        logger.warning(f"SKU UNVERIFIED for {clean_num}: {v_evidence}")
+                        product.error = f"Identitet ikke verifisert: {v_evidence}"
+                        product.multiple_hits = True
                     _save_to_cache(product)
                     return product
         else:
@@ -758,8 +876,10 @@ async def scrape_product(
                     f"{clean_num}: not in SKU index, skipping sitemap scan (strict input mode)"
                 )
 
-        # Strategy 4: If CDN image exists, product is in the OneMed system
-        # Return partial data (image analysis and PDF check will fill in the rest)
+        # Strategy 4: If CDN image exists, product MAY be in the OneMed system
+        # CDN image alone is WEAK evidence — mark as CDN_ONLY, not as fully verified.
+        # found_on_onemed=True allows the pipeline to continue, but verification_status
+        # signals that identity is not confirmed.
         if cdn_exists:
             logger.info(f"{clean_num}: CDN image confirmed, product page not found in index")
             product = ProductData(
@@ -767,6 +887,11 @@ async def scrape_product(
                 found_on_onemed=True,
                 image_url=f"{IMAGE_BASE_URL}/{clean_num}.jpg",
                 image_quality_ok=True,
+                verification_status=VerificationStatus.CDN_ONLY,
+                verification_evidence=(
+                    f"Kun CDN-bilde bekreftet for '{clean_num}'. "
+                    f"Ingen produktside funnet — identitet ikke verifisert."
+                ),
                 error=None,
             )
             return product

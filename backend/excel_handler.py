@@ -10,6 +10,7 @@ from openpyxl import Workbook, load_workbook
 from openpyxl.styles import Alignment, Border, Font, PatternFill, Side
 from openpyxl.utils import get_column_letter
 
+from backend.identifiers import normalize_identifier, normalize_identifier_strict
 from backend.models import EnrichmentSuggestion, JeevesData, ProductAnalysis, QualityStatus
 
 logger = logging.getLogger(__name__)
@@ -66,15 +67,14 @@ def read_article_numbers(file_content: bytes, filename: str) -> tuple[list[str],
                     logger.info(f"Found article number column: '{cell_value}' at index {idx}")
                     break
 
-    # Read article numbers
+    # Read article numbers — normalize to prevent float coercion (e.g., 12345.0 → "12345")
     start_row = 2 if header_row else 1
     for row in ws.iter_rows(min_row=start_row, values_only=True):
         if row and len(row) > article_col:
             value = row[article_col]
-            if value is not None:
-                article_num = str(value).strip()
-                if article_num and article_num.lower() not in ("", "none", "nan"):
-                    article_numbers.append(article_num)
+            normalized = normalize_identifier(value)
+            if normalized:
+                article_numbers.append(normalized)
 
     wb.close()
     logger.info(f"Read {len(article_numbers)} article numbers from {filename} (column: {detected_column})")
@@ -145,6 +145,19 @@ def create_output_excel(
     logger.info(f"Excel output saved to {output_path}")
 
 
+def _write_id_cell(ws, row: int, column: int, value, alignment=None):
+    """Write an identifier value to a cell, formatted as text to prevent Excel auto-conversion.
+
+    This ensures article numbers, GIDs, SKUs, and other identifiers are never
+    displayed as scientific notation or truncated floats in Excel.
+    """
+    cell = ws.cell(row=row, column=column, value=normalize_identifier_strict(value))
+    cell.number_format = "@"  # Excel text format — prevents auto-conversion to number
+    if alignment:
+        cell.alignment = alignment
+    return cell
+
+
 def _style_header(ws, row: int, num_cols: int) -> None:
     """Apply header styling to a row."""
     header_fill = PatternFill(start_color="4472C4", end_color="4472C4", fill_type="solid")
@@ -202,6 +215,8 @@ def _create_overview_sheet(ws, results: list[ProductAnalysis]) -> None:
         "Artikkelnummer",
         "Produktnavn",
         "Funnet p\u00e5 OneMed",
+        "Verifiseringsstatus",
+        "Verifiseringsbevis",
         "Total score (%)",
         "Status",
         "Kommentar",
@@ -229,35 +244,47 @@ def _create_overview_sheet(ws, results: list[ProductAnalysis]) -> None:
         iq = result.image_quality or {}
         enriched = [e for e in result.enrichment_results if e.match_status != "NOT_FOUND"]
         conflicts = [e for e in result.enrichment_results if e.match_status == "FOUND_IN_BOTH_CONFLICT"]
-        ws.cell(row=row_idx, column=1, value=result.article_number)
+        _write_id_cell(ws, row_idx, 1, result.article_number)
         ws.cell(row=row_idx, column=2, value=pd.product_name or "")
         ws.cell(row=row_idx, column=3, value="Ja" if pd.found_on_onemed else "Nei")
-        ws.cell(row=row_idx, column=4, value=result.total_score)
-        status_cell = ws.cell(row=row_idx, column=5, value=result.overall_status.value)
+        # Verification status and evidence (P0-2 fix)
+        v_status = pd.verification_status.value if hasattr(pd.verification_status, 'value') else str(pd.verification_status)
+        v_cell = ws.cell(row=row_idx, column=4, value=v_status)
+        # Color-code verification: green=exact, yellow=weak, red=mismatch
+        from backend.models import VerificationStatus as VS
+        if pd.verification_status in (VS.EXACT_MATCH, VS.NORMALIZED_MATCH):
+            v_cell.fill = PatternFill(start_color="C6EFCE", end_color="C6EFCE", fill_type="solid")
+        elif pd.verification_status in (VS.CDN_ONLY, VS.UNVERIFIED, VS.SKU_IN_PAGE):
+            v_cell.fill = PatternFill(start_color="FFEB9C", end_color="FFEB9C", fill_type="solid")
+        elif pd.verification_status in (VS.MISMATCH, VS.AMBIGUOUS):
+            v_cell.fill = PatternFill(start_color="FFC7CE", end_color="FFC7CE", fill_type="solid")
+        ws.cell(row=row_idx, column=5, value=pd.verification_evidence or "")
+        ws.cell(row=row_idx, column=6, value=result.total_score)
+        status_cell = ws.cell(row=row_idx, column=7, value=result.overall_status.value)
         _apply_status_style(status_cell, result.overall_status)
-        ws.cell(row=row_idx, column=6, value=result.overall_comment or "")
-        ws.cell(row=row_idx, column=7, value=pd.manufacturer or "")
-        ws.cell(row=row_idx, column=8, value=pd.category or "")
+        ws.cell(row=row_idx, column=8, value=result.overall_comment or "")
+        ws.cell(row=row_idx, column=9, value=pd.manufacturer or "")
+        ws.cell(row=row_idx, column=10, value=pd.category or "")
         # Image quality columns
         img_score = iq.get("avg_image_score", 0)
         img_status = iq.get("image_quality_status", "MISSING")
         img_count = iq.get("image_count_found", 0)
-        ws.cell(row=row_idx, column=9, value=round(img_score, 1) if img_score else 0)
-        img_status_cell = ws.cell(row=row_idx, column=10, value=img_status)
+        ws.cell(row=row_idx, column=11, value=round(img_score, 1) if img_score else 0)
+        img_status_cell = ws.cell(row=row_idx, column=12, value=img_status)
         _apply_image_status_style(img_status_cell, img_status)
-        ws.cell(row=row_idx, column=11, value=img_count)
+        ws.cell(row=row_idx, column=13, value=img_count)
         # Enrichment columns
-        ws.cell(row=row_idx, column=12, value="Ja" if result.pdf_available else "Nei")
-        ws.cell(row=row_idx, column=13, value=len(enriched))
-        conflict_cell = ws.cell(row=row_idx, column=14, value=len(conflicts))
+        ws.cell(row=row_idx, column=14, value="Ja" if result.pdf_available else "Nei")
+        ws.cell(row=row_idx, column=15, value=len(enriched))
+        conflict_cell = ws.cell(row=row_idx, column=16, value=len(conflicts))
         if conflicts:
             conflict_cell.fill = PatternFill(start_color="FFEB9C", end_color="FFEB9C", fill_type="solid")
             conflict_cell.font = Font(color="9C6500")
-        ws.cell(row=row_idx, column=15, value="Ja" if result.auto_fix_possible else "Nei")
-        ws.cell(row=row_idx, column=16, value="Ja" if result.manual_review_needed else "Nei")
-        ws.cell(row=row_idx, column=17, value="Ja" if result.requires_manufacturer_contact else "Nei")
-        ws.cell(row=row_idx, column=18, value=pd.product_url or "")
-        ws.cell(row=row_idx, column=19, value=result.pdf_url or "")
+        ws.cell(row=row_idx, column=17, value="Ja" if result.auto_fix_possible else "Nei")
+        ws.cell(row=row_idx, column=18, value="Ja" if result.manual_review_needed else "Nei")
+        ws.cell(row=row_idx, column=19, value="Ja" if result.requires_manufacturer_contact else "Nei")
+        ws.cell(row=row_idx, column=20, value=pd.product_url or "")
+        ws.cell(row=row_idx, column=21, value=result.pdf_url or "")
 
     for col in range(1, len(headers) + 1):
         ws.column_dimensions[get_column_letter(col)].width = max(15, len(headers[col - 1]) + 5)
@@ -287,7 +314,7 @@ def _create_detail_sheet(ws, results: list[ProductAnalysis]) -> None:
     row_idx = 2
     for result in results:
         for fa in result.field_analyses:
-            ws.cell(row=row_idx, column=1, value=result.article_number)
+            _write_id_cell(ws, row_idx, 1, result.article_number)
             ws.cell(row=row_idx, column=2, value=result.product_data.product_name or "")
             ws.cell(row=row_idx, column=3, value=fa.field_name)
             ws.cell(row=row_idx, column=4, value=fa.current_value or "")
@@ -337,7 +364,7 @@ def _create_improvements_sheet(ws, results: list[ProductAnalysis]) -> None:
         # First: enrichment suggestions (higher priority, with evidence)
         for es in result.enrichment_suggestions:
             if es.suggested_value:
-                ws.cell(row=row_idx, column=1, value=result.article_number)
+                _write_id_cell(ws, row_idx, 1, result.article_number)
                 ws.cell(row=row_idx, column=2, value=result.product_data.product_name or "")
                 ws.cell(row=row_idx, column=3, value=es.field_name)
                 ws.cell(row=row_idx, column=4, value=es.current_value or "")
@@ -355,7 +382,7 @@ def _create_improvements_sheet(ws, results: list[ProductAnalysis]) -> None:
         # Then: field analysis suggestions (for fields not covered by enricher)
         for fa in result.field_analyses:
             if fa.suggested_value and fa.field_name not in enriched_fields:
-                ws.cell(row=row_idx, column=1, value=result.article_number)
+                _write_id_cell(ws, row_idx, 1, result.article_number)
                 ws.cell(row=row_idx, column=2, value=result.product_data.product_name or "")
                 ws.cell(row=row_idx, column=3, value=fa.field_name)
                 ws.cell(row=row_idx, column=4, value=fa.current_value or "")
@@ -418,7 +445,7 @@ def _create_manufacturer_sheet(ws, results: list[ProductAnalysis]) -> None:
                 if fa.status in (QualityStatus.MISSING, QualityStatus.REQUIRES_MANUFACTURER)
             ]
             ws.cell(row=row_idx, column=1, value=manufacturer)
-            ws.cell(row=row_idx, column=2, value=result.article_number)
+            _write_id_cell(ws, row_idx, 2, result.article_number)
             ws.cell(row=row_idx, column=3, value=result.product_data.product_name or "")
             ws.cell(row=row_idx, column=4, value=", ".join(missing_fields))
             status_cell = ws.cell(row=row_idx, column=5, value=result.overall_status.value)
@@ -474,7 +501,7 @@ def _create_image_detail_sheet(ws, results: list[ProductAnalysis]) -> None:
         if not iq:
             continue
         for img in iq.get("image_analyses", []):
-            ws.cell(row=row_idx, column=1, value=result.article_number)
+            _write_id_cell(ws, row_idx, 1, result.article_number)
             ws.cell(row=row_idx, column=2, value=img.get("image_name", ""))
             ws.cell(row=row_idx, column=3, value=img.get("image_url", ""))
             ws.cell(row=row_idx, column=4, value="Ja" if img.get("exists") else "Nei")
@@ -553,7 +580,7 @@ def _create_image_issues_sheet(ws, results: list[ProductAnalysis]) -> None:
     for _, priority, result, iq in issue_rows:
         label = priority_labels.get(priority, priority)
         ws.cell(row=row_idx, column=1, value=label)
-        ws.cell(row=row_idx, column=2, value=result.article_number)
+        _write_id_cell(ws, row_idx, 2, result.article_number)
         ws.cell(row=row_idx, column=3, value=result.product_data.product_name or "")
         status = iq.get("image_quality_status", "MISSING")
         status_cell = ws.cell(row=row_idx, column=4, value=status)
@@ -756,14 +783,14 @@ def _create_comparison_and_enrichment_sheet(ws, results: list[ProductAnalysis]) 
 
         # --- Write row ---
         c = 1
-        # IDENTIFIERS
-        ws.cell(row=row_idx, column=c, value=result.article_number).alignment = top_align; c += 1
-        ws.cell(row=row_idx, column=c, value=jeeves.gid if jeeves else "").alignment = top_align; c += 1
+        # IDENTIFIERS — formatted as text to prevent Excel auto-conversion
+        _write_id_cell(ws, row_idx, c, result.article_number, top_align); c += 1
+        _write_id_cell(ws, row_idx, c, jeeves.gid if jeeves else "", top_align); c += 1
         # JEEVES SOURCE VALUES
         ws.cell(row=row_idx, column=c, value=jeeves.item_description if jeeves else "").alignment = top_align; c += 1
         ws.cell(row=row_idx, column=c, value=jeeves.specification if jeeves else "").alignment = wrap_align; c += 1
         ws.cell(row=row_idx, column=c, value=jeeves.supplier if jeeves else "").alignment = top_align; c += 1
-        ws.cell(row=row_idx, column=c, value=jeeves.supplier_item_no if jeeves else "").alignment = top_align; c += 1
+        _write_id_cell(ws, row_idx, c, jeeves.supplier_item_no if jeeves else "", top_align); c += 1
         ws.cell(row=row_idx, column=c, value=jeeves.product_brand if jeeves else "").alignment = top_align; c += 1
         ws.cell(row=row_idx, column=c, value=jeeves.web_title if jeeves else "").alignment = top_align; c += 1
         ws.cell(row=row_idx, column=c, value=jeeves.web_text if jeeves else "").alignment = wrap_align; c += 1
@@ -856,7 +883,7 @@ def _create_conflicts_sheet(ws, results: list[ProductAnalysis]) -> None:
         for er in result.enrichment_results:
             if er.match_status != "FOUND_IN_BOTH_CONFLICT":
                 continue
-            ws.cell(row=row_idx, column=1, value=result.article_number)
+            _write_id_cell(ws, row_idx, 1, result.article_number)
             ws.cell(row=row_idx, column=2, value=result.product_data.product_name or "")
             ws.cell(row=row_idx, column=3, value=er.field_name)
             ws.cell(row=row_idx, column=4, value=er.current_value or "")
@@ -1122,7 +1149,7 @@ def _create_debug_log_sheet(ws, results: list[ProductAnalysis]) -> None:
         raw_packaging = product.packaging_info or product.packaging_unit or ""
 
         c = 1
-        ws.cell(row=row_idx, column=c, value=result.article_number).alignment = top_align; c += 1
+        _write_id_cell(ws, row_idx, c, result.article_number, top_align); c += 1
         ws.cell(row=row_idx, column=c, value=product.product_url or "").alignment = top_align; c += 1
         ws.cell(row=row_idx, column=c, value="Ja" if product.found_on_onemed else "Nei").alignment = top_align; c += 1
         ws.cell(row=row_idx, column=c, value=accordion_status).alignment = top_align; c += 1
@@ -1429,7 +1456,7 @@ def _create_inriver_import_sheet(ws, results: list[ProductAnalysis]) -> None:
             sources.add("existing catalog")
 
         # Col 1: Artikkelnummer
-        ws.cell(row=row_idx, column=1, value=result.article_number).alignment = top_alignment
+        _write_id_cell(ws, row_idx, 1, result.article_number, top_alignment)
 
         # Col 2-3: Produktnavn
         ws.cell(row=row_idx, column=2, value=pd.product_name or "").alignment = top_alignment

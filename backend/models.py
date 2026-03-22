@@ -15,6 +15,22 @@ class QualityStatus(str, Enum):
     REQUIRES_MANUFACTURER = "Krever produsent"
 
 
+class VerificationStatus(str, Enum):
+    """How confidently a product's identity was verified on the website.
+
+    Used to prevent false-positive identity matches for medical products.
+    False negatives (marking as unverified) are always preferable to
+    false positives (confirming wrong product identity).
+    """
+    EXACT_MATCH = "eksakt_treff"           # SKU in JSON-LD matches exactly
+    NORMALIZED_MATCH = "normalisert_treff"  # SKU matches after normalization (e.g., leading N stripped)
+    SKU_IN_PAGE = "sku_i_sidetekst"        # Article number found in page text (weaker)
+    CDN_ONLY = "kun_cdn"                   # Only CDN image confirmed, no page data
+    UNVERIFIED = "ikke_verifisert"         # Cannot verify identity
+    MISMATCH = "feil_treff"               # Page SKU contradicts expected article number
+    AMBIGUOUS = "tvetydig"                 # Multiple signals conflict
+
+
 class EnrichmentSourceLevel(str, Enum):
     INTERNAL_PRODUCT_SHEET = "internal_product_sheet"
     MANUFACTURER_SOURCE = "manufacturer_source"
@@ -113,6 +129,8 @@ class ProductData(BaseModel):
     product_url: Optional[str] = None
     found_on_onemed: bool = False
     multiple_hits: bool = False
+    verification_status: VerificationStatus = VerificationStatus.UNVERIFIED
+    verification_evidence: Optional[str] = None  # Human-readable explanation of verification
     error: Optional[str] = None
 
 

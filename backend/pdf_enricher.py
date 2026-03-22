@@ -218,8 +218,10 @@ def _extract_field_from_text(text: str, field_name: str) -> Optional[tuple[str, 
         match = re.search(pattern, text, re.IGNORECASE | re.MULTILINE | re.DOTALL)
         if match:
             value = match.group(1).strip()
-            # Collapse internal whitespace for multi-line captures
-            value = re.sub(r"\s+", " ", value).strip()
+            # Normalize whitespace within lines but preserve paragraph breaks
+            lines = value.split("\n")
+            normalized_lines = [re.sub(r"[ \t]+", " ", line).strip() for line in lines]
+            value = "\n".join(line for line in normalized_lines if line).strip()
             if not value or len(value) <= 1:
                 continue
             if len(value) > max_len:
@@ -245,8 +247,8 @@ def _extract_field_from_text(text: str, field_name: str) -> Optional[tuple[str, 
             start = max(0, match.start() - 80)
             end = min(len(text), match.end() + 80)
             snippet = text[start:end].strip()
-            # Collapse whitespace in snippet too
-            snippet = re.sub(r"\s+", " ", snippet)
+            # Normalize whitespace in snippet (spaces only, preserve newlines for readability)
+            snippet = re.sub(r"[ \t]+", " ", snippet)
 
             return value, snippet, quality
 
@@ -512,17 +514,20 @@ def _values_match(val_a: str, val_b: str) -> bool:
     """Check if two extracted values are essentially the same.
 
     Handles minor formatting differences, whitespace, case.
+    Note: this collapses whitespace for COMPARISON only — original values are preserved.
     """
     if val_a == val_b:
         return True
-    # Normalize: remove extra whitespace, common punctuation
-    norm_a = re.sub(r"[\s\-_/.,;:]+", " ", val_a).strip()
-    norm_b = re.sub(r"[\s\-_/.,;:]+", " ", val_b).strip()
+    # Normalize for comparison: collapse whitespace, common punctuation, case
+    norm_a = re.sub(r"[\s\-_/.,;:]+", " ", val_a).strip().lower()
+    norm_b = re.sub(r"[\s\-_/.,;:]+", " ", val_b).strip().lower()
     if norm_a == norm_b:
         return True
-    # Check if one contains the other (for partial matches)
+    # Substring match: only for short values (single attributes, not full descriptions)
+    # For medical products, "Nitril" should not match "Nitril lateksfri" — require >80% overlap
     if len(norm_a) > 5 and len(norm_b) > 5:
-        if norm_a in norm_b or norm_b in norm_a:
+        shorter, longer = (norm_a, norm_b) if len(norm_a) <= len(norm_b) else (norm_b, norm_a)
+        if shorter in longer and len(shorter) >= len(longer) * 0.8:
             return True
     return False
 

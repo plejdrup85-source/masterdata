@@ -677,9 +677,19 @@ def analyze_product(
     )
 
     analysis.requires_manufacturer_contact = requires_mfr
+
+    # Trigger manual review for quality issues, ambiguous identity, or weak verification
+    from backend.models import VerificationStatus
+    weak_verification = product.verification_status in (
+        VerificationStatus.CDN_ONLY,
+        VerificationStatus.UNVERIFIED,
+        VerificationStatus.MISMATCH,
+        VerificationStatus.AMBIGUOUS,
+    )
     analysis.manual_review_needed = (
         analysis.overall_status in (QualityStatus.PROBABLE_ERROR, QualityStatus.MISSING)
         or product.multiple_hits
+        or weak_verification
     )
     analysis.auto_fix_possible = (
         analysis.overall_status == QualityStatus.SHOULD_IMPROVE
