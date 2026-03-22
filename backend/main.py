@@ -507,28 +507,33 @@ async def get_results(job_id: str):
     }
 
 
-@app.get("/api/families/{job_id}")
-async def get_families(job_id: str):
-    """Run family/variant detection on completed analysis results.
+# ── Family / Relationship Analysis API ──
+# Persisted results: stored per job_id so results survive page refreshes
+_family_results: dict[str, dict] = {}  # job_id/source_id → full family results with review state
 
-    Returns product families with Mother/Child structure, variant dimensions,
-    and confidence scoring for Inriver/webshop review.
-    """
-    from backend.family_detector import detect_families, products_from_analyses
+FAMILY_OUTPUT_DIR = OUTPUT_DIR / "families"
+FAMILY_OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
 
-    job = jobs.get(job_id)
-    if not job:
-        raise HTTPException(404, "Jobb ikke funnet")
-    if job.status != JobStatus.COMPLETED:
-        raise HTTPException(400, "Analyse ikke fullført ennå")
-    if not job.results:
-        raise HTTPException(400, "Ingen resultater tilgjengelig")
 
-    # Build product dicts from analysis results and run family detection
-    product_dicts = products_from_analyses(job.results)
-    families, all_members = detect_families(product_dicts)
+def _serialize_family_member(m):
+    return {
+        "article_number": m.article_number,
+        "role": m.role,
+        "product_name": m.product_name,
+        "specification": m.specification,
+        "child_specific_title": m.child_specific_title,
+        "variant_dimensions": [
+            {"name": d.dimension_name, "value": d.value, "source": d.source}
+            for d in m.variant_dimensions
+        ],
+    }
 
-    # Serialize families for JSON response
+
+def _run_family_detection(products: list[dict], source_id: str) -> dict:
+    """Run family detection and persist results."""
+    from backend.family_detector import detect_families
+    families, all_members = detect_families(products)
+
     family_list = []
     for f in sorted(families, key=lambda x: (-x.confidence, -len(x.members))):
         family_list.append({
@@ -540,37 +545,289 @@ async def get_families(job_id: str):
             "confidence": f.confidence,
             "review_required": f.review_required,
             "grouping_reason": f.grouping_reason,
-            "members": [
-                {
-                    "article_number": m.article_number,
-                    "role": m.role,
-                    "product_name": m.product_name,
-                    "specification": m.specification,
-                    "child_specific_title": m.child_specific_title,
-                    "variant_dimensions": [
-                        {"name": d.dimension_name, "value": d.value, "source": d.source}
-                        for d in m.variant_dimensions
-                    ],
-                }
-                for m in f.members
-            ],
+            "review_status": "pending",  # pending / accepted / rejected / needs_review
+            "review_comment": "",
+            "members": [_serialize_family_member(m) for m in f.members],
         })
 
-    # Summary stats
+    standalone_list = [
+        {
+            "article_number": m.article_number,
+            "product_name": m.product_name,
+            "specification": m.specification,
+            "grouping_reason": m.grouping_reason,
+            "confidence": m.confidence,
+        }
+        for m in all_members if m.role == "standalone"
+    ]
+
     families_with_dims = sum(1 for f in families if f.variant_dimension_names)
     strong = sum(1 for f in families if f.confidence >= 0.65)
-    standalone_count = sum(1 for m in all_members if m.role == "standalone")
 
-    return {
-        "job_id": job_id,
+    result = {
+        "source_id": source_id,
         "total_products": len(all_members),
         "total_families": len(families),
         "strong_families": strong,
         "families_with_dimensions": families_with_dims,
         "families_without_dimensions": len(families) - families_with_dims,
-        "standalone_products": standalone_count,
+        "standalone_products": len(standalone_list),
         "families": family_list,
+        "standalone": standalone_list,
     }
+
+    # Persist in memory
+    _family_results[source_id] = result
+
+    # Persist to disk
+    try:
+        import json
+        disk_path = FAMILY_OUTPUT_DIR / f"{source_id}.json"
+        disk_path.write_text(json.dumps(result, ensure_ascii=False, indent=2), encoding="utf-8")
+        logger.info(f"Family results persisted to {disk_path}")
+    except Exception as e:
+        logger.warning(f"Failed to persist family results: {e}")
+
+    return result
+
+
+@app.get("/api/families/{job_id}")
+async def get_families(job_id: str):
+    """Get or compute family detection results for a completed analysis job.
+
+    Results are cached: first call computes, subsequent calls return persisted data.
+    """
+    # Check memory cache first
+    if job_id in _family_results:
+        return _family_results[job_id]
+
+    # Check disk cache
+    import json
+    disk_path = FAMILY_OUTPUT_DIR / f"{job_id}.json"
+    if disk_path.exists():
+        try:
+            result = json.loads(disk_path.read_text(encoding="utf-8"))
+            _family_results[job_id] = result
+            return result
+        except Exception:
+            pass
+
+    # Compute from analysis job
+    from backend.family_detector import products_from_analyses
+    job = jobs.get(job_id)
+    if not job:
+        raise HTTPException(404, "Jobb ikke funnet")
+    if job.status != JobStatus.COMPLETED:
+        raise HTTPException(400, "Analyse ikke fullført ennå")
+    if not job.results:
+        raise HTTPException(400, "Ingen resultater tilgjengelig")
+
+    product_dicts = products_from_analyses(job.results)
+    return _run_family_detection(product_dicts, job_id)
+
+
+@app.post("/api/families/analyze-jeeves")
+async def analyze_jeeves_families():
+    """Run family detection directly on the loaded Jeeves ERP data.
+
+    Does NOT require a completed quality analysis job — works independently
+    using the Jeeves dataset that was loaded at startup.
+    """
+    from backend.family_detector import products_from_jeeves_index
+
+    if not _jeeves_index or not _jeeves_index.loaded:
+        raise HTTPException(400, "Jeeves-data er ikke lastet inn")
+
+    source_id = "jeeves-direct"
+
+    # Return cached if available
+    if source_id in _family_results:
+        return _family_results[source_id]
+
+    product_dicts = products_from_jeeves_index(_jeeves_index)
+    return _run_family_detection(product_dicts, source_id)
+
+
+@app.post("/api/families/analyze-upload")
+async def analyze_upload_families(file: UploadFile = File(...)):
+    """Run family detection on an uploaded Excel file directly.
+
+    Reads article numbers from the file, looks up Jeeves data for each,
+    and runs family detection without requiring a full quality analysis.
+    """
+    from backend.family_detector import products_from_jeeves_index
+
+    if not _jeeves_index or not _jeeves_index.loaded:
+        raise HTTPException(400, "Jeeves-data er ikke lastet inn — kreves for familieanalyse")
+
+    content = await file.read()
+    article_numbers, _ = read_article_numbers(content, file.filename or "upload.xlsx")
+    if not article_numbers:
+        raise HTTPException(400, "Ingen artikkelnumre funnet i filen")
+
+    # Build product dicts from Jeeves for the uploaded articles only
+    products = []
+    for artnr in article_numbers:
+        j = _jeeves_index.get(artnr)
+        if j:
+            products.append({
+                "article_number": j.article_number,
+                "product_name": j.item_description or j.web_title or "",
+                "brand": j.product_brand or "",
+                "supplier": j.supplier or "",
+                "specification": j.specification or "",
+                "technical_details": {},
+                "category": "",
+            })
+
+    if not products:
+        raise HTTPException(400, "Ingen produkter funnet i Jeeves for de oppgitte artiklene")
+
+    import hashlib
+    source_id = f"upload-{hashlib.md5(content).hexdigest()[:8]}"
+    return _run_family_detection(products, source_id)
+
+
+@app.put("/api/families/{source_id}/review/{family_id}")
+async def update_family_review(source_id: str, family_id: str, data: dict):
+    """Update review status and comment for a single family.
+
+    Body: {"review_status": "accepted"|"rejected"|"needs_review"|"pending",
+           "review_comment": "optional note",
+           "family_name": "optional edited name"}
+    """
+    if source_id not in _family_results:
+        # Try loading from disk
+        import json
+        disk_path = FAMILY_OUTPUT_DIR / f"{source_id}.json"
+        if disk_path.exists():
+            _family_results[source_id] = json.loads(disk_path.read_text(encoding="utf-8"))
+        else:
+            raise HTTPException(404, "Familieresultater ikke funnet")
+
+    result = _family_results[source_id]
+    family = next((f for f in result["families"] if f["family_id"] == family_id), None)
+    if not family:
+        raise HTTPException(404, f"Familie {family_id} ikke funnet")
+
+    valid_statuses = {"pending", "accepted", "rejected", "needs_review"}
+    new_status = data.get("review_status")
+    if new_status and new_status not in valid_statuses:
+        raise HTTPException(400, f"Ugyldig status: {new_status}. Gyldige: {valid_statuses}")
+
+    if new_status:
+        family["review_status"] = new_status
+    if "review_comment" in data:
+        family["review_comment"] = data["review_comment"]
+    if "family_name" in data and data["family_name"]:
+        family["family_name"] = data["family_name"]
+
+    # Persist to disk
+    import json
+    try:
+        disk_path = FAMILY_OUTPUT_DIR / f"{source_id}.json"
+        disk_path.write_text(json.dumps(result, ensure_ascii=False, indent=2), encoding="utf-8")
+    except Exception as e:
+        logger.warning(f"Failed to persist review update: {e}")
+
+    return {"status": "ok", "family_id": family_id, "review_status": family.get("review_status")}
+
+
+@app.get("/api/families/{source_id}/export")
+async def export_families(source_id: str):
+    """Export family results as an Excel file."""
+    import json
+    from openpyxl import Workbook
+    from openpyxl.styles import Font, PatternFill, Alignment
+
+    if source_id not in _family_results:
+        disk_path = FAMILY_OUTPUT_DIR / f"{source_id}.json"
+        if disk_path.exists():
+            _family_results[source_id] = json.loads(disk_path.read_text(encoding="utf-8"))
+        else:
+            raise HTTPException(404, "Familieresultater ikke funnet")
+
+    data = _family_results[source_id]
+    wb = Workbook()
+
+    # Sheet 1: Families
+    ws = wb.active
+    ws.title = "Produktfamilier"
+    headers = [
+        "Familie_ID", "Familienavn", "Antall", "Variantdimensjoner",
+        "Mor_Artikkel", "Konfidensgrad", "Gjennomgang_status",
+        "Kommentar", "Grupperingsgrunn",
+    ]
+    hfont = Font(bold=True, color="FFFFFF", size=10)
+    hfill = PatternFill(start_color="4472C4", end_color="4472C4", fill_type="solid")
+    for i, h in enumerate(headers, 1):
+        c = ws.cell(row=1, column=i, value=h)
+        c.font = hfont
+        c.fill = hfill
+    for row_idx, f in enumerate(data["families"], 2):
+        ws.cell(row=row_idx, column=1, value=f["family_id"])
+        ws.cell(row=row_idx, column=2, value=f["family_name"])
+        ws.cell(row=row_idx, column=3, value=f["member_count"])
+        ws.cell(row=row_idx, column=4, value=", ".join(f.get("variant_dimensions", [])))
+        ws.cell(row=row_idx, column=5, value=f.get("mother_article") or "(abstrakt)")
+        ws.cell(row=row_idx, column=6, value=f["confidence"])
+        ws.cell(row=row_idx, column=7, value=f.get("review_status", "pending"))
+        ws.cell(row=row_idx, column=8, value=f.get("review_comment", ""))
+        ws.cell(row=row_idx, column=9, value=f["grouping_reason"])
+    ws.freeze_panes = "A2"
+
+    # Sheet 2: Members
+    ws2 = wb.create_sheet("Familiemedlemmer")
+    mheaders = [
+        "Familie_ID", "Familienavn", "Artikkelnummer", "Rolle",
+        "Produktnavn", "Spesifikasjon", "Barnespesifikt", "Varianter",
+    ]
+    for i, h in enumerate(mheaders, 1):
+        c = ws2.cell(row=1, column=i, value=h)
+        c.font = hfont
+        c.fill = hfill
+    row = 2
+    for f in data["families"]:
+        for m in f["members"]:
+            ws2.cell(row=row, column=1, value=f["family_id"])
+            ws2.cell(row=row, column=2, value=f["family_name"])
+            ws2.cell(row=row, column=3, value=m["article_number"])
+            ws2.cell(row=row, column=4, value=m["role"])
+            ws2.cell(row=row, column=5, value=m.get("product_name", ""))
+            ws2.cell(row=row, column=6, value=m.get("specification", ""))
+            ws2.cell(row=row, column=7, value=m.get("child_specific_title", ""))
+            dims = ", ".join(f'{d["name"]}={d["value"]}' for d in m.get("variant_dimensions", []))
+            ws2.cell(row=row, column=8, value=dims)
+            row += 1
+    ws2.freeze_panes = "A2"
+
+    # Sheet 3: Standalone
+    ws3 = wb.create_sheet("Frittstående")
+    sheaders = ["Artikkelnummer", "Produktnavn", "Spesifikasjon", "Årsak", "Konfidensgrad"]
+    for i, h in enumerate(sheaders, 1):
+        c = ws3.cell(row=1, column=i, value=h)
+        c.font = hfont
+        c.fill = hfill
+    for row_idx, s in enumerate(data.get("standalone", []), 2):
+        ws3.cell(row=row_idx, column=1, value=s["article_number"])
+        ws3.cell(row=row_idx, column=2, value=s.get("product_name", ""))
+        ws3.cell(row=row_idx, column=3, value=s.get("specification", ""))
+        ws3.cell(row=row_idx, column=4, value=s.get("grouping_reason", ""))
+        ws3.cell(row=row_idx, column=5, value=s.get("confidence", ""))
+    ws3.freeze_panes = "A2"
+
+    # Save and return
+    from io import BytesIO
+    buffer = BytesIO()
+    wb.save(buffer)
+    buffer.seek(0)
+
+    from starlette.responses import StreamingResponse
+    return StreamingResponse(
+        buffer,
+        media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+        headers={"Content-Disposition": f"attachment; filename=produktfamilier_{source_id}.xlsx"},
+    )
 
 
 @app.post("/api/score-product")

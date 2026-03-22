@@ -556,6 +556,57 @@
             align-items: center;
             font-size: 0.85rem;
         }
+        .family-review-bar {
+            display: flex;
+            gap: 0.4rem;
+            align-items: center;
+            flex-wrap: wrap;
+            padding: 0.5rem 0;
+            border-top: 1px solid var(--border);
+            margin-top: 0.5rem;
+        }
+        .review-btn {
+            padding: 0.25rem 0.6rem;
+            border: 1px solid var(--border);
+            border-radius: 6px;
+            font-size: 0.78rem;
+            cursor: pointer;
+            background: #fff;
+            font-weight: 500;
+        }
+        .review-btn:hover { background: #f1f5f9; }
+        .review-btn.active-accept { background: #dcfce7; border-color: #86efac; color: #166534; }
+        .review-btn.active-reject { background: #fecaca; border-color: #fca5a5; color: #991b1b; }
+        .review-btn.active-needs_review { background: #fef3c7; border-color: #fde68a; color: #92400e; }
+        .review-comment {
+            flex: 1;
+            min-width: 150px;
+            padding: 0.25rem 0.5rem;
+            border: 1px solid var(--border);
+            border-radius: 6px;
+            font-size: 0.78rem;
+        }
+        .standalone-table {
+            width: 100%;
+            border-collapse: collapse;
+            font-size: 0.82rem;
+        }
+        .standalone-table th {
+            text-align: left;
+            padding: 0.4rem 0.5rem;
+            border-bottom: 2px solid var(--border);
+            color: var(--text-muted);
+            font-weight: 600;
+            font-size: 0.78rem;
+        }
+        .standalone-table td {
+            padding: 0.35rem 0.5rem;
+            border-bottom: 1px solid #f1f5f9;
+        }
+        .badge-accepted { background: #dcfce7; color: #166534; }
+        .badge-rejected { background: #fecaca; color: #991b1b; }
+        .badge-needs_review { background: #fef3c7; color: #92400e; }
+        .badge-pending { background: #e2e8f0; color: #475569; }
         .family-filter-bar select, .family-filter-bar input {
             padding: 0.4rem 0.6rem;
             border: 1px solid var(--border);
@@ -634,7 +685,16 @@
             <div class="column-info hidden" id="batchInfo"></div>
             <div class="actions">
                 <button class="btn btn-primary" id="startBtn" disabled>Start analyse</button>
+                <button class="btn btn-primary" id="familyOnlyBtn" disabled style="background:#7c3aed;font-size:0.9rem">Kun familieanalyse</button>
                 <span id="fileInfo" style="color:var(--text-muted);font-size:0.9rem"></span>
+            </div>
+            <div style="margin-top:0.5rem">
+                <button class="btn btn-primary" id="jeevesDirectBtn" style="background:#7c3aed;font-size:0.85rem;padding:0.5rem 1rem">
+                    Analyser hele Jeeves-katalogen
+                </button>
+                <span style="color:var(--text-muted);font-size:0.8rem;margin-left:0.5rem">
+                    Kjør familieanalyse direkte på all Jeeves-data (uten kvalitetsanalyse)
+                </span>
             </div>
         </div>
 
@@ -695,24 +755,34 @@
             </div>
         </div>
 
-        <!-- Product Families Section (appears after analysis completes) -->
+        <!-- Product Families Section -->
         <div class="results-section" id="familiesSection">
             <div class="card">
-                <h2>Produktfamilier / Variantstruktur</h2>
-                <p style="color:var(--text-muted);font-size:0.9rem;margin-bottom:1rem">
-                    Foreslått Mor/Barn-struktur for Inriver og webshop.
-                    Klikk på en familie for å se medlemmer og variantdimensjoner.
-                </p>
-                <div class="stats-grid" id="familyStatsGrid"></div>
+                <div style="display:flex;justify-content:space-between;align-items:center;flex-wrap:wrap;gap:0.5rem">
+                    <div>
+                        <h2 style="margin-bottom:0.25rem">Produktfamilier / Variantstruktur</h2>
+                        <p style="color:var(--text-muted);font-size:0.85rem;margin:0">
+                            Foreslått Mor/Barn-struktur for Inriver og webshop.
+                        </p>
+                    </div>
+                    <div style="display:flex;gap:0.5rem;flex-wrap:wrap">
+                        <button class="btn btn-success" id="exportFamiliesBtn" style="font-size:0.85rem;padding:0.5rem 1rem">Last ned Excel</button>
+                        <button class="btn btn-primary" id="closeFamiliesBtn" style="font-size:0.85rem;padding:0.5rem 1rem;background:#64748b">Lukk</button>
+                    </div>
+                </div>
+                <div class="stats-grid" id="familyStatsGrid" style="margin-top:1rem"></div>
 
                 <div class="family-filter-bar" id="familyFilterBar">
                     <label>Vis:
                         <select id="familyFilter">
                             <option value="all">Alle familier</option>
-                            <option value="strong">Sterke familier (konf. ≥ 0.65)</option>
+                            <option value="strong">Sterke (konf. ≥ 0.65)</option>
                             <option value="review">Krever gjennomgang</option>
-                            <option value="no-dims">Uten variantdimensjoner</option>
-                            <option value="with-dims">Med variantdimensjoner</option>
+                            <option value="accepted">Godkjent</option>
+                            <option value="rejected">Avvist</option>
+                            <option value="needs_review">Manuell vurdering</option>
+                            <option value="no-dims">Uten varianter</option>
+                            <option value="with-dims">Med varianter</option>
                         </select>
                     </label>
                     <label>Søk:
@@ -722,6 +792,14 @@
                 </div>
 
                 <div id="familyList"></div>
+
+                <!-- Standalone products section -->
+                <div id="standaloneSection" style="margin-top:2rem">
+                    <h3 style="font-size:1rem;margin-bottom:0.75rem;cursor:pointer" onclick="document.getElementById('standaloneBody').classList.toggle('hidden');this.querySelector('span').textContent=document.getElementById('standaloneBody').classList.contains('hidden')?'▶':'▼'">
+                        <span>▶</span> Frittstående produkter <span id="standaloneCount" style="color:var(--text-muted);font-weight:400;font-size:0.85rem"></span>
+                    </h3>
+                    <div id="standaloneBody" class="hidden"></div>
+                </div>
             </div>
         </div>
     </div>
@@ -1294,66 +1372,104 @@
 
         // ── Product Families UI ──
         const familyBtn = document.getElementById('familyBtn');
+        const familyOnlyBtn = document.getElementById('familyOnlyBtn');
+        const jeevesDirectBtn = document.getElementById('jeevesDirectBtn');
         const familiesSection = document.getElementById('familiesSection');
         const familyStatsGrid = document.getElementById('familyStatsGrid');
         const familyList = document.getElementById('familyList');
         const familyFilter = document.getElementById('familyFilter');
         const familySearch = document.getElementById('familySearch');
         const familyCount = document.getElementById('familyCount');
+        const exportFamiliesBtn = document.getElementById('exportFamiliesBtn');
+        const closeFamiliesBtn = document.getElementById('closeFamiliesBtn');
+        const standaloneBody = document.getElementById('standaloneBody');
+        const standaloneCount = document.getElementById('standaloneCount');
 
         let familyData = null;
+        let familySourceId = null;
 
-        familyBtn.addEventListener('click', async () => {
-            if (!currentJobId) return;
-            familyBtn.disabled = true;
-            familyBtn.textContent = 'Laster familier...';
+        // Enable family-only button when file is selected
+        fileInput.addEventListener('change', () => { familyOnlyBtn.disabled = !fileInput.files.length; });
+
+        async function loadFamilies(url, method = 'GET', body = null) {
             try {
-                const resp = await fetch(`${API_BASE}/api/families/${currentJobId}`);
+                const opts = { method };
+                if (body) { opts.body = body; }
+                const resp = await fetch(url, opts);
                 if (!resp.ok) {
                     const err = await resp.json().catch(() => ({}));
                     throw new Error(err.detail || `HTTP ${resp.status}`);
                 }
                 familyData = await resp.json();
+                familySourceId = familyData.source_id;
                 renderFamilyResults(familyData);
                 familiesSection.classList.add('active');
                 familiesSection.scrollIntoView({ behavior: 'smooth', block: 'start' });
             } catch (e) {
                 alert(`Kunne ikke laste produktfamilier: ${e.message}`);
-            } finally {
-                familyBtn.disabled = false;
-                familyBtn.textContent = 'Vis produktfamilier';
             }
+        }
+
+        // Lim 1: From quality analysis results
+        familyBtn.addEventListener('click', () => {
+            if (!currentJobId) return;
+            loadFamilies(`${API_BASE}/api/families/${currentJobId}`);
+        });
+
+        // Lim 4: Independent analysis — uploaded file
+        familyOnlyBtn.addEventListener('click', async () => {
+            if (!selectedFile) return;
+            familyOnlyBtn.disabled = true;
+            familyOnlyBtn.textContent = 'Analyserer...';
+            const fd = new FormData();
+            fd.append('file', selectedFile);
+            await loadFamilies(`${API_BASE}/api/families/analyze-upload`, 'POST', fd);
+            familyOnlyBtn.disabled = false;
+            familyOnlyBtn.textContent = 'Kun familieanalyse';
+        });
+
+        // Lim 4: Independent analysis — full Jeeves catalog
+        jeevesDirectBtn.addEventListener('click', async () => {
+            jeevesDirectBtn.disabled = true;
+            jeevesDirectBtn.textContent = 'Analyserer hele katalogen...';
+            await loadFamilies(`${API_BASE}/api/families/analyze-jeeves`, 'POST');
+            jeevesDirectBtn.disabled = false;
+            jeevesDirectBtn.textContent = 'Analyser hele Jeeves-katalogen';
+        });
+
+        // Lim 5: Export
+        exportFamiliesBtn.addEventListener('click', async () => {
+            if (!familySourceId) return;
+            try {
+                const resp = await fetch(`${API_BASE}/api/families/${familySourceId}/export`);
+                if (!resp.ok) throw new Error(`HTTP ${resp.status}`);
+                const blob = await resp.blob();
+                const url = URL.createObjectURL(blob);
+                const a = document.createElement('a');
+                a.href = url; a.download = `produktfamilier_${familySourceId}.xlsx`;
+                document.body.appendChild(a); a.click();
+                document.body.removeChild(a); URL.revokeObjectURL(url);
+            } catch (e) { alert(`Eksport feilet: ${e.message}`); }
+        });
+
+        closeFamiliesBtn.addEventListener('click', () => {
+            familiesSection.classList.remove('active');
         });
 
         function renderFamilyResults(data) {
-            // Stats
+            const accepted = data.families.filter(f => f.review_status === 'accepted').length;
+            const rejected = data.families.filter(f => f.review_status === 'rejected').length;
             familyStatsGrid.innerHTML = `
-                <div class="stat-card">
-                    <div class="value">${data.total_products}</div>
-                    <div class="label">Produkter</div>
-                </div>
-                <div class="stat-card success">
-                    <div class="value">${data.total_families}</div>
-                    <div class="label">Familier</div>
-                </div>
-                <div class="stat-card success">
-                    <div class="value">${data.strong_families}</div>
-                    <div class="label">Sterke familier</div>
-                </div>
-                <div class="stat-card ${data.families_with_dimensions > 0 ? 'success' : 'danger'}">
-                    <div class="value">${data.families_with_dimensions}</div>
-                    <div class="label">Med varianter</div>
-                </div>
-                <div class="stat-card ${data.families_without_dimensions === 0 ? 'success' : 'warning'}">
-                    <div class="value">${data.families_without_dimensions}</div>
-                    <div class="label">Uten varianter</div>
-                </div>
-                <div class="stat-card">
-                    <div class="value">${data.standalone_products}</div>
-                    <div class="label">Frittstående</div>
-                </div>
+                <div class="stat-card"><div class="value">${data.total_products}</div><div class="label">Produkter</div></div>
+                <div class="stat-card success"><div class="value">${data.total_families}</div><div class="label">Familier</div></div>
+                <div class="stat-card success"><div class="value">${data.strong_families}</div><div class="label">Sterke</div></div>
+                <div class="stat-card ${data.families_with_dimensions > 0 ? 'success' : 'danger'}"><div class="value">${data.families_with_dimensions}</div><div class="label">Med varianter</div></div>
+                <div class="stat-card"><div class="value">${data.standalone_products}</div><div class="label">Frittstående</div></div>
+                ${accepted ? `<div class="stat-card success"><div class="value">${accepted}</div><div class="label">Godkjent</div></div>` : ''}
+                ${rejected ? `<div class="stat-card danger"><div class="value">${rejected}</div><div class="label">Avvist</div></div>` : ''}
             `;
             renderFamilyList(data.families);
+            renderStandalone(data.standalone || []);
         }
 
         function renderFamilyList(families) {
@@ -1363,6 +1479,9 @@
             let filtered = families;
             if (filter === 'strong') filtered = filtered.filter(f => f.confidence >= 0.65);
             if (filter === 'review') filtered = filtered.filter(f => f.review_required);
+            if (filter === 'accepted') filtered = filtered.filter(f => f.review_status === 'accepted');
+            if (filter === 'rejected') filtered = filtered.filter(f => f.review_status === 'rejected');
+            if (filter === 'needs_review') filtered = filtered.filter(f => f.review_status === 'needs_review');
             if (filter === 'no-dims') filtered = filtered.filter(f => f.variant_dimensions.length === 0);
             if (filter === 'with-dims') filtered = filtered.filter(f => f.variant_dimensions.length > 0);
             if (search) {
@@ -1374,8 +1493,7 @@
             }
 
             familyCount.textContent = `${filtered.length} av ${families.length} familier`;
-
-            if (filtered.length === 0) {
+            if (!filtered.length) {
                 familyList.innerHTML = '<p style="color:var(--text-muted);padding:1rem">Ingen familier matcher filteret.</p>';
                 return;
             }
@@ -1383,9 +1501,12 @@
             familyList.innerHTML = filtered.map(f => {
                 const confClass = f.confidence >= 0.65 ? 'badge-strong' : f.confidence >= 0.30 ? 'badge-weak' : 'badge-review';
                 const confLabel = f.confidence >= 0.65 ? 'Sterk' : f.confidence >= 0.30 ? 'Moderat' : 'Svak';
+                const rvBadge = f.review_status && f.review_status !== 'pending'
+                    ? `<span class="badge badge-${f.review_status}">${{accepted:'Godkjent',rejected:'Avvist',needs_review:'Vurdering'}[f.review_status]||f.review_status}</span>`
+                    : '';
                 const dimsHtml = f.variant_dimensions.length > 0
                     ? f.variant_dimensions.map(d => `<span class="badge badge-dims">${escHtml(d)}</span>`).join(' ')
-                    : '<span style="color:var(--text-muted);font-size:0.8rem">ingen dimensjoner</span>';
+                    : '<span style="color:var(--text-muted);font-size:0.8rem">ingen dim.</span>';
 
                 const membersHtml = f.members.map(m => {
                     const roleClass = m.role === 'mother' ? 'role-mother' : 'role-child';
@@ -1401,6 +1522,15 @@
                     </tr>`;
                 }).join('');
 
+                // Lim 1: Review actions
+                const curStatus = f.review_status || 'pending';
+                const reviewBar = `<div class="family-review-bar">
+                    <button class="review-btn ${curStatus==='accepted'?'active-accept':''}" onclick="setFamilyReview('${f.family_id}','accepted',this)">Godkjenn</button>
+                    <button class="review-btn ${curStatus==='rejected'?'active-reject':''}" onclick="setFamilyReview('${f.family_id}','rejected',this)">Avvis</button>
+                    <button class="review-btn ${curStatus==='needs_review'?'active-needs_review':''}" onclick="setFamilyReview('${f.family_id}','needs_review',this)">Manuell vurdering</button>
+                    <input class="review-comment" placeholder="Kommentar..." value="${escHtml(f.review_comment||'')}" onchange="setFamilyComment('${f.family_id}',this.value)">
+                </div>`;
+
                 return `<div class="family-card" data-id="${f.family_id}">
                     <div class="family-header" onclick="this.parentElement.classList.toggle('open')">
                         <span class="family-chevron">▶</span>
@@ -1409,7 +1539,7 @@
                             ${dimsHtml}
                             <span class="badge ${confClass}">${confLabel} (${f.confidence})</span>
                             <span style="color:var(--text-muted)">${f.member_count} stk</span>
-                            ${f.review_required ? '<span class="badge badge-review">Gjennomgang</span>' : ''}
+                            ${rvBadge}
                         </div>
                     </div>
                     <div class="family-body">
@@ -1421,9 +1551,59 @@
                             <thead><tr><th>Rolle</th><th>Artikkelnr</th><th>Spesifikasjon</th><th>Varianter</th></tr></thead>
                             <tbody>${membersHtml}</tbody>
                         </table>
+                        ${reviewBar}
                     </div>
                 </div>`;
             }).join('');
+        }
+
+        // Lim 2: Standalone products
+        function renderStandalone(standalone) {
+            standaloneCount.textContent = `(${standalone.length} produkter)`;
+            if (!standalone.length) {
+                standaloneBody.innerHTML = '<p style="color:var(--text-muted)">Ingen frittstående produkter.</p>';
+                return;
+            }
+            const rows = standalone.slice(0, 200).map(s => `<tr>
+                <td style="font-family:monospace;font-size:0.8rem">${escHtml(s.article_number)}</td>
+                <td>${escHtml(s.product_name || '')}</td>
+                <td>${escHtml(s.specification || '')}</td>
+                <td style="font-size:0.78rem;color:var(--text-muted)">${escHtml(s.grouping_reason || '')}</td>
+            </tr>`).join('');
+            standaloneBody.innerHTML = `<table class="standalone-table">
+                <thead><tr><th>Artikkelnr</th><th>Produktnavn</th><th>Spesifikasjon</th><th>Årsak</th></tr></thead>
+                <tbody>${rows}</tbody>
+            </table>${standalone.length > 200 ? `<p style="color:var(--text-muted);font-size:0.82rem;margin-top:0.5rem">Viser 200 av ${standalone.length}. Last ned Excel for komplett liste.</p>` : ''}`;
+        }
+
+        // Lim 1: Review action handlers
+        async function setFamilyReview(familyId, status, btn) {
+            if (!familySourceId) return;
+            try {
+                const resp = await fetch(`${API_BASE}/api/families/${familySourceId}/review/${familyId}`, {
+                    method: 'PUT',
+                    headers: {'Content-Type': 'application/json'},
+                    body: JSON.stringify({review_status: status}),
+                });
+                if (!resp.ok) throw new Error(`HTTP ${resp.status}`);
+                // Update local data
+                const fam = familyData.families.find(f => f.family_id === familyId);
+                if (fam) fam.review_status = status;
+                renderFamilyResults(familyData);
+            } catch (e) { alert(`Kunne ikke oppdatere: ${e.message}`); }
+        }
+
+        async function setFamilyComment(familyId, comment) {
+            if (!familySourceId) return;
+            try {
+                await fetch(`${API_BASE}/api/families/${familySourceId}/review/${familyId}`, {
+                    method: 'PUT',
+                    headers: {'Content-Type': 'application/json'},
+                    body: JSON.stringify({review_comment: comment}),
+                });
+                const fam = familyData.families.find(f => f.family_id === familyId);
+                if (fam) fam.review_comment = comment;
+            } catch (e) { /* silent — comment save is best-effort */ }
         }
 
         function escHtml(s) {
@@ -1431,12 +1611,8 @@
             return s.replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;');
         }
 
-        familyFilter.addEventListener('change', () => {
-            if (familyData) renderFamilyList(familyData.families);
-        });
-        familySearch.addEventListener('input', () => {
-            if (familyData) renderFamilyList(familyData.families);
-        });
+        familyFilter.addEventListener('change', () => { if (familyData) renderFamilyList(familyData.families); });
+        familySearch.addEventListener('input', () => { if (familyData) renderFamilyList(familyData.families); });
 
         // New analysis with confirmation
         newAnalysisBtn.addEventListener('click', () => {
