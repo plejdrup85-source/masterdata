@@ -163,6 +163,9 @@ def create_output_excel(
         ws_improvements = wb.create_sheet("Forbedringsforslag")
         _create_improvements_sheet(ws_improvements, results)
 
+        ws_quick = wb.create_sheet("Quick Wins")
+        _create_quick_wins_sheet(ws_quick, results)
+
         ws_inriver = wb.create_sheet("Inriver Import")
         _create_inriver_import_sheet(ws_inriver, results)
 
@@ -561,6 +564,74 @@ def _create_improvements_sheet(ws, results: list[ProductAnalysis]) -> None:
         ws.column_dimensions[get_column_letter(col)].width = max(15, len(headers[col - 1]) + 5)
 
     ws.freeze_panes = "A2"
+
+
+def _create_quick_wins_sheet(ws, results: list[ProductAnalysis]) -> None:
+    """Create Quick Wins sheet — low-risk, high-value improvements only.
+
+    Shows ONLY suggestions that pass all quick win criteria:
+    high confidence, trusted source, not medically sensitive,
+    no source conflicts, not AI-generated.
+    """
+    from backend.quick_wins import is_quick_win
+
+    headers = [
+        "Artikkelnummer",
+        "Produktnavn",
+        "Produsent",
+        "Felt",
+        "Nåværende verdi",
+        "Foreslått verdi",
+        "Kilde",
+        "Confidence",
+        "Begrunnelse",
+    ]
+
+    for col, header in enumerate(headers, 1):
+        ws.cell(row=1, column=col, value=header)
+    _style_header(ws, 1, len(headers))
+
+    # Green header band for quick wins
+    qw_fill = PatternFill(start_color="D5F5E3", end_color="D5F5E3", fill_type="solid")
+
+    row_idx = 2
+    fa_map_cache = {}
+
+    for result in results:
+        fa_map = {fa.field_name: fa for fa in result.field_analyses}
+        producer, _ = get_best_producer_info(
+            result.product_data, result.jeeves_data, result.manufacturer_lookup
+        )
+
+        for es in (result.enrichment_suggestions or []):
+            if not es.suggested_value:
+                continue
+            fa = fa_map.get(es.field_name)
+            if not is_quick_win(es, fa):
+                continue
+
+            _write_id_cell(ws, row_idx, 1, result.article_number)
+            ws.cell(row=row_idx, column=2, value=result.product_data.product_name or "")
+            ws.cell(row=row_idx, column=3, value=producer or "")
+            ws.cell(row=row_idx, column=4, value=es.field_name)
+            ws.cell(row=row_idx, column=5, value=es.current_value or "")
+            val_cell = ws.cell(row=row_idx, column=6, value=es.suggested_value)
+            val_cell.fill = qw_fill
+            ws.cell(row=row_idx, column=7, value=es.source or "")
+            ws.cell(row=row_idx, column=8, value=es.confidence if es.confidence else "")
+            ws.cell(row=row_idx, column=9, value=es.evidence or "")
+            row_idx += 1
+
+    if row_idx == 2:
+        ws.cell(row=2, column=1, value="Ingen quick wins funnet")
+        ws.cell(row=2, column=2, value="Alle forslag krever manuell vurdering eller har for lav confidence")
+
+    for col in range(1, len(headers) + 1):
+        ws.column_dimensions[get_column_letter(col)].width = max(15, len(headers[col - 1]) + 5)
+
+    ws.freeze_panes = "A2"
+    if row_idx > 2:
+        ws.auto_filter.ref = f"A1:{get_column_letter(len(headers))}{row_idx - 1}"
 
 
 def _create_manufacturer_sheet(ws, results: list[ProductAnalysis]) -> None:

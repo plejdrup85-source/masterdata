@@ -908,6 +908,7 @@
                 <div class="stats-grid" id="statsGrid"></div>
                 <div class="actions">
                     <button class="btn btn-success" id="downloadBtn">Last ned Excel-rapport</button>
+                    <button class="btn" id="downloadQuickWinsBtn" style="background:#059669;color:#fff;font-size:0.85rem" title="Eksporter kun høy-confidence, lav-risiko forslag">Quick Wins</button>
                     <button class="btn btn-primary" id="newAnalysisBtn">Ny analyse</button>
                     <button class="btn" id="handoffToFamilyBtn" style="background:#7c3aed;color:#fff;font-size:0.85rem" onclick="handoffToRelationshipModule()">Analyser produktfamilier for disse artiklene</button>
                 </div>
@@ -2580,6 +2581,30 @@
                 const a = document.createElement('a');
                 a.href = url;
                 a.download = `masterdata_kvalitetssjekk_${currentJobId}.xlsx`;
+                document.body.appendChild(a);
+                a.click();
+                document.body.removeChild(a);
+                URL.revokeObjectURL(url);
+            } catch (e) {
+                alert(`Nedlasting feilet: ${e.message}`);
+            }
+        });
+
+        // Quick Wins download button
+        document.getElementById('downloadQuickWinsBtn').addEventListener('click', async () => {
+            if (!currentJobId) return;
+            try {
+                const resp = await fetch(`${API_BASE}/api/download/${currentJobId}?quick_wins_only=true`);
+                if (!resp.ok) {
+                    const err = await resp.json().catch(() => ({}));
+                    alert(`Ingen quick wins: ${err.detail || 'Ukjent feil'}`);
+                    return;
+                }
+                const blob = await resp.blob();
+                const url = URL.createObjectURL(blob);
+                const a = document.createElement('a');
+                a.href = url;
+                a.download = `masterdata_quick_wins_${currentJobId}.xlsx`;
                 document.body.appendChild(a);
                 a.click();
                 document.body.removeChild(a);

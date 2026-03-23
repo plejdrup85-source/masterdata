@@ -910,10 +910,13 @@ async def cancel_job(job_id: str):
 async def download_result(
     job_id: str,
     threshold: Optional[int] = Query(None, description="Score threshold — export only products below this score"),
+    quick_wins_only: bool = Query(False, description="Export only products with quick win suggestions"),
 ):
     """Download the analysis result Excel file.
 
-    If threshold is set, regenerates the export with only products scoring below it.
+    Supports filtered exports:
+    - threshold: only products scoring below this value
+    - quick_wins_only: only products with quick win (high-confidence, low-risk) suggestions
     """
     job = jobs.get(job_id)
     if not job:
@@ -921,6 +924,26 @@ async def download_result(
 
     if job.status != JobStatus.COMPLETED:
         raise HTTPException(400, "Analysen er ikke fullført enda")
+
+    # Quick wins filter
+    if quick_wins_only:
+        from backend.quick_wins import filter_quick_wins_from_results
+        filtered_results = filter_quick_wins_from_results(job.results)
+        if not filtered_results:
+            raise HTTPException(400, "Ingen produkter med quick win-forslag funnet")
+
+        timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+        qw_filename = f"masterdata_quick_wins_{job_id}_{timestamp}.xlsx"
+        qw_path = str(OUTPUT_DIR / qw_filename)
+        create_output_excel(
+            filtered_results, qw_path,
+            analysis_mode=job.analysis_mode, focus_areas=job.focus_areas,
+        )
+        return FileResponse(
+            qw_path,
+            filename=f"masterdata_quick_wins_{job_id}.xlsx",
+            media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+        )
 
     # If threshold is set, regenerate filtered export
     if threshold is not None and 0 < threshold <= 100:
