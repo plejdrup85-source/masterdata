@@ -887,6 +887,126 @@ async def get_catalog_info():
     }
 
 
+@app.post("/api/recheck/{job_id}")
+async def recheck_products(
+    job_id: str,
+    request: Request,
+    data: dict = Body(...),
+):
+    """Start a targeted re-check for a subset of products from a previous job.
+
+    Selects products from the previous job's results using filters or presets,
+    then launches a new analysis for just those products.
+
+    Body: {
+        "preset": "not_webshop_ready",   // Optional preset name
+        "filters": {"priority": "Høy"},  // Optional custom filters
+        "analysis_mode": "full_enrichment",
+        "skip_cache": true               // Usually true for re-check
+    }
+    """
+    _cleanup_old_jobs()
+
+    client_ip = request.client.host if request.client else "unknown"
+    if not _check_rate_limit(client_ip):
+        raise HTTPException(429, f"For mange analyser. Maks {RATE_LIMIT_MAX} per {RATE_LIMIT_WINDOW} sekunder.")
+
+    active_jobs = sum(1 for j in jobs.values() if j.status in (JobStatus.PENDING, JobStatus.RUNNING))
+    if active_jobs >= MAX_CONCURRENT_JOBS:
+        raise HTTPException(429, f"For mange samtidige analyser ({active_jobs}).")
+
+    # Get previous results
+    source_job = jobs.get(job_id)
+    if not source_job or source_job.status != JobStatus.COMPLETED:
+        raise HTTPException(404, f"Jobb {job_id} er ikke fullført eller finnes ikke")
+    if not source_job.results:
+        raise HTTPException(400, "Jobben har ingen resultater å re-sjekke")
+
+    # Extract re-check candidates
+    from backend.recheck import get_recheck_candidates, RECHECK_PRESETS
+
+    preset = data.get("preset")
+    filters = data.get("filters", {})
+    candidates = get_recheck_candidates(source_job.results, filters=filters, preset=preset)
+
+    if not candidates:
+        filter_desc = preset or ", ".join(f"{k}={v}" for k, v in filters.items())
+        raise HTTPException(400, f"Ingen produkter matcher filtrene: {filter_desc}")
+
+    if len(candidates) > MAX_ARTICLES:
+        raise HTTPException(400, f"For mange artikler ({len(candidates)}). Maks {MAX_ARTICLES}.")
+
+    analysis_mode = data.get("analysis_mode", AnalysisMode.FULL_ENRICHMENT.value)
+    skip_cache = data.get("skip_cache", True)  # Default true for re-check
+    focus_areas_raw = data.get("focus_areas", [])
+
+    valid_modes = [m.value for m in AnalysisMode]
+    if analysis_mode not in valid_modes:
+        analysis_mode = AnalysisMode.FULL_ENRICHMENT.value
+    parsed_focus_areas = []
+    if analysis_mode == AnalysisMode.FOCUSED_SCAN.value and focus_areas_raw:
+        from backend.scoring import ALL_AREAS
+        parsed_focus_areas = [a for a in focus_areas_raw if a in ALL_AREAS]
+
+    # Build batch info
+    preset_label = RECHECK_PRESETS[preset]["label"] if preset and preset in RECHECK_PRESETS else None
+    filter_desc = preset_label or ", ".join(f"{k}={v}" for k, v in filters.items()) or "egendefinert"
+    batch_info = f"Re-sjekk fra {job_id}: {len(candidates)} produkter ({filter_desc})"
+
+    # Create job
+    new_job_id = str(uuid.uuid4())[:8]
+    job = AnalysisJob(
+        job_id=new_job_id,
+        status=JobStatus.PENDING,
+        total_products=len(candidates),
+        created_at=time.time(),
+        batch_mode="recheck",
+        batch_info=batch_info,
+        analysis_mode=analysis_mode,
+        focus_areas=parsed_focus_areas,
+        source_filename=f"recheck_{job_id}_{filter_desc[:30]}",
+    )
+    jobs[new_job_id] = job
+
+    task = asyncio.create_task(
+        _run_analysis(new_job_id, candidates, skip_cache,
+                      analysis_mode=analysis_mode, focus_areas=parsed_focus_areas)
+    )
+    _background_tasks.add(task)
+    task.add_done_callback(_background_tasks.discard)
+
+    mode_labels = {
+        AnalysisMode.FULL_ENRICHMENT.value: "Full berikelse",
+        AnalysisMode.AUDIT_ONLY.value: "Kvalitetsrevisjon",
+        AnalysisMode.FOCUSED_SCAN.value: "Fokusert sjekk",
+    }
+
+    return {
+        "job_id": new_job_id,
+        "total_products": len(candidates),
+        "source_job_id": job_id,
+        "batch_info": batch_info,
+        "analysis_mode": analysis_mode,
+        "message": f"Re-sjekk startet: {len(candidates)} produkter fra jobb {job_id} ({filter_desc})",
+    }
+
+
+@app.get("/api/recheck/{job_id}/presets")
+async def get_recheck_presets(job_id: str):
+    """Get available re-check presets with counts for a completed job."""
+    source_job = jobs.get(job_id)
+    if not source_job or source_job.status != JobStatus.COMPLETED:
+        raise HTTPException(404, f"Jobb {job_id} er ikke fullført eller finnes ikke")
+
+    from backend.recheck import get_recheck_summary
+    summary = get_recheck_summary(source_job.results)
+    return {
+        "job_id": job_id,
+        "total_products": len(source_job.results),
+        "presets": summary,
+    }
+
+
 @app.get("/api/status/{job_id}")
 async def get_status(job_id: str):
     """Get the status of an analysis job."""

@@ -910,6 +910,10 @@
                     <button class="btn btn-success" id="downloadBtn">Last ned Excel-rapport</button>
                     <button class="btn" id="downloadQuickWinsBtn" style="background:#059669;color:#fff;font-size:0.85rem" title="Eksporter kun høy-confidence, lav-risiko forslag">Quick Wins</button>
                     <button class="btn" id="downloadFilteredBtn" style="background:#2563eb;color:#fff;font-size:0.85rem;display:none" title="Eksporter kun filtrerte produkter">Eksporter filtrerte (<span id="filteredExportCount">0</span>)</button>
+                    <button class="btn" id="recheckFilteredBtn" style="background:#f59e0b;color:#fff;font-size:0.85rem;display:none" title="Re-kjør analyse kun for filtrerte produkter">Re-sjekk filtrerte (<span id="recheckCount">0</span>)</button>
+                    <select id="recheckPreset" style="font-size:0.8rem;padding:0.3rem 0.5rem;border:1px solid var(--border);border-radius:4px;background:#fff;cursor:pointer" title="Velg en forhåndsdefinert re-sjekk">
+                        <option value="">Re-sjekk...</option>
+                    </select>
                     <button class="btn btn-primary" id="newAnalysisBtn">Ny analyse</button>
                     <button class="btn" id="handoffToFamilyBtn" style="background:#7c3aed;color:#fff;font-size:0.85rem" onclick="handoffToRelationshipModule()">Analyser produktfamilier for disse artiklene</button>
                 </div>
@@ -1942,6 +1946,7 @@
             const hasFilters = Object.keys(filters).length > 0;
             clearFiltersBtn.style.display = hasFilters ? '' : 'none';
             downloadFilteredBtn.style.display = hasFilters ? '' : 'none';
+            recheckFilteredBtn.style.display = hasFilters ? '' : 'none';
 
             const rows = document.querySelectorAll('#resultsBody tr.expandable');
             const details = document.querySelectorAll('#resultsBody tr.detail-row');
@@ -2002,6 +2007,7 @@
             if (hasFilters) {
                 countEl.textContent = `${shown} av ${rows.length} produkter`;
                 document.getElementById('filteredExportCount').textContent = shown;
+                document.getElementById('recheckCount').textContent = shown;
             } else {
                 countEl.textContent = '';
             }
@@ -2049,6 +2055,87 @@
                 URL.revokeObjectURL(url);
             } catch (e) {
                 alert('Eksportfeil: ' + e.message);
+            }
+        });
+
+        // Re-check filtered products button
+        const recheckFilteredBtn = document.getElementById('recheckFilteredBtn');
+        recheckFilteredBtn.addEventListener('click', async () => {
+            const filters = getActiveFilters();
+            if (!Object.keys(filters).length) return;
+            const count = document.getElementById('recheckCount').textContent;
+            if (!confirm(`Re-kjør analyse for ${count} filtrerte produkter?\n\nDette starter en ny jobb med skip_cache=true.`)) return;
+
+            try {
+                const resp = await fetch(`${API_BASE}/api/recheck/${currentJobId}`, {
+                    method: 'POST',
+                    headers: {'Content-Type': 'application/json'},
+                    body: JSON.stringify({filters, skip_cache: true}),
+                });
+                if (!resp.ok) {
+                    const err = await resp.json().catch(() => ({}));
+                    alert(err.detail || 'Re-sjekk feilet');
+                    return;
+                }
+                const data = await resp.json();
+                currentJobId = data.job_id;
+                // Switch to progress view
+                document.getElementById('resultsSection').style.display = 'none';
+                document.getElementById('progressSection').style.display = '';
+                document.getElementById('progressTitle').textContent = `Re-sjekk: ${data.total_products} produkter`;
+                startPolling();
+            } catch (e) {
+                alert('Re-sjekk feilet: ' + e.message);
+            }
+        });
+
+        // Re-check preset dropdown
+        const recheckPresetSelect = document.getElementById('recheckPreset');
+
+        // Load presets when results are available
+        async function loadRecheckPresets() {
+            if (!currentJobId) return;
+            try {
+                const resp = await fetch(`${API_BASE}/api/recheck/${currentJobId}/presets`);
+                if (!resp.ok) return;
+                const data = await resp.json();
+                recheckPresetSelect.innerHTML = '<option value="">Re-sjekk...</option>';
+                for (const [key, preset] of Object.entries(data.presets)) {
+                    if (preset.count > 0) {
+                        recheckPresetSelect.innerHTML += `<option value="${key}" title="${preset.description}">${preset.label} (${preset.count})</option>`;
+                    }
+                }
+            } catch (e) { /* ignore */ }
+        }
+
+        recheckPresetSelect.addEventListener('change', async () => {
+            const preset = recheckPresetSelect.value;
+            if (!preset || !currentJobId) return;
+            recheckPresetSelect.value = ''; // Reset
+
+            const option = recheckPresetSelect.querySelector(`option[value="${preset}"]`);
+            const label = option ? option.textContent : preset;
+            if (!confirm(`Re-kjør analyse for ${label}?\n\nDette starter en ny jobb med skip_cache=true.`)) return;
+
+            try {
+                const resp = await fetch(`${API_BASE}/api/recheck/${currentJobId}`, {
+                    method: 'POST',
+                    headers: {'Content-Type': 'application/json'},
+                    body: JSON.stringify({preset, skip_cache: true}),
+                });
+                if (!resp.ok) {
+                    const err = await resp.json().catch(() => ({}));
+                    alert(err.detail || 'Re-sjekk feilet');
+                    return;
+                }
+                const data = await resp.json();
+                currentJobId = data.job_id;
+                document.getElementById('resultsSection').style.display = 'none';
+                document.getElementById('progressSection').style.display = '';
+                document.getElementById('progressTitle').textContent = `Re-sjekk: ${data.total_products} produkter`;
+                startPolling();
+            } catch (e) {
+                alert('Re-sjekk feilet: ' + e.message);
             }
         });
 
@@ -2379,6 +2466,9 @@
 
                 // Store for threshold filter
                 allResultsData = results;
+
+                // Load re-check presets
+                loadRecheckPresets();
 
                 // Restore analysis mode from server (survives page refresh)
                 if (data.analysis_mode) currentAnalysisMode = data.analysis_mode;
