@@ -61,6 +61,25 @@ def _no_page_reason(product: ProductData) -> str:
     return "Nettstedet mangler denne verdien"
 
 
+def _values_conflict(val_a: str | None, val_b: str | None, threshold: float = 0.5) -> bool:
+    """Check if two values are meaningfully different (source conflict).
+
+    Returns True if both values exist and differ significantly.
+    Small differences (casing, whitespace, trailing punctuation) are ignored.
+    """
+    if not val_a or not val_b:
+        return False
+    a = val_a.strip().lower().rstrip(".,;:")
+    b = val_b.strip().lower().rstrip(".,;:")
+    if a == b:
+        return False
+    # One is a substring of the other → not a conflict (just more/less detail)
+    if len(a) > 5 and len(b) > 5:
+        if a in b or b in a:
+            return False
+    return True
+
+
 SPEC_KEYWORDS = {
     "mm", "cm", "m", "ml", "l", "g", "kg", "stk", "pk", "µm",
     "størrelse", "size", "materiale", "material", "farge", "color",
@@ -125,8 +144,11 @@ def _analyze_product_name(product: ProductData, jeeves: JeevesData = None) -> Fi
     if name == name.upper() and len(name) > 3:
         issues.append("Navn er i STORE BOKSTAVER, bør ha normal casing")
 
+    # Check source conflict: website and Jeeves have different product names
+    if name and jeeves_name and _values_conflict(name, jeeves_name):
+        issues.append(f"Avvik mellom nettside og Jeeves: '{name}' vs '{jeeves_name}'")
+
     if not issues:
-        # P1 FIX: Distinguish STRONG from OK based on name length and structure
         if len(name) >= 10 and not name.isupper():
             analysis.status = QualityStatus.STRONG
             analysis.comment = "Produktnavn er godt"
@@ -139,6 +161,10 @@ def _analyze_product_name(product: ProductData, jeeves: JeevesData = None) -> Fi
         analysis.status = QualityStatus.PROBABLE_ERROR
         analysis.comment = "; ".join(issues)
         analysis.status_reason = "; ".join(issues)
+    elif any("Avvik mellom" in i for i in issues):
+        analysis.status = QualityStatus.SOURCE_CONFLICT
+        analysis.comment = "; ".join(issues)
+        analysis.status_reason = "Nettside og Jeeves har ulike produktnavn"
     else:
         analysis.status = QualityStatus.SHOULD_IMPROVE
         analysis.comment = "; ".join(issues)
@@ -187,8 +213,11 @@ def _analyze_description(product: ProductData, jeeves: JeevesData = None) -> Fie
     if product.article_number in desc and len(desc) < 50:
         issues.append("Beskrivelse inneholder hovedsakelig artikkelnummer")
 
+    # Check source conflict
+    if desc and jeeves_desc and _values_conflict(desc, jeeves_desc):
+        issues.append(f"Avvik: nettside ({len(desc)} tegn) vs Jeeves ({len(jeeves_desc)} tegn)")
+
     if not issues:
-        # P1 FIX: Distinguish STRONG from OK based on content richness
         has_sentences = len(re.findall(r'[.!?]\s', desc)) >= 1
         if len(desc) >= 80 and has_sentences:
             analysis.status = QualityStatus.STRONG
@@ -198,13 +227,21 @@ def _analyze_description(product: ProductData, jeeves: JeevesData = None) -> Fie
             analysis.status = QualityStatus.OK
             analysis.comment = "Beskrivelse OK"
             analysis.status_reason = f"Beskrivelse akseptabel ({len(desc)} tegn)"
+    elif any("Avvik:" in i for i in issues) and len(issues) == 1:
+        # Only issue is source conflict — value itself is OK
+        analysis.status = QualityStatus.SOURCE_CONFLICT
+        analysis.comment = "; ".join(issues)
+        analysis.status_reason = "Nettside og Jeeves har ulike beskrivelser"
     else:
-        # P1 FIX: Distinguish WEAK (present but thin) from SHOULD_IMPROVE (real problems)
         is_only_short = (len(issues) == 1 and "for kort" in issues[0] and len(desc) >= 10)
         if is_only_short:
             analysis.status = QualityStatus.WEAK
             analysis.comment = "; ".join(issues)
             analysis.status_reason = f"Beskrivelse finnes men er kort ({len(desc)} tegn)"
+        elif any("identisk med" in i.lower() for i in issues):
+            analysis.status = QualityStatus.PROBABLE_ERROR
+            analysis.comment = "; ".join(issues)
+            analysis.status_reason = "; ".join(issues)
         else:
             analysis.status = QualityStatus.SHOULD_IMPROVE
             analysis.comment = "; ".join(issues)
@@ -329,8 +366,11 @@ def _analyze_specification(product: ProductData, jeeves: JeevesData = None) -> F
         if not matching and attr_count < 3:
             issues.append("Mangler vanlige spesifikasjoner (størrelse, materiale, farge, vekt)")
 
+    # Check source conflict
+    if web_spec and jeeves_spec and _values_conflict(web_spec, jeeves_spec):
+        issues.append("Avvik mellom nettside og Jeeves-spesifikasjoner")
+
     if not issues:
-        # P1 FIX: STRONG if rich structured specs exist
         if attr_count >= 4 or (attr_count >= 2 and has_tech_content):
             analysis.status = QualityStatus.STRONG
             analysis.comment = f"Spesifikasjoner er gode ({attr_count} attributter)"
@@ -343,10 +383,10 @@ def _analyze_specification(product: ProductData, jeeves: JeevesData = None) -> F
                 analysis.comment = "Spesifikasjoner OK (teknisk innhold funnet)"
             analysis.status_reason = f"Akseptable spesifikasjoner ({attr_count} attributter)"
     else:
-        # P1 FIX: WEAK if only minor issues, SHOULD_IMPROVE if serious
-        serious = any("identisk" in i.lower() for i in issues)
-        if serious:
-            analysis.status = QualityStatus.SHOULD_IMPROVE
+        if any("identisk" in i.lower() for i in issues):
+            analysis.status = QualityStatus.PROBABLE_ERROR
+        elif any("Avvik mellom" in i for i in issues):
+            analysis.status = QualityStatus.SOURCE_CONFLICT
         elif attr_count >= 1:
             analysis.status = QualityStatus.WEAK
         else:
@@ -379,9 +419,15 @@ def _analyze_manufacturer(product: ProductData, jeeves: JeevesData = None) -> Fi
     )
 
     if not effective_mfr:
-        analysis.status = QualityStatus.MISSING
-        analysis.comment = "Produsentinformasjon mangler i både Jeeves og nettside"
-        analysis.status_reason = "Ingen kilde har produsentinfo"
+        # Distinguish: product not found at all vs product found but no manufacturer
+        if not product.found_on_onemed and not jeeves_supplier:
+            analysis.status = QualityStatus.NO_RELIABLE_SOURCE
+            analysis.comment = "Produkt ikke funnet — kan ikke vurdere produsent"
+            analysis.status_reason = "Ingen kilde tilgjengelig for produsentinfo"
+        else:
+            analysis.status = QualityStatus.MISSING
+            analysis.comment = "Produsentinformasjon mangler i både Jeeves og nettside"
+            analysis.status_reason = "Ingen kilde har produsentinfo"
         return analysis
 
     if not mfr and jeeves_supplier:
@@ -402,9 +448,15 @@ def _analyze_manufacturer(product: ProductData, jeeves: JeevesData = None) -> Fi
         analysis.comment = "; ".join(issues)
         return analysis
 
+    # Check source conflict: website and Jeeves have different manufacturers
+    if mfr and jeeves_supplier and _values_conflict(mfr, jeeves_supplier):
+        issues.append(f"Avvik: nettside '{mfr}' vs Jeeves '{jeeves_supplier}'")
+
     if not issues:
         analysis.status = QualityStatus.OK
         analysis.comment = "Produsentinfo OK"
+    elif any("Avvik:" in i for i in issues):
+        analysis.status = QualityStatus.SOURCE_CONFLICT
     else:
         analysis.status = QualityStatus.SHOULD_IMPROVE
         analysis.comment = "; ".join(issues)
@@ -514,11 +566,17 @@ def _analyze_category(product: ProductData) -> FieldAnalysis:
 
     if not has_category:
         if url_category:
-            analysis.status = QualityStatus.SHOULD_IMPROVE
+            analysis.status = QualityStatus.WEAK
             analysis.comment = f"Kategori mangler, men URL antyder: {url_category}"
+            analysis.status_reason = "Kategori kun utledet fra URL — usikker"
+        elif not product.found_on_onemed:
+            analysis.status = QualityStatus.NO_RELIABLE_SOURCE
+            analysis.comment = "Produkt ikke funnet — kan ikke vurdere kategori"
+            analysis.status_reason = "Ingen kilde tilgjengelig"
         else:
             analysis.status = QualityStatus.MISSING
             analysis.comment = "Kategori mangler helt"
+            analysis.status_reason = "Produktet funnet men kategori mangler"
         return analysis
 
     issues = []
@@ -631,9 +689,12 @@ def _analyze_image(product: ProductData, image_quality: dict = None) -> FieldAna
         elif status == "FAIL":
             analysis.status = QualityStatus.PROBABLE_ERROR
             analysis.comment = f"Lav bildekvalitet (score {avg_score:.0f}). Problemer: {issues}"
-        elif status in ("REVIEW", "PASS_WITH_NOTES"):
-            analysis.status = QualityStatus.SHOULD_IMPROVE
-            analysis.comment = f"Bildekvalitet kan forbedres (score {avg_score:.0f}). {issues}"
+        elif status == "REVIEW":
+            analysis.status = QualityStatus.MANUAL_REVIEW
+            analysis.comment = f"Bildekvalitet usikker — krever manuell vurdering (score {avg_score:.0f}). {issues}"
+        elif status == "PASS_WITH_NOTES":
+            analysis.status = QualityStatus.WEAK
+            analysis.comment = f"Bildekvalitet akseptabel med anmerkninger (score {avg_score:.0f}). {issues}"
         else:
             analysis.status = QualityStatus.OK
             analysis.comment = f"Bildekvalitet OK (score {avg_score:.0f}, {count} bilde(r))"
@@ -762,12 +823,15 @@ def analyze_product(
     score_map = {
         QualityStatus.STRONG: 1.0,
         QualityStatus.OK: 1.0,
+        QualityStatus.IMPROVEMENT_READY: 0.75,   # Has value, improvement found
         QualityStatus.WEAK: 0.65,
+        QualityStatus.SOURCE_CONFLICT: 0.55,      # Value exists but conflicts
         QualityStatus.SHOULD_IMPROVE: 0.5,
         QualityStatus.MISSING: 0.0,
         QualityStatus.PROBABLE_ERROR: 0.0,
-        QualityStatus.REQUIRES_MANUFACTURER: 0.25,
+        QualityStatus.NO_RELIABLE_SOURCE: 0.2,    # Can't evaluate
         QualityStatus.MANUAL_REVIEW: 0.4,
+        QualityStatus.REQUIRES_MANUFACTURER: 0.25,
     }
 
     weighted_sum = 0.0
@@ -779,8 +843,12 @@ def analyze_product(
 
     analysis.total_score = round(weighted_sum / total_weight * 100, 1) if total_weight > 0 else 0
 
-    # Determine overall status
+    # Determine overall status — worst relevant status dominates
     statuses = [fa.status for fa in field_analyses]
+
+    # Priority order for overall: worst problem first
+    _good = {QualityStatus.STRONG, QualityStatus.OK, QualityStatus.IMPROVEMENT_READY}
+
     if QualityStatus.PROBABLE_ERROR in statuses:
         analysis.overall_status = QualityStatus.PROBABLE_ERROR
     elif QualityStatus.MISSING in statuses:
@@ -789,12 +857,19 @@ def analyze_product(
             analysis.overall_status = QualityStatus.MISSING
         else:
             analysis.overall_status = QualityStatus.SHOULD_IMPROVE
+    elif QualityStatus.SOURCE_CONFLICT in statuses:
+        analysis.overall_status = QualityStatus.MANUAL_REVIEW
+    elif QualityStatus.NO_RELIABLE_SOURCE in statuses:
+        analysis.overall_status = QualityStatus.MANUAL_REVIEW
+    elif QualityStatus.MANUAL_REVIEW in statuses:
+        analysis.overall_status = QualityStatus.MANUAL_REVIEW
     elif QualityStatus.SHOULD_IMPROVE in statuses:
         analysis.overall_status = QualityStatus.SHOULD_IMPROVE
     elif QualityStatus.WEAK in statuses:
         analysis.overall_status = QualityStatus.WEAK
-    elif all(s in (QualityStatus.STRONG, QualityStatus.OK) for s in statuses):
-        # All fields are strong or OK
+    elif QualityStatus.IMPROVEMENT_READY in statuses:
+        analysis.overall_status = QualityStatus.IMPROVEMENT_READY
+    elif all(s in _good for s in statuses):
         strong_count = statuses.count(QualityStatus.STRONG)
         if strong_count >= len(statuses) // 2:
             analysis.overall_status = QualityStatus.STRONG
@@ -889,3 +964,54 @@ def analyze_product(
     )
 
     return analysis
+
+
+def upgrade_statuses_after_enrichment(
+    analysis: ProductAnalysis,
+    enrichment_suggestions: list,
+) -> None:
+    """Upgrade field statuses to IMPROVEMENT_READY when enrichment found a suggestion.
+
+    Called AFTER enrichment is complete. For each field that currently has
+    a weak/improvable status AND a concrete suggestion exists, the status
+    is upgraded to IMPROVEMENT_READY to indicate "action is available".
+
+    This makes the status more precise:
+    - SHOULD_IMPROVE = "has issues, no fix found yet"
+    - IMPROVEMENT_READY = "has issues, and we have a concrete fix"
+    - WEAK = "thin content, no better source found"
+    - WEAK + suggestion = IMPROVEMENT_READY (better source found)
+    """
+    if not enrichment_suggestions:
+        return
+
+    # Build set of field names with concrete suggestions
+    fields_with_suggestions = set()
+    for es in enrichment_suggestions:
+        if es.suggested_value and es.suggested_value.strip():
+            fields_with_suggestions.add(es.field_name)
+
+    # Statuses eligible for upgrade to IMPROVEMENT_READY
+    _upgradeable = {
+        QualityStatus.WEAK,
+        QualityStatus.SHOULD_IMPROVE,
+        QualityStatus.SOURCE_CONFLICT,
+        QualityStatus.MISSING,
+    }
+
+    upgraded = []
+    for fa in analysis.field_analyses:
+        if fa.field_name in fields_with_suggestions and fa.status in _upgradeable:
+            old_status = fa.status
+            fa.status = QualityStatus.IMPROVEMENT_READY
+            fa.status_reason = (
+                f"Forbedring klar (tidligere: {old_status.value}). "
+                f"Et forbedringsforslag er tilgjengelig."
+            )
+            upgraded.append(fa.field_name)
+
+    if upgraded:
+        logger.info(
+            f"[analyze] Upgraded {len(upgraded)} fields to IMPROVEMENT_READY: "
+            f"{', '.join(upgraded)}"
+        )

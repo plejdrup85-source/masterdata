@@ -2771,6 +2771,11 @@ async def _run_analysis(
                             f"{len(enrichment_suggestions)} enrichment suggestion(s) after quality gate"
                         )
 
+                    # Upgrade field statuses: SHOULD_IMPROVE/WEAK → IMPROVEMENT_READY
+                    # for fields where enrichment found a concrete suggestion
+                    from backend.analyzer import upgrade_statuses_after_enrichment
+                    upgrade_statuses_after_enrichment(analysis, enrichment_suggestions or [])
+
                 return analysis
 
             except Exception as e:

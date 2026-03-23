@@ -20,27 +20,40 @@ from backend.models import EnrichmentSuggestion, JeevesData, ProductAnalysis, Qu
 
 logger = logging.getLogger(__name__)
 
-# Color scheme for statuses
+# Color scheme for statuses — visually distinct for user prioritization
 STATUS_COLORS = {
-    QualityStatus.STRONG: "92D050",              # Bright green — strong quality
-    QualityStatus.OK: "C6EFCE",                  # Light green — acceptable
+    # Good (greens)
+    QualityStatus.STRONG: "92D050",              # Bright green — excellent quality
+    QualityStatus.OK: "C6EFCE",                  # Light green — acceptable, no action
+
+    # Actionable (blues/teals)
+    QualityStatus.IMPROVEMENT_READY: "BDE0FE",   # Light blue — improvement available
     QualityStatus.WEAK: "FFF2CC",                # Light yellow — present but thin
-    QualityStatus.SHOULD_IMPROVE: "FFEB9C",      # Yellow — clear issues
-    QualityStatus.MISSING: "FFC7CE",             # Red — absent
+    QualityStatus.SOURCE_CONFLICT: "FFD6A5",     # Light orange — sources disagree
+
+    # Issues (yellows/reds)
+    QualityStatus.SHOULD_IMPROVE: "FFEB9C",      # Yellow — quality issues
     QualityStatus.PROBABLE_ERROR: "FF6B6B",      # Dark red — likely wrong
-    QualityStatus.REQUIRES_MANUFACTURER: "B4C7E7",  # Blue — needs manufacturer
+    QualityStatus.MISSING: "FFC7CE",             # Red — field absent
+
+    # Blocked (purples/blues)
+    QualityStatus.NO_RELIABLE_SOURCE: "E8DAEF",  # Lavender — can't evaluate
     QualityStatus.MANUAL_REVIEW: "E2BFFF",       # Purple — human must decide
+    QualityStatus.REQUIRES_MANUFACTURER: "B4C7E7",  # Blue — needs manufacturer
 }
 
 STATUS_FONT_COLORS = {
     QualityStatus.STRONG: "006100",
     QualityStatus.OK: "006100",
+    QualityStatus.IMPROVEMENT_READY: "1D4ED8",   # Blue text
     QualityStatus.WEAK: "9C6500",
+    QualityStatus.SOURCE_CONFLICT: "9A3412",     # Dark orange text
     QualityStatus.SHOULD_IMPROVE: "9C6500",
-    QualityStatus.MISSING: "9C0006",
     QualityStatus.PROBABLE_ERROR: "FFFFFF",
-    QualityStatus.REQUIRES_MANUFACTURER: "003380",
+    QualityStatus.MISSING: "9C0006",
+    QualityStatus.NO_RELIABLE_SOURCE: "6B21A8",  # Dark purple text
     QualityStatus.MANUAL_REVIEW: "4B0082",
+    QualityStatus.REQUIRES_MANUFACTURER: "003380",
 }
 
 

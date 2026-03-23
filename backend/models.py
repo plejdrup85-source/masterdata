@@ -8,24 +8,44 @@ from pydantic import BaseModel, Field
 
 
 class QualityStatus(str, Enum):
-    """Field quality classification — drives whether suggestions are created.
+    """Field quality classification — drives suggestions and user prioritization.
 
-    Hierarchy (best → worst):
-      STRONG → OK → WEAK → SHOULD_IMPROVE → PROBABLE_ERROR → MISSING → REQUIRES_MANUFACTURER
+    Each status answers a distinct question for the user:
+      "What is the state of this field, and what action (if any) is needed?"
+
+    Hierarchy (best → worst, for overall scoring):
+      STRONG → OK → IMPROVEMENT_READY → WEAK → SOURCE_CONFLICT →
+      SHOULD_IMPROVE → PROBABLE_ERROR → MISSING →
+      NO_RELIABLE_SOURCE → MANUAL_REVIEW → REQUIRES_MANUFACTURER
+
     Suggestion policy:
-      STRONG/OK: no suggestion unless dramatically better evidence exists
+      STRONG/OK: no suggestion
+      IMPROVEMENT_READY: suggestion already attached, user just approves/rejects
       WEAK: suggestion only if materially better source found
+      SOURCE_CONFLICT: flag conflict, let user choose
       SHOULD_IMPROVE/PROBABLE_ERROR/MISSING: suggestion if any evidence available
+      NO_RELIABLE_SOURCE: no suggestion possible, flag for manual action
+      MANUAL_REVIEW: ambiguous, human must decide
       REQUIRES_MANUFACTURER: always flag for manufacturer contact
     """
-    STRONG = "Sterk"                            # Present, well-structured, no action needed
-    OK = "OK"                                   # Acceptable quality, no enrichment
-    WEAK = "Svak"                               # Present but thin/short — only improve with strong evidence
-    SHOULD_IMPROVE = "B\u00f8r forbedres"       # Clear quality issues
-    PROBABLE_ERROR = "Sannsynlig feil"          # Likely incorrect data
-    MISSING = "Mangler"                         # Field is empty/absent
-    REQUIRES_MANUFACTURER = "Krever produsent"  # Cannot resolve without manufacturer
-    MANUAL_REVIEW = "Manuell vurdering"         # Ambiguous — human must decide
+    # ── Good states (no action needed) ──
+    STRONG = "Sterk"                            # Present, well-structured, rich content
+    OK = "OK"                                   # Acceptable quality, no action needed
+
+    # ── Actionable states (specific action available) ──
+    IMPROVEMENT_READY = "Forbedring klar"       # Value exists, but enrichment found a better version
+    WEAK = "Svak"                               # Present but thin/short/minimal
+    SOURCE_CONFLICT = "Avvik fra kilde"         # Value differs between sources (website vs Jeeves vs PDF)
+    SHOULD_IMPROVE = "B\u00f8r forbedres"       # Clear quality issues (formatting, language, structure)
+
+    # ── Problem states (issue needs resolution) ──
+    PROBABLE_ERROR = "Sannsynlig feil"          # Likely incorrect data (placeholder, gibberish)
+    MISSING = "Mangler"                         # Field is completely empty/absent
+
+    # ── Blocked states (cannot resolve automatically) ──
+    NO_RELIABLE_SOURCE = "Ingen sikker kilde"   # No reference data available to evaluate against
+    MANUAL_REVIEW = "Manuell vurdering"         # Ambiguous/conflicting signals — human must decide
+    REQUIRES_MANUFACTURER = "Krever produsent"  # Cannot resolve without manufacturer contact
 
 
 class VerificationStatus(str, Enum):
