@@ -2807,6 +2807,13 @@ async def _run_analysis(
                         manufacturer_data=mfr_data,
                     )
 
+                    # Evaluate webshop readiness
+                    from backend.webshop_readiness import evaluate_webshop_readiness
+                    readiness = evaluate_webshop_readiness(analysis)
+                    analysis.webshop_status = readiness.status_label
+                    analysis.webshop_summary = readiness.summary
+                    analysis.webshop_missing = readiness.missing_list
+
                 return analysis
 
             except Exception as e:

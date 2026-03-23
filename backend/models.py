@@ -284,6 +284,10 @@ class ProductAnalysis(BaseModel):
     enrichment_suggestions: list[EnrichmentSuggestion] = []
     pdf_available: bool = False
     pdf_url: Optional[str] = None
+    # Webshop readiness (populated by webshop_readiness module)
+    webshop_status: Optional[str] = None          # "Klar" / "Delvis klar" / "Ikke klar"
+    webshop_summary: Optional[str] = None         # One-line summary
+    webshop_missing: Optional[str] = None         # Comma-separated missing items
     # AI scoring results (populated by ai_scorer)
     ai_score: Optional[dict] = None
     ai_enrichment: Optional[dict] = None
