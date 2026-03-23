@@ -128,6 +128,30 @@ class JeevesIndex:
         """Return all article numbers in the index."""
         return list(self._data.keys())
 
+    def articles_with_supplier(self) -> list[str]:
+        """Return article numbers where supplier (manufacturer) is known.
+
+        Filters out rows where supplier is empty, None, or a placeholder value.
+        Used for "run quality check / relation builder for all products with manufacturer".
+        """
+        from backend.content_validator import is_valid_supplier
+        return [
+            art_no
+            for art_no, jd in self._data.items()
+            if is_valid_supplier(jd.supplier)
+        ]
+
+    def supplier_stats(self) -> dict[str, int]:
+        """Return statistics about supplier coverage in the catalog."""
+        from backend.content_validator import is_valid_supplier
+        total = len(self._data)
+        with_supplier = sum(1 for jd in self._data.values() if is_valid_supplier(jd.supplier))
+        return {
+            "total": total,
+            "with_supplier": with_supplier,
+            "without_supplier": total - with_supplier,
+        }
+
 
 # Module-level singleton for convenience
 _default_index: Optional[JeevesIndex] = None

@@ -804,12 +804,26 @@ def analyze_product(
         analysis.overall_status = QualityStatus.OK
 
     # Determine follow-up actions
+    # IMPORTANT: "Produsent" is NOT considered missing if Jeeves supplier exists.
+    # The analyzer already sets Produsent status to OK when supplier is available
+    # (see _analyze_manufacturer), but as an extra safety net we re-check here.
+    from backend.content_validator import has_known_manufacturer
+    mfr_is_known = has_known_manufacturer(product, jeeves)
+
     missing_fields = [fa for fa in field_analyses if fa.status == QualityStatus.MISSING]
     requires_mfr = any(
-        fa.field_name in ("Produsent", "Produsentens varenummer", "Spesifikasjon")
+        fa.field_name in ("Spesifikasjon",)  # Only spec truly requires manufacturer contact
         and fa.status == QualityStatus.MISSING
         for fa in field_analyses
     )
+    # Also require manufacturer contact if BOTH produsent AND produsentens varenummer are missing
+    # BUT ONLY if supplier is not available in the catalog
+    if not mfr_is_known:
+        requires_mfr = requires_mfr or any(
+            fa.field_name in ("Produsent", "Produsentens varenummer")
+            and fa.status == QualityStatus.MISSING
+            for fa in field_analyses
+        )
 
     analysis.requires_manufacturer_contact = requires_mfr
 
@@ -847,7 +861,11 @@ def analyze_product(
         missing_names = [fa.field_name for fa in missing_fields]
         missing_list = "\n".join(f"- {name}" for name in missing_names)
 
-        if product.manufacturer:
+        # Use resolved manufacturer (supplier from catalog takes priority)
+        from backend.content_validator import resolve_manufacturer
+        resolved_mfr, _, _ = resolve_manufacturer(product, jeeves)
+
+        if resolved_mfr:
             product_label = product.product_name or product.article_number
             analysis.suggested_manufacturer_message = (
                 f"Hei,\n\n"

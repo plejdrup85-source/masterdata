@@ -896,51 +896,116 @@ def normalize_for_webshop_specification(text: str) -> str:
     return text.strip()
 
 
+# ═══════════════════════════════════════════════════════════
+# PUBLIC API — Central manufacturer/supplier resolution
+# ═══════════════════════════════════════════════════════════
+
+# Placeholder values that should NOT count as a real supplier/manufacturer.
+_MANUFACTURER_PLACEHOLDERS = frozenset({
+    "ukjent", "unknown", "n/a", "-", ".", "na", "ingen", "",
+})
+
+
+def is_valid_supplier(value: Optional[str]) -> bool:
+    """Check if a supplier/manufacturer value is real (not empty/placeholder).
+
+    This is the single source of truth for whether a supplier value counts
+    as a known manufacturer. Used for:
+    - Filtering catalog rows that have a manufacturer
+    - Determining if manufacturer is "missing"
+    - Deciding whether to search for manufacturer info
+    """
+    if not value:
+        return False
+    stripped = value.strip()
+    if not stripped:
+        return False
+    return stripped.lower() not in _MANUFACTURER_PLACEHOLDERS
+
+
+def resolve_manufacturer(
+    product_data=None, jeeves_data=None, manufacturer_lookup=None
+) -> tuple[Optional[str], Optional[str], str]:
+    """Resolve the manufacturer name and article number from all available sources.
+
+    This is THE central function for manufacturer resolution. Every part of
+    the app that needs "who is the manufacturer?" should call this function
+    instead of implementing its own logic.
+
+    Priority (supplier from catalog is the primary source):
+        1. Jeeves supplier (from product catalog — most authoritative)
+        2. Website manufacturer (from onemed.no scraping)
+        3. Manufacturer lookup (from enrichment search)
+
+    Returns:
+        (manufacturer_name, manufacturer_article_number, source_label)
+        source_label is one of: "katalog", "nettside", "produsentsøk", ""
+    """
+    producer = None
+    producer_artnr = None
+    source = ""
+
+    # Priority 1: Jeeves supplier (catalog = ground truth)
+    if jeeves_data:
+        if is_valid_supplier(getattr(jeeves_data, "supplier", None)):
+            producer = jeeves_data.supplier.strip()
+            source = "katalog"
+        if is_valid_supplier(getattr(jeeves_data, "supplier_item_no", None)):
+            producer_artnr = jeeves_data.supplier_item_no.strip()
+
+    # Priority 2: Website manufacturer
+    if not producer and product_data:
+        mfr = getattr(product_data, "manufacturer", None)
+        if is_valid_supplier(mfr):
+            producer = mfr.strip()
+            source = "nettside"
+    if not producer_artnr and product_data:
+        mfr_artnr = getattr(product_data, "manufacturer_article_number", None)
+        if is_valid_supplier(mfr_artnr):
+            producer_artnr = mfr_artnr.strip()
+
+    # Priority 3: Manufacturer lookup (enrichment search)
+    if not producer and manufacturer_lookup:
+        found = getattr(manufacturer_lookup, "found", False)
+        if found:
+            source_url = getattr(manufacturer_lookup, "source_url", None)
+            if source_url:
+                try:
+                    from backend.enricher import _infer_manufacturer_from_url
+                    inferred = _infer_manufacturer_from_url(source_url)
+                    if inferred:
+                        producer = inferred
+                        source = "produsentsøk"
+                except ImportError:
+                    pass
+
+    return producer, producer_artnr, source
+
+
+def has_known_manufacturer(
+    product_data=None, jeeves_data=None
+) -> bool:
+    """Quick check: does this product have a known manufacturer from any source?
+
+    Returns True if supplier exists in catalog OR manufacturer on website.
+    This should be used INSTEAD of checking product_data.manufacturer alone.
+    """
+    if jeeves_data and is_valid_supplier(getattr(jeeves_data, "supplier", None)):
+        return True
+    if product_data and is_valid_supplier(getattr(product_data, "manufacturer", None)):
+        return True
+    return False
+
+
 def get_best_producer_info(
     product_data, jeeves_data=None, manufacturer_lookup=None
 ) -> tuple[Optional[str], Optional[str]]:
     """Get best available producer and producer article number.
 
-    Priority:
-    1. Jeeves ERP data (most authoritative for internal use)
-    2. Product page data (from onemed.no scraping)
-    3. Manufacturer lookup (from enrichment)
+    Convenience wrapper around resolve_manufacturer() that returns
+    just (name, article_number) without the source label.
 
-    Returns (producer_name, producer_article_number).
+    Used by excel_handler.py and other output modules.
     """
-    producer = None
-    producer_artnr = None
-
-    # Priority 1: Jeeves
-    if jeeves_data:
-        if jeeves_data.supplier and jeeves_data.supplier.strip():
-            candidate = jeeves_data.supplier.strip()
-            if candidate.lower() not in ("ukjent", "unknown", "n/a", "-", ""):
-                producer = candidate
-        if jeeves_data.supplier_item_no and jeeves_data.supplier_item_no.strip():
-            candidate = jeeves_data.supplier_item_no.strip()
-            if candidate.lower() not in ("ukjent", "unknown", "n/a", "-", ""):
-                producer_artnr = candidate
-
-    # Priority 2: Product page
-    if not producer and product_data:
-        if product_data.manufacturer and product_data.manufacturer.strip():
-            candidate = product_data.manufacturer.strip()
-            if candidate.lower() not in ("ukjent", "unknown", "n/a", "-", ""):
-                producer = candidate
-    if not producer_artnr and product_data:
-        if product_data.manufacturer_article_number and product_data.manufacturer_article_number.strip():
-            candidate = product_data.manufacturer_article_number.strip()
-            if candidate.lower() not in ("ukjent", "unknown", "n/a", "-", ""):
-                producer_artnr = candidate
-
-    # Priority 3: Manufacturer lookup
-    if not producer and manufacturer_lookup and manufacturer_lookup.found:
-        if manufacturer_lookup.source_url:
-            # Infer from URL domain
-            from backend.enricher import _infer_manufacturer_from_url
-            inferred = _infer_manufacturer_from_url(manufacturer_lookup.source_url)
-            if inferred:
-                producer = inferred
-
-    return producer, producer_artnr
+    name, artnr, _source = resolve_manufacturer(product_data, jeeves_data, manufacturer_lookup)
+    return name, artnr

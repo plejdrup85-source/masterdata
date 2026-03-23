@@ -714,6 +714,7 @@
                 <div style="font-size:0.9rem;font-weight:600;margin-bottom:0.5rem">Datakilde</div>
                 <div style="display:flex;gap:0.4rem;flex-wrap:wrap">
                     <button class="qa-source-btn" data-source="catalog_full" onclick="setQaSource('catalog_full')" style="padding:0.4rem 0.8rem;font-size:0.85rem;border-radius:6px;cursor:pointer;border:1px solid var(--border);background:var(--bg);color:var(--text);font-weight:500">Hele katalogen</button>
+                    <button class="qa-source-btn" data-source="catalog_supplier" onclick="setQaSource('catalog_supplier')" style="padding:0.4rem 0.8rem;font-size:0.85rem;border-radius:6px;cursor:pointer;border:1px solid var(--border);background:var(--bg);color:var(--text);font-weight:500">Alle med produsent</button>
                     <button class="qa-source-btn" data-source="catalog_random" onclick="setQaSource('catalog_random')" style="padding:0.4rem 0.8rem;font-size:0.85rem;border-radius:6px;cursor:pointer;border:1px solid var(--border);background:var(--bg);color:var(--text);font-weight:500">Tilfeldig utvalg</button>
                     <button class="qa-source-btn" data-source="manual_articles" onclick="setQaSource('manual_articles')" style="padding:0.4rem 0.8rem;font-size:0.85rem;border-radius:6px;cursor:pointer;border:1px solid var(--border);background:var(--bg);color:var(--text);font-weight:500">Manuelt oppgitt</button>
                     <button class="qa-source-btn active" data-source="upload_excel" onclick="setQaSource('upload_excel')" style="padding:0.4rem 0.8rem;font-size:0.85rem;border-radius:6px;cursor:pointer;border:1px solid var(--primary);background:#eff6ff;color:var(--primary);font-weight:500">Last opp Excel</button>
@@ -726,6 +727,15 @@
                     <strong>Hele Jeeves-katalogen</strong> vil bli analysert mot onemed.no.
                     <span id="qaCatalogCount" style="font-weight:600"></span>
                     <br><span style="font-size:0.8rem;color:#15803d">Ingen Excel-opplasting nødvendig.</span>
+                </div>
+            </div>
+
+            <!-- Source: Supplier-filtered Catalog -->
+            <div id="qaSourceCatalogSupplier" class="qa-source-panel" style="display:none">
+                <div style="padding:1rem;background:#ede9fe;border:1px solid #c4b5fd;border-radius:8px;font-size:0.85rem;color:#5b21b6">
+                    <strong>Alle produkter med produsent/supplier</strong> fra katalogen vil bli analysert.
+                    <span id="qaSupplierCount" style="font-weight:600"></span>
+                    <br><span style="font-size:0.8rem;color:#6d28d9">Produkter uten supplier filtreres bort. Ingen Excel-opplasting nødvendig.</span>
                 </div>
             </div>
 
@@ -961,6 +971,7 @@
                 <div style="font-size:0.9rem;font-weight:600;margin-bottom:0.5rem">Velg datakilde</div>
                 <div style="display:flex;gap:0.5rem;flex-wrap:wrap">
                     <button class="rel-mode-btn active" data-mode="catalog" onclick="setRelMode('catalog')">Hele katalogen</button>
+                    <button class="rel-mode-btn" data-mode="catalog_supplier" onclick="setRelMode('catalog_supplier')">Alle med produsent</button>
                     <button class="rel-mode-btn" data-mode="paste" onclick="setRelMode('paste')">Lim inn artikkelnumre</button>
                     <button class="rel-mode-btn" data-mode="upload" onclick="setRelMode('upload')">Last opp Excel</button>
                 </div>
@@ -971,6 +982,15 @@
                 <div style="padding:1rem;background:#fef3c7;border:1px solid #fde68a;border-radius:8px;font-size:0.85rem;color:#92400e">
                     <strong>Hele Jeeves-katalogen</strong> vil bli analysert. Dette kan ta noen sekunder avhengig av katalogstørrelsen.
                     <span id="relCatalogCount" style="font-weight:600"></span>
+                </div>
+            </div>
+
+            <!-- Mode A2: Supplier-filtered catalog -->
+            <div id="relModeCatalogSupplier" class="rel-mode-panel" style="display:none">
+                <div style="padding:1rem;background:#ede9fe;border:1px solid #c4b5fd;border-radius:8px;font-size:0.85rem;color:#5b21b6">
+                    <strong>Alle produkter med produsent/supplier</strong> fra katalogen vil bli gruppert.
+                    <span id="relSupplierCount" style="font-weight:600"></span>
+                    <br><span style="font-size:0.8rem;color:#6d28d9">Produkter uten supplier filtreres bort.</span>
                 </div>
             </div>
 
@@ -1310,8 +1330,13 @@
             document.querySelectorAll('.rel-mode-btn').forEach(b =>
                 b.classList.toggle('active', b.dataset.mode === mode));
             document.getElementById('relModeCatalog').style.display = mode === 'catalog' ? '' : 'none';
+            document.getElementById('relModeCatalogSupplier').style.display = mode === 'catalog_supplier' ? '' : 'none';
             document.getElementById('relModePaste').style.display = mode === 'paste' ? '' : 'none';
             document.getElementById('relModeUpload').style.display = mode === 'upload' ? '' : 'none';
+            // Update supplier count
+            if (mode === 'catalog_supplier' && catalogInfo.loaded) {
+                document.getElementById('relSupplierCount').textContent = `(${catalogInfo.supplierCount || 0} av ${catalogInfo.count} produkter har produsent)`;
+            }
             updateRelRunState();
             relSaveState();
         }
@@ -1609,6 +1634,9 @@
             if (relMode === 'catalog') {
                 canRun = true;
                 text = 'Analyserer hele Jeeves-katalogen';
+            } else if (relMode === 'catalog_supplier') {
+                canRun = catalogInfo.loaded && (catalogInfo.supplierCount || 0) > 0;
+                text = `Analyserer ${catalogInfo.supplierCount || '?'} produkter med produsent`;
             } else if (relMode === 'paste') {
                 const arts = parseRelPasteInput();
                 canRun = arts.length >= 2;
@@ -1645,6 +1673,8 @@
                 try {
                     if (relMode === 'catalog') {
                         await loadFamilies(`${API_BASE}/api/families/analyze-jeeves`, 'POST');
+                    } else if (relMode === 'catalog_supplier') {
+                        await loadFamilies(`${API_BASE}/api/families/analyze-jeeves-supplier`, 'POST');
                     } else if (relMode === 'paste') {
                         const articles = parseRelPasteInput();
                         const resp = await fetch(`${API_BASE}/api/families/analyze-articles`, {
@@ -1850,6 +1880,7 @@
             document.querySelectorAll('.qa-source-panel').forEach(p => p.style.display = 'none');
             const panelMap = {
                 catalog_full: 'qaSourceCatalogFull',
+                catalog_supplier: 'qaSourceCatalogSupplier',
                 catalog_random: 'qaSourceCatalogRandom',
                 manual_articles: 'qaSourceManualArticles',
                 upload_excel: 'qaSourceUploadExcel',
@@ -1861,6 +1892,7 @@
             // Update catalog count display
             if (mode !== 'upload_excel' && catalogInfo.loaded) {
                 document.getElementById('qaCatalogCount').textContent = `(${catalogInfo.count} produkter i katalogen)`;
+                document.getElementById('qaSupplierCount').textContent = `(${catalogInfo.supplierCount || 0} av ${catalogInfo.count} produkter har produsent)`;
                 document.getElementById('qaRandomInfo').textContent = `${catalogInfo.count} produkter tilgjengelig i katalogen`;
             }
             updateStartBtnState();
@@ -1873,6 +1905,7 @@
                 catalogInfo = await resp.json();
                 if (catalogInfo.loaded) {
                     document.getElementById('qaCatalogCount').textContent = `(${catalogInfo.count} produkter i katalogen)`;
+                    document.getElementById('qaSupplierCount').textContent = `(${catalogInfo.supplierCount || 0} av ${catalogInfo.count} produkter har produsent)`;
                     document.getElementById('qaRandomInfo').textContent = `${catalogInfo.count} produkter tilgjengelig i katalogen`;
                 }
             } catch(e) { console.warn('Could not load catalog info:', e); }
@@ -1890,6 +1923,8 @@
                 sourceOk = !!selectedFile;
             } else if (qaSourceMode === 'catalog_full') {
                 sourceOk = catalogInfo.loaded && catalogInfo.count > 0;
+            } else if (qaSourceMode === 'catalog_supplier') {
+                sourceOk = catalogInfo.loaded && (catalogInfo.supplierCount || 0) > 0;
             } else if (qaSourceMode === 'catalog_random') {
                 sourceOk = catalogInfo.loaded && catalogInfo.count > 0;
             } else if (qaSourceMode === 'manual_articles') {

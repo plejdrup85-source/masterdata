@@ -333,12 +333,15 @@ async def root():
 async def health_check():
     """Health check endpoint with feature status."""
     idx = get_index_stats()
+    supplier_stats = _jeeves_index.supplier_stats() if _jeeves_index and _jeeves_index.loaded else {}
     return {
         "status": "ok",
-        "version": "2.1.0",
+        "version": "2.2.0",
         "active_jobs": len(jobs),
         "jeeves_loaded": _jeeves_index is not None and _jeeves_index.loaded,
         "jeeves_product_count": _jeeves_index.count if _jeeves_index else 0,
+        "jeeves_supplier_count": supplier_stats.get("with_supplier", 0),
+        "jeeves_without_supplier_count": supplier_stats.get("without_supplier", 0),
         "ai_scoring_available": bool(os.environ.get("ANTHROPIC_API_KEY")),
         "sku_index": idx,
         "analysis_modes": [
@@ -737,6 +740,19 @@ async def analyze_from_catalog(
         batch_info = f"Tilfeldig utvalg: {sample_size} av {catalog_total} (seed={seed})"
         source_filename = f"jeeves_katalog_random_{sample_size}"
 
+    elif source_mode == "catalog_supplier":
+        # Filter to only products that have a known supplier/manufacturer
+        supplier_articles = _jeeves_index.articles_with_supplier()
+        if not supplier_articles:
+            raise HTTPException(400, "Ingen produkter med supplier/produsent funnet i katalogen")
+        stats = _jeeves_index.supplier_stats()
+        selected_articles = supplier_articles
+        batch_info = (
+            f"Produkter med produsent: {len(supplier_articles)} av {stats['total']} "
+            f"({stats['without_supplier']} uten produsent filtrert bort)"
+        )
+        source_filename = f"jeeves_katalog_supplier_{len(supplier_articles)}"
+
     elif source_mode == "manual_articles":
         raw_articles = data.get("article_numbers", [])
         if not raw_articles:
@@ -756,7 +772,7 @@ async def analyze_from_catalog(
         source_filename = f"manuell_{len(selected_articles)}_artikler"
 
     else:
-        raise HTTPException(400, f"Ugyldig source_mode: {source_mode}. Bruk: catalog_full, catalog_random, manual_articles")
+        raise HTTPException(400, f"Ugyldig source_mode: {source_mode}. Bruk: catalog_full, catalog_random, catalog_supplier, manual_articles")
 
     if not selected_articles:
         raise HTTPException(400, "Ingen artikler å analysere")
@@ -831,12 +847,16 @@ async def get_catalog_info():
         return {
             "loaded": False,
             "count": 0,
+            "supplierCount": 0,
             "sample": [],
         }
     all_arts = _jeeves_index.all_article_numbers()
+    stats = _jeeves_index.supplier_stats()
     return {
         "loaded": True,
         "count": len(all_arts),
+        "supplierCount": stats.get("with_supplier", 0),
+        "withoutSupplierCount": stats.get("without_supplier", 0),
         "sample": all_arts[:5],
     }
 
@@ -1230,6 +1250,41 @@ async def analyze_jeeves_families():
 
     product_dicts = products_from_jeeves_index(_jeeves_index)
     return _run_family_detection(product_dicts, source_id, data_source="jeeves_direct")
+
+
+@app.post("/api/families/analyze-jeeves-supplier")
+async def analyze_jeeves_supplier_families():
+    """Run family detection on products that have a known supplier/manufacturer.
+
+    Filters the Jeeves catalog to only include products where the Supplier
+    field is filled in, then runs family detection on those products.
+    """
+    from backend.family_detector import products_from_jeeves_index
+
+    if not _jeeves_index or not _jeeves_index.loaded:
+        raise HTTPException(400, "Jeeves-data er ikke lastet inn")
+
+    source_id = "jeeves-supplier"
+
+    # Return cached if available
+    if source_id in _family_results:
+        return _family_results[source_id]
+
+    # Filter to only articles with supplier
+    supplier_articles = set(_jeeves_index.articles_with_supplier())
+    if not supplier_articles:
+        raise HTTPException(400, "Ingen produkter med supplier/produsent funnet i katalogen")
+
+    all_products = products_from_jeeves_index(_jeeves_index)
+    filtered_products = [p for p in all_products if p.get("article_number") in supplier_articles]
+
+    stats = _jeeves_index.supplier_stats()
+    logger.info(
+        f"Family detection with supplier filter: {len(filtered_products)} of {stats['total']} products "
+        f"({stats['without_supplier']} without supplier excluded)"
+    )
+
+    return _run_family_detection(filtered_products, source_id, data_source="jeeves_supplier")
 
 
 _ARTICLE_SEARCH_TERMS = {
@@ -2521,6 +2576,19 @@ async def _run_analysis(
                     # Step 3: Manufacturer lookup (only if product found and data incomplete)
                     # Check Jeeves first — if Jeeves has supplier info, skip mfr lookup for that
                     jeeves_check = _jeeves_index.get(article_number) if _jeeves_index else None
+
+                    # Inject supplier from catalog into product_data.manufacturer
+                    # so that downstream lookups use the catalog supplier when
+                    # the website didn't provide a manufacturer.
+                    if jeeves_check and not product_data.manufacturer:
+                        from backend.content_validator import is_valid_supplier
+                        if is_valid_supplier(jeeves_check.supplier):
+                            product_data.manufacturer = jeeves_check.supplier.strip()
+                    if jeeves_check and not product_data.manufacturer_article_number:
+                        from backend.content_validator import is_valid_supplier
+                        if is_valid_supplier(jeeves_check.supplier_item_no):
+                            product_data.manufacturer_article_number = jeeves_check.supplier_item_no.strip()
+
                     if product_data.found_on_onemed:
                         has_mfr = product_data.manufacturer or (jeeves_check and jeeves_check.supplier)
                         has_mfr_num = product_data.manufacturer_article_number or (jeeves_check and jeeves_check.supplier_item_no)
