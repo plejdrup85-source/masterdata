@@ -93,31 +93,49 @@ _DEFAULT_WEIGHTS = {
 # ═══════════════════════════════════════════════════════════
 
 def score_source_quality(fa: FieldAnalysis) -> int:
-    """Score based on how many independent sources confirm the value.
+    """Score based on source trustworthiness using the golden source hierarchy.
 
-    100 = multiple trustworthy sources
-    70  = one trustworthy source (Jeeves or verified website)
-    40  = one weak source (URL inference, AI)
-    0   = no source / unknown origin
+    Uses the field's golden source priority to determine how good the
+    winning source is for THIS specific field. A catalog source scores
+    highest for Produsent but lower for Beskrivelse (where website is king).
+
+    100 = value comes from the #1 golden source for this field
+    85  = value comes from the #2 golden source
+    70  = value from a mid-tier source
+    40  = value from a weak/inferred source
+    Bonus: +15 if two independent sources both have values
     """
     if not fa.current_value:
         return 0
 
+    from backend.golden_source import (
+        get_source_priority, get_tier_for_origin,
+        TIER_CONFIDENCE, TIER_NONE,
+    )
+
     has_website = bool(fa.website_value and fa.website_value.strip())
     has_jeeves = bool(fa.jeeves_value and fa.jeeves_value.strip())
-    origin = (fa.value_origin or "").lower()
+    origin = fa.value_origin or ""
 
+    # Determine which tier the winning value came from
+    tier = get_tier_for_origin(origin)
+    priority = get_source_priority(fa.field_name)
+
+    # Score based on position in this field's golden source list
+    if tier != TIER_NONE and tier in priority:
+        position = priority.index(tier)  # 0 = best
+        # Position 0 → 90, position 1 → 78, position 2 → 66, etc.
+        base_score = max(40, 90 - position * 12)
+    elif tier != TIER_NONE:
+        base_score = int(TIER_CONFIDENCE.get(tier, 0.3) * 70)
+    else:
+        base_score = 30 if fa.current_value else 0
+
+    # Bonus for multi-source confirmation
     if has_website and has_jeeves:
-        return 100  # Two independent sources
-    if has_jeeves:
-        return 80   # Jeeves (catalog) is authoritative
-    if has_website:
-        return 70   # Website is good but single-source
-    if "url" in origin or "ai" in origin:
-        return 40   # Inferred, weak
-    if fa.current_value:
-        return 30   # Value exists but source unknown
-    return 0
+        base_score = min(100, base_score + 15)
+
+    return min(100, base_score)
 
 
 def score_completeness(fa: FieldAnalysis) -> int:

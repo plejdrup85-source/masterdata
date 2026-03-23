@@ -455,7 +455,16 @@ def _enrich_description(
 
     if mfr_desc and (not best_val or _description_quality_score(mfr_desc) > _description_quality_score(best_val)):
         mfr_conf = (mfr.confidence if mfr else 0) * 0.85
-        if mfr_conf > best_conf or not best_val:
+        # Golden source: manufacturer (tier 4) only beats PDF (tier 3)
+        # if it has genuinely better quality, not just marginally.
+        # This prevents weaker sources from overriding stronger ones.
+        from backend.golden_source import TIER_PDF, TIER_MANUFACTURER
+        pdf_is_higher_tier = best_source == SOURCE_PDF  # PDF is tier 3, manufacturer is tier 4
+        quality_margin = 0.15 if pdf_is_higher_tier else 0.0
+        mfr_quality = _description_quality_score(mfr_desc)
+        best_quality = _description_quality_score(best_val) if best_val else 0
+
+        if (mfr_conf > best_conf or not best_val) and mfr_quality > best_quality + quality_margin:
             best_val = mfr_desc
             best_source = SOURCE_MANUFACTURER
             best_url = mfr.source_url if mfr else None

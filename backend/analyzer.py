@@ -93,14 +93,16 @@ SPEC_KEYWORDS = {
 
 
 def _analyze_product_name(product: ProductData, jeeves: JeevesData = None) -> FieldAnalysis:
-    """Analyze product name quality using website + Jeeves sources."""
+    """Analyze product name quality using golden source hierarchy."""
+    from backend.golden_source import resolve_product_name
     name = product.product_name
     jeeves_name = (jeeves.item_description or jeeves.web_title) if jeeves else None
 
-    # Use website name, fall back to Jeeves
-    effective_name = name or jeeves_name
+    # Golden source resolution: website > Jeeves > PDF > manufacturer
+    resolved = resolve_product_name(website_name=name, jeeves_name=jeeves_name)
+    effective_name = resolved.value
     source_info = _source_label(name, jeeves_name, "nettside", "Jeeves")
-    origin = "nettside" if name else ("Jeeves" if jeeves_name else None)
+    origin = resolved.winning_label or ("nettside" if name else ("Jeeves" if jeeves_name else None))
 
     analysis = FieldAnalysis(
         field_name="Produktnavn",
@@ -109,6 +111,7 @@ def _analyze_product_name(product: ProductData, jeeves: JeevesData = None) -> Fi
         website_value=name,
         jeeves_value=jeeves_name,
         value_origin=origin,
+        status_reason=resolved.evidence if resolved.candidates_considered > 1 else None,
     )
 
     if not effective_name:
@@ -174,10 +177,14 @@ def _analyze_product_name(product: ProductData, jeeves: JeevesData = None) -> Fi
 
 
 def _analyze_description(product: ProductData, jeeves: JeevesData = None) -> FieldAnalysis:
-    """Analyze product description quality using website + Jeeves sources."""
+    """Analyze product description quality using golden source hierarchy."""
+    from backend.golden_source import resolve_description
     desc = product.description
     jeeves_desc = jeeves.web_text if jeeves else None
-    effective_desc = desc or jeeves_desc
+
+    # Golden source: website > manufacturer > PDF > inferred
+    resolved = resolve_description(website_desc=desc)
+    effective_desc = desc or jeeves_desc  # Jeeves web_text is a website-tier source
     source_info = _source_label(desc, jeeves_desc, "nettside", "Jeeves")
     origin = "nettside" if desc else ("Jeeves" if jeeves_desc else None)
 
@@ -398,16 +405,22 @@ def _analyze_specification(product: ProductData, jeeves: JeevesData = None) -> F
 
 
 def _analyze_manufacturer(product: ProductData, jeeves: JeevesData = None) -> FieldAnalysis:
-    """Analyze manufacturer information using website + Jeeves sources.
+    """Analyze manufacturer information using golden source hierarchy.
 
-    Supplier/brand from Jeeves is the authoritative source for manufacturer.
-    Do NOT mark as missing just because the website doesn't show it.
+    Golden source for Produsent: katalog (Jeeves supplier) > nettside > PDF > produsentside.
+    Supplier/brand from Jeeves is the authoritative source.
     """
+    from backend.golden_source import resolve_field_value, build_candidates_for_field
     mfr = product.manufacturer
     jeeves_supplier = jeeves.supplier if jeeves else None
-    effective_mfr = mfr or jeeves_supplier
+
+    # Golden source: catalog > website > PDF > manufacturer
+    resolved = resolve_field_value("Produsent", build_candidates_for_field(
+        "Produsent", website_value=mfr, jeeves_value=jeeves_supplier,
+    ))
+    effective_mfr = resolved.value or mfr or jeeves_supplier
     source_info = _source_label(mfr, jeeves_supplier, "nettside", "Jeeves")
-    origin = "nettside" if mfr else ("Jeeves" if jeeves_supplier else None)
+    origin = resolved.winning_label or ("nettside" if mfr else ("Jeeves" if jeeves_supplier else None))
 
     analysis = FieldAnalysis(
         field_name="Produsent",
