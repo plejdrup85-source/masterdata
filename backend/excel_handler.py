@@ -1729,6 +1729,28 @@ def _create_summary_sheet(ws, results: list[ProductAnalysis],
     rows.append(("Gjennomsnittlig prioritetsscore", prio_avg, 1))
     rows.append(("", "", 0))
 
+    # Category intelligence distribution
+    cat_ok = sum(1 for r in results if r.category_status == "OK")
+    cat_simplify = sum(1 for r in results if r.category_status == "SHOULD_SIMPLIFY")
+    cat_attr = sum(1 for r in results if r.category_status == "ATTRIBUTE_AS_CATEGORY")
+    cat_wrong = sum(1 for r in results if r.category_status == "WRONG_CATEGORY")
+    cat_missing = sum(1 for r in results if r.category_status == "MISSING")
+    cat_review = sum(1 for r in results if r.category_status == "NEEDS_REVIEW")
+    if cat_simplify + cat_attr + cat_wrong + cat_missing > 0:
+        rows.append(("KATEGORI-INTELLIGENS", "", 0))
+        rows.append(("Kategori OK", cat_ok, 1))
+        if cat_simplify:
+            rows.append(("Bør forenkles", cat_simplify, 1))
+        if cat_attr:
+            rows.append(("Attributt som kategori", cat_attr, 1))
+        if cat_wrong:
+            rows.append(("Feil kategori", cat_wrong, 1))
+        if cat_missing:
+            rows.append(("Mangler kategori", cat_missing, 1))
+        if cat_review:
+            rows.append(("Krever vurdering", cat_review, 1))
+        rows.append(("", "", 0))
+
     # Status distribution
     rows.append(("STATUSFORDELING (OVERORDNET)", "", 0))
     for status_name, count in sorted(status_counts.items()):

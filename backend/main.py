@@ -1071,6 +1071,44 @@ async def get_approval_summary_endpoint(job_id: str):
     return get_approval_summary(job.results)
 
 
+@app.get("/api/results/{job_id}/category-analysis")
+async def get_category_analysis(job_id: str):
+    """Get aggregate category structure analysis for a completed job.
+
+    Returns per-category-path recommendations for simplification,
+    filter conversion, and structure improvements.
+    """
+    job = jobs.get(job_id)
+    if not job or job.status != JobStatus.COMPLETED:
+        raise HTTPException(404, "Jobb ikke funnet eller ikke fullført")
+
+    from backend.category_intelligence import build_ecommerce_category_recommendations
+
+    recommendations = build_ecommerce_category_recommendations(job.results)
+
+    # Category status distribution
+    status_counts = {}
+    for r in job.results:
+        s = r.category_status or "unknown"
+        status_counts[s] = status_counts.get(s, 0) + 1
+
+    return {
+        "total_products": len(job.results),
+        "status_distribution": status_counts,
+        "recommendations": [
+            {
+                "original_path": rec.original_path,
+                "suggested_path": rec.suggested_path,
+                "product_count": rec.product_count,
+                "issue": rec.issue,
+                "action": rec.action,
+                "attribute_candidates": rec.attribute_candidates,
+            }
+            for rec in recommendations[:50]
+        ],
+    }
+
+
 @app.get("/api/download/{job_id}/approved")
 async def download_approved_only(job_id: str):
     """Download Excel with only approved suggestions."""
@@ -1390,6 +1428,10 @@ async def get_results(job_id: str):
                 "priority_score": r.priority_score,
                 "priority_label": r.priority_label,
                 "priority_reasons": r.priority_reasons,
+                # Category intelligence
+                "category_status": r.category_status,
+                "category_suggestion": r.category_suggestion,
+                "category_summary": r.category_summary,
             }
             for r in job.results
         ],
@@ -3213,6 +3255,18 @@ async def _run_analysis(
                     analysis.webshop_status = readiness.status_label
                     analysis.webshop_summary = readiness.summary
                     analysis.webshop_missing = readiness.missing_list
+
+                    # Evaluate category for e-commerce fitness
+                    from backend.category_intelligence import evaluate_category_fit
+                    cat_eval = evaluate_category_fit(
+                        product.category_breadcrumb,
+                        product.product_name or "",
+                        product.description or "",
+                        product.specification or "",
+                    )
+                    analysis.category_status = cat_eval.status
+                    analysis.category_suggestion = cat_eval.suggested_category
+                    analysis.category_summary = cat_eval.summary
 
                     # Calculate priority score
                     from backend.priority_scoring import calculate_priority_score

@@ -303,6 +303,10 @@ class ProductAnalysis(BaseModel):
     webshop_status: Optional[str] = None          # "Klar" / "Delvis klar" / "Ikke klar"
     webshop_summary: Optional[str] = None         # One-line summary
     webshop_missing: Optional[str] = None         # Comma-separated missing items
+    # Category intelligence (populated by category_intelligence module)
+    category_status: Optional[str] = None           # OK / SHOULD_SIMPLIFY / ATTRIBUTE_AS_CATEGORY / etc.
+    category_suggestion: Optional[str] = None       # Suggested simplified category path
+    category_summary: Optional[str] = None          # Norwegian summary
     # Priority scoring (populated by priority_scoring module)
     priority_score: Optional[int] = None            # 0-100, higher = fix sooner
     priority_label: Optional[str] = None            # "Høy" / "Middels" / "Lav"
