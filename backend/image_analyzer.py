@@ -108,6 +108,11 @@ class ImageIssue(str, Enum):
     PRODUCT_TOO_CROPPED = "PRODUCT_TOO_CROPPED"
     IMAGE_NOT_FOUND = "IMAGE_NOT_FOUND"
     ANALYSIS_ERROR = "ANALYSIS_ERROR"
+    # E-commerce specific issues
+    LIKELY_NOT_PRODUCT = "LIKELY_NOT_PRODUCT"      # Logo, icon, illustration, placeholder
+    UNPROFESSIONAL = "UNPROFESSIONAL"              # Low technical quality overall
+    BAD_ASPECT_RATIO = "BAD_ASPECT_RATIO"          # Too wide/tall for product listing
+    PLACEHOLDER_IMAGE = "PLACEHOLDER_IMAGE"         # Solid color or near-empty image
 
 
 @dataclass
@@ -137,6 +142,13 @@ class SingleImageAnalysis:
     product_fill_ratio: float = 0.0
     fill_score: float = 0.0
     overall_score: float = 0.0
+    # E-commerce composite scores
+    technical_quality: float = 0.0      # Resolution + blur + brightness + contrast
+    ecommerce_suitability: float = 0.0  # Background + fill + aspect + professional
+    color_uniformity: float = 0.0       # 0=varied, 1=solid color (placeholder indicator)
+    aspect_ratio_score: float = 0.0     # How suitable the aspect ratio is for listings
+    is_likely_product: bool = True       # False if detected as logo/icon/placeholder
+    image_type: str = "product"          # "product", "logo", "placeholder", "unknown"
     status: ImageStatus = ImageStatus.MISSING
     issues: list[str] = field(default_factory=list)
 
@@ -166,6 +178,12 @@ class SingleImageAnalysis:
             "product_fill_ratio": round(self.product_fill_ratio, 3),
             "fill_score": round(self.fill_score, 1),
             "overall_score": round(self.overall_score, 1),
+            "technical_quality": round(self.technical_quality, 1),
+            "ecommerce_suitability": round(self.ecommerce_suitability, 1),
+            "color_uniformity": round(self.color_uniformity, 3),
+            "aspect_ratio_score": round(self.aspect_ratio_score, 1),
+            "is_likely_product": self.is_likely_product,
+            "image_type": self.image_type,
             "status": self.status.value,
             "issues": self.issues,
         }
@@ -185,6 +203,11 @@ class ProductImageSummary:
     image_issue_summary: str = ""
     image_quality_status: str = "MISSING"
     image_quality_priority: str = "none"
+    # E-commerce aggregate scores
+    technical_quality_avg: float = 0.0      # Average technical quality
+    ecommerce_suitability_avg: float = 0.0  # Average e-commerce suitability
+    main_is_product: bool = True             # Is main image a product photo?
+    main_image_type: str = "unknown"         # Type of main image
     image_analyses: list[SingleImageAnalysis] = field(default_factory=list)
 
     def to_dict(self) -> dict:
@@ -200,6 +223,10 @@ class ProductImageSummary:
             "image_issue_summary": self.image_issue_summary,
             "image_quality_status": self.image_quality_status,
             "image_quality_priority": self.image_quality_priority,
+            "technical_quality_avg": round(self.technical_quality_avg, 1),
+            "ecommerce_suitability_avg": round(self.ecommerce_suitability_avg, 1),
+            "main_is_product": self.main_is_product,
+            "main_image_type": self.main_image_type,
             "image_analyses": [a.to_dict() for a in self.image_analyses],
         }
 
@@ -297,6 +324,63 @@ def _score_fill(fill_ratio: float) -> float:
         return 30.0  # Extremely cropped
 
 
+def _score_aspect_ratio(aspect: float) -> float:
+    """Score 0-100 based on aspect ratio suitability for e-commerce.
+
+    Ideal: 0.75-1.33 (roughly square, standard product listing format).
+    Penalize very wide (banner) or very tall (strip) images.
+    """
+    if aspect <= 0:
+        return 0.0
+    if 0.75 <= aspect <= 1.33:
+        return 100.0
+    elif 0.5 <= aspect <= 2.0:
+        # Moderate penalty
+        if aspect < 0.75:
+            return 60.0 + 40.0 * (aspect - 0.5) / 0.25
+        else:
+            return 60.0 + 40.0 * (2.0 - aspect) / 0.67
+    else:
+        return max(10.0, 30.0)  # Extreme aspect ratio
+
+
+def _detect_image_type(result: "SingleImageAnalysis") -> str:
+    """Classify the image type using heuristics.
+
+    Returns: "product", "logo", "placeholder", "unknown"
+    """
+    # Placeholder: very high color uniformity + very low edge density
+    if result.color_uniformity > 0.90 and result.edge_density < 0.005:
+        return "placeholder"
+
+    # Logo/icon: very small file + low fill + high contrast often
+    if (result.file_size_kb < 15
+            and min(result.width, result.height) < 300
+            and result.product_fill_ratio < 0.15):
+        return "logo"
+
+    # Logo: very few visual details + very small area of interest
+    if result.edge_density < 0.008 and result.product_fill_ratio < 0.08:
+        return "logo"
+
+    return "product"
+
+
+def _compute_color_uniformity(gray: "np.ndarray") -> float:
+    """Compute color uniformity (0=varied, 1=solid color).
+
+    High uniformity suggests a placeholder or solid-color background without a product.
+    Uses the ratio of the most common color bin to total pixels.
+    """
+    # Quantize to 16 bins for efficiency
+    hist = cv2.calcHist([gray], [0], None, [16], [0, 256])
+    total = gray.size
+    if total == 0:
+        return 0.0
+    dominant_ratio = float(hist.max()) / total
+    return dominant_ratio
+
+
 def analyze_image_data(image_bytes: bytes, artnr: str, index: int, name: str, url: str) -> SingleImageAnalysis:
     """Analyze a single image using classical CV techniques."""
     result = SingleImageAnalysis(
@@ -370,6 +454,45 @@ def analyze_image_data(image_bytes: bytes, artnr: str, index: int, name: str, ur
         elif result.product_fill_ratio > FILL_MAX:
             result.issues.append(ImageIssue.PRODUCT_TOO_CROPPED.value)
 
+        # ── E-commerce enhancements ──
+
+        # Color uniformity (placeholder detection)
+        result.color_uniformity = _compute_color_uniformity(gray)
+        if result.color_uniformity > 0.90 and result.edge_density < 0.005:
+            result.issues.append(ImageIssue.PLACEHOLDER_IMAGE.value)
+
+        # Aspect ratio suitability
+        result.aspect_ratio_score = _score_aspect_ratio(result.aspect_ratio)
+        if result.aspect_ratio > 0 and (result.aspect_ratio < 0.5 or result.aspect_ratio > 2.0):
+            result.issues.append(ImageIssue.BAD_ASPECT_RATIO.value)
+
+        # Image type detection
+        result.image_type = _detect_image_type(result)
+        result.is_likely_product = result.image_type == "product"
+        if not result.is_likely_product:
+            result.issues.append(ImageIssue.LIKELY_NOT_PRODUCT.value)
+
+        # Technical quality: resolution + sharpness + brightness + contrast
+        result.technical_quality = (
+            result.resolution_score * 0.25
+            + result.blur_score * 0.35
+            + result.brightness_score * 0.20
+            + result.contrast_score * 0.20
+        )
+
+        # E-commerce suitability: background + fill + aspect ratio + product type
+        product_type_score = 100.0 if result.is_likely_product else 20.0
+        result.ecommerce_suitability = (
+            result.background_score * 0.30
+            + result.fill_score * 0.25
+            + result.aspect_ratio_score * 0.20
+            + product_type_score * 0.25
+        )
+
+        # Professional quality flag
+        if result.technical_quality < 40 and result.ecommerce_suitability < 40:
+            result.issues.append(ImageIssue.UNPROFESSIONAL.value)
+
         # Calculate weighted overall score
         result.overall_score = (
             result.resolution_score * SCORE_WEIGHTS["resolution"]
@@ -380,6 +503,10 @@ def analyze_image_data(image_bytes: bytes, artnr: str, index: int, name: str, ur
             + result.edge_score * SCORE_WEIGHTS["edge"]
             + result.fill_score * SCORE_WEIGHTS["fill"]
         )
+
+        # Penalize non-product images in overall score
+        if not result.is_likely_product:
+            result.overall_score = min(result.overall_score, 30.0)
 
         # Determine status
         if not result.issues:
@@ -510,6 +637,18 @@ async def analyze_product_images(
         scores = [a.overall_score for a in found_analyses]
         summary.avg_image_score = sum(scores) / len(scores)
         summary.best_image_score = max(scores)
+
+        # E-commerce aggregate scores
+        tech_scores = [a.technical_quality for a in found_analyses]
+        ecom_scores = [a.ecommerce_suitability for a in found_analyses]
+        summary.technical_quality_avg = sum(tech_scores) / len(tech_scores)
+        summary.ecommerce_suitability_avg = sum(ecom_scores) / len(ecom_scores)
+
+        # Main image type info
+        if summary.image_analyses and summary.image_analyses[0].exists:
+            main_analysis = summary.image_analyses[0]
+            summary.main_is_product = main_analysis.is_likely_product
+            summary.main_image_type = main_analysis.image_type
 
         # Collect all unique issues
         all_issues = set()

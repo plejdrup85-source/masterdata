@@ -2830,6 +2830,10 @@ def _format_image_quality(iq: Optional[dict]) -> dict:
         "count": iq.get("image_count_found", 0),
         "main_exists": iq.get("main_image_exists", False),
         "issues": iq.get("image_issue_summary", ""),
+        "technical_quality": iq.get("technical_quality_avg", 0),
+        "ecommerce_suitability": iq.get("ecommerce_suitability_avg", 0),
+        "main_is_product": iq.get("main_is_product", True),
+        "image_type": iq.get("main_image_type", "unknown"),
     }
 
 

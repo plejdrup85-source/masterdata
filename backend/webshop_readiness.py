@@ -158,9 +158,11 @@ def evaluate_webshop_readiness(analysis: "ProductAnalysis") -> WebshopReadiness:
     else:
         result.must_have_met += 1
 
-    # 4. Bilde
+    # 4. Bilde — enhanced with e-commerce suitability
     img_count = iq.get("image_count_found", 0)
     img_status = iq.get("image_quality_status", "MISSING")
+    main_is_product = iq.get("main_is_product", True)
+    ecom_score = iq.get("ecommerce_suitability_avg", 0)
     if img_count == 0 or img_status == "MISSING":
         result.blockers.append(WebshopBlocker(
             field_name="Bildekvalitet",
@@ -175,8 +177,26 @@ def evaluate_webshop_readiness(analysis: "ProductAnalysis") -> WebshopReadiness:
             is_must_have=True,
             suggestion="Erstatt bildet med et bilde av høyere kvalitet",
         ))
+    elif not main_is_product:
+        result.blockers.append(WebshopBlocker(
+            field_name="Bildekvalitet",
+            criterion="Hovedbildet er ikke et produktbilde (logo/plassholder/ikon)",
+            is_must_have=True,
+            suggestion="Erstatt med et ekte produktfoto",
+        ))
     else:
         result.must_have_met += 1
+        # E-commerce suitability as should-have
+        if ecom_score > 0 and ecom_score < 50:
+            result.blockers.append(WebshopBlocker(
+                field_name="Bildekvalitet",
+                criterion=f"Bildet har lav e-commerce-egnethet ({round(ecom_score)}/100)",
+                is_must_have=False,
+                suggestion="Forbedre bakgrunn, utsnitt eller bildekvalitet",
+            ))
+        else:
+            # Count as should-have met if ecom score is decent
+            pass
 
     # 5. Produsent
     mfr = (pd.manufacturer or "").strip()
