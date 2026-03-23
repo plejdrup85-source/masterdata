@@ -123,12 +123,14 @@ def _get_structured_text(element) -> str:
 # Built by downloading product pages and extracting SKU from JSON-LD
 _sitemap_urls: list[str] = []  # All product URLs from sitemap
 _sku_to_url: dict[str, str] = {}  # article_number -> product URL (built incrementally)
+_checked_no_sku: set[str] = set()  # URLs visited but no SKU found (avoid re-scanning)
 _sitemap_loaded = False
 _sitemap_lock = asyncio.Lock()
 
 # Sitemap index cache file
 SITEMAP_INDEX_PATH = CACHE_DIR / "_sitemap_sku_index.json"
 SITEMAP_URLS_PATH = CACHE_DIR / "_sitemap_urls.json"
+CHECKED_NO_SKU_PATH = CACHE_DIR / "_checked_no_sku.json"
 SITEMAP_MAX_AGE = 24 * 60 * 60  # 24 hours
 
 # Cache version — increment when ProductData schema or extraction logic changes
@@ -201,10 +203,11 @@ def _save_to_cache(product: ProductData) -> None:
         logger.warning(f"Failed to save cache for {product.article_number}")
 
 
-def _load_sitemap_index() -> tuple[list[str], dict[str, str]]:
-    """Load cached sitemap URL list and SKU index from disk."""
+def _load_sitemap_index() -> tuple[list[str], dict[str, str], set[str]]:
+    """Load cached sitemap URL list, SKU index, and checked-no-SKU set from disk."""
     urls = []
     sku_index = {}
+    no_sku = set()
 
     try:
         if SITEMAP_URLS_PATH.exists():
@@ -220,11 +223,19 @@ def _load_sitemap_index() -> tuple[list[str], dict[str, str]]:
     except Exception:
         logger.warning("Failed to load cached SKU index")
 
-    return urls, sku_index
+    try:
+        if CHECKED_NO_SKU_PATH.exists():
+            stat = CHECKED_NO_SKU_PATH.stat()
+            if time.time() - stat.st_mtime < SITEMAP_MAX_AGE:
+                no_sku = set(json.loads(CHECKED_NO_SKU_PATH.read_text(encoding="utf-8")))
+    except Exception:
+        logger.warning("Failed to load cached checked-no-SKU set")
+
+    return urls, sku_index, no_sku
 
 
 def _save_sitemap_index(urls: list[str], sku_index: dict[str, str]) -> None:
-    """Persist sitemap URL list and SKU index to disk."""
+    """Persist sitemap URL list, SKU index, and checked-no-SKU set to disk."""
     try:
         SITEMAP_URLS_PATH.write_text(json.dumps(urls), encoding="utf-8")
     except Exception:
@@ -233,6 +244,10 @@ def _save_sitemap_index(urls: list[str], sku_index: dict[str, str]) -> None:
         SITEMAP_INDEX_PATH.write_text(json.dumps(sku_index), encoding="utf-8")
     except Exception:
         logger.warning("Failed to save SKU index")
+    try:
+        CHECKED_NO_SKU_PATH.write_text(json.dumps(list(_checked_no_sku)), encoding="utf-8")
+    except Exception:
+        logger.warning("Failed to save checked-no-SKU set")
 
 
 def _extract_json_ld(soup: BeautifulSoup) -> list[dict]:
@@ -856,19 +871,23 @@ async def _fetch_with_retry(
 
 async def _load_sitemap(client: httpx.AsyncClient) -> list[str]:
     """Download and parse the product sitemap XML to get all product URLs."""
-    global _sitemap_urls, _sitemap_loaded, _sku_to_url
+    global _sitemap_urls, _sitemap_loaded, _sku_to_url, _checked_no_sku
 
     async with _sitemap_lock:
         if _sitemap_loaded and _sitemap_urls:
             return _sitemap_urls
 
         # Try loading from disk cache first
-        cached_urls, cached_index = _load_sitemap_index()
+        cached_urls, cached_index, cached_no_sku = _load_sitemap_index()
         if cached_urls:
             _sitemap_urls = cached_urls
             _sku_to_url.update(cached_index)
+            _checked_no_sku.update(cached_no_sku)
             _sitemap_loaded = True
-            logger.info(f"Loaded sitemap from cache: {len(cached_urls)} URLs, {len(cached_index)} SKU mappings")
+            logger.info(
+                f"Loaded sitemap from cache: {len(cached_urls)} URLs, "
+                f"{len(cached_index)} SKU mappings, {len(cached_no_sku)} checked-no-SKU"
+            )
             return _sitemap_urls
 
         # Download fresh sitemap
@@ -959,9 +978,9 @@ async def _find_product_url_via_sitemap(
     BATCH_SIZE = 20
     MAX_PAGES_TO_CHECK = max_pages
 
-    # Filter out URLs we've already indexed
+    # Filter out URLs we've already indexed or confirmed to have no SKU
     indexed_urls = set(_sku_to_url.values())
-    unchecked_urls = [u for u in sitemap_urls if u not in indexed_urls]
+    unchecked_urls = [u for u in sitemap_urls if u not in indexed_urls and u not in _checked_no_sku]
 
     pages_checked = 0
     for batch_start in range(0, len(unchecked_urls), BATCH_SIZE):
@@ -979,6 +998,7 @@ async def _find_product_url_via_sitemap(
                     sku = _extract_sku_from_html(resp.text)
                     if sku:
                         return (sku, url)
+                _checked_no_sku.add(url)
             except Exception:
                 pass
             return None
@@ -990,6 +1010,7 @@ async def _find_product_url_via_sitemap(
             if isinstance(result, tuple):
                 sku, url = result
                 _sku_to_url[sku] = url
+                _checked_no_sku.discard(url)
                 pages_checked += 1
                 if sku == article_number:
                     # Found it! Save the updated index
@@ -1012,11 +1033,17 @@ async def _find_product_url_via_sitemap(
 
 def get_index_stats() -> dict:
     """Return current SKU index statistics (no I/O)."""
+    total = len(_sitemap_urls)
+    indexed = len(_sku_to_url)
+    no_sku = len(_checked_no_sku)
+    unchecked = total - indexed - no_sku
     return {
         "sitemap_loaded": _sitemap_loaded,
-        "sitemap_url_count": len(_sitemap_urls),
-        "sku_index_count": len(_sku_to_url),
-        "coverage_pct": round(len(_sku_to_url) / len(_sitemap_urls) * 100, 1) if _sitemap_urls else 0,
+        "sitemap_url_count": total,
+        "sku_index_count": indexed,
+        "checked_no_sku_count": no_sku,
+        "unchecked_count": max(0, unchecked),
+        "coverage_pct": round(indexed / total * 100, 1) if total else 0,
     }
 
 
@@ -1036,7 +1063,7 @@ async def build_full_index(
     Returns:
         dict with {total_pages, indexed, skipped, errors, duration_seconds}
     """
-    global _sitemap_urls, _sku_to_url, _sitemap_loaded
+    global _sitemap_urls, _sku_to_url, _sitemap_loaded, _checked_no_sku
 
     start_time = time.time()
     BATCH_SIZE = 20
@@ -1048,18 +1075,19 @@ async def build_full_index(
         if not sitemap_urls:
             return {"error": "Failed to load sitemap", "total_pages": 0, "indexed": 0}
 
-        # Filter out already-indexed URLs
+        # Filter out already-indexed URLs and confirmed no-SKU URLs
         indexed_urls = set(_sku_to_url.values())
-        unchecked_urls = [u for u in sitemap_urls if u not in indexed_urls]
+        unchecked_urls = [u for u in sitemap_urls if u not in indexed_urls and u not in _checked_no_sku]
 
         total_to_check = len(unchecked_urls)
         already_indexed = len(_sku_to_url)
+        skipped_no_sku = len(_checked_no_sku)
         new_indexed = 0
         errors = 0
 
         logger.info(
             f"[build-index] Starting full index build: {total_to_check} pages to check, "
-            f"{already_indexed} already indexed"
+            f"{already_indexed} already indexed, {skipped_no_sku} previously checked (no SKU)"
         )
 
         for batch_start in range(0, total_to_check, BATCH_SIZE):
@@ -1074,6 +1102,7 @@ async def build_full_index(
                         sku = _extract_sku_from_html(resp.text)
                         if sku:
                             return (sku, url)
+                    _checked_no_sku.add(url)
                 except Exception:
                     pass
                 return None
@@ -1085,6 +1114,7 @@ async def build_full_index(
             for result in results:
                 if isinstance(result, tuple):
                     sku, url = result
+                    _checked_no_sku.discard(url)
                     if sku not in _sku_to_url:
                         _sku_to_url[sku] = url
                         new_indexed += 1
@@ -1144,16 +1174,16 @@ async def scan_index_incremental(max_pages: int = 50) -> int:
     Returns:
         Number of new SKUs indexed in this scan.
     """
-    global _sku_to_url
+    global _sku_to_url, _checked_no_sku
 
     if not _sitemap_loaded or not _sitemap_urls:
         return 0
 
     indexed_urls = set(_sku_to_url.values())
-    unchecked = [u for u in _sitemap_urls if u not in indexed_urls]
+    unchecked = [u for u in _sitemap_urls if u not in indexed_urls and u not in _checked_no_sku]
 
     if not unchecked:
-        logger.info("[incremental-scan] Index is complete — all sitemap URLs indexed")
+        logger.info("[incremental-scan] Index is complete — all sitemap URLs indexed or checked")
         return 0
 
     pages_to_scan = min(max_pages, len(unchecked))
@@ -1163,7 +1193,7 @@ async def scan_index_incremental(max_pages: int = 50) -> int:
 
     logger.info(
         f"[incremental-scan] Scanning {pages_to_scan} unindexed pages "
-        f"({len(unchecked)} remaining)"
+        f"({len(unchecked)} remaining, {len(_checked_no_sku)} previously checked skipped)"
     )
 
     async with httpx.AsyncClient() as client:
@@ -1179,6 +1209,7 @@ async def scan_index_incremental(max_pages: int = 50) -> int:
                         sku = _extract_sku_from_html(resp.text)
                         if sku:
                             return (sku, url)
+                    _checked_no_sku.add(url)
                 except Exception:
                     pass
                 return None
@@ -1189,6 +1220,7 @@ async def scan_index_incremental(max_pages: int = 50) -> int:
             for result in results:
                 if isinstance(result, tuple):
                     sku, url = result
+                    _checked_no_sku.discard(url)
                     if sku not in _sku_to_url:
                         _sku_to_url[sku] = url
                         new_count += 1
@@ -1199,6 +1231,7 @@ async def scan_index_incremental(max_pages: int = 50) -> int:
         _save_sitemap_index(_sitemap_urls, _sku_to_url)
         logger.info(f"[incremental-scan] Indexed {new_count} new SKUs (total: {len(_sku_to_url)})")
     else:
+        _save_sitemap_index(_sitemap_urls, _sku_to_url)  # Save updated _checked_no_sku
         logger.info(f"[incremental-scan] No new SKUs found in this batch")
 
     return new_count
@@ -1244,8 +1277,9 @@ async def find_batch_products_in_sitemap(
         return {a: _sku_to_url[a.strip()] for a in target_articles if a.strip() in _sku_to_url}
 
     # Scan unindexed sitemap pages looking for the missing articles
+    # Skip URLs already confirmed to have no SKU
     indexed_urls = set(_sku_to_url.values())
-    unchecked = [u for u in _sitemap_urls if u not in indexed_urls]
+    unchecked = [u for u in _sitemap_urls if u not in indexed_urls and u not in _checked_no_sku]
 
     BATCH_SIZE = 20
     BATCH_DELAY = 0.3
@@ -1254,7 +1288,8 @@ async def find_batch_products_in_sitemap(
 
     logger.info(
         f"[batch-discovery] Looking for {len(missing)} products in "
-        f"{len(unchecked)} unindexed sitemap pages"
+        f"{len(unchecked)} unindexed sitemap pages "
+        f"({len(_checked_no_sku)} previously checked pages skipped)"
     )
 
     async with httpx.AsyncClient() as client:
@@ -1273,6 +1308,7 @@ async def find_batch_products_in_sitemap(
                         sku = _extract_sku_from_html(resp.text)
                         if sku:
                             return (sku, url)
+                    _checked_no_sku.add(url)
                 except Exception:
                     pass
                 return None
@@ -1283,6 +1319,7 @@ async def find_batch_products_in_sitemap(
             for result in results:
                 if isinstance(result, tuple):
                     sku, url = result
+                    _checked_no_sku.discard(url)
                     if sku not in _sku_to_url:
                         _sku_to_url[sku] = url
                         new_indexed += 1
