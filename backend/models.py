@@ -140,7 +140,8 @@ class EnrichmentSuggestion(BaseModel):
     original_suggested_value: Optional[str] = None  # Pre-AI-review value for diff trail
     source: Optional[str] = None  # Human-readable source label
     source_url: Optional[str] = None
-    evidence: Optional[str] = None  # Quote / snippet proving the value
+    evidence: Optional[str] = None  # Human-readable explanation (legacy)
+    evidence_structured: Optional[dict] = None  # Machine-readable evidence tags
     confidence: float = 0.0  # 0.0-1.0
     review_required: bool = True  # Must a human verify this?
     ai_modified: bool = False  # True if AI review changed the value

@@ -421,6 +421,7 @@ def _create_improvements_sheet(ws, results: list[ProductAnalysis]) -> None:
     All suggestions are validated before writing — contact info, other SKUs,
     PDF noise, and wrong-language content is rejected or flagged.
     """
+    # Structured evidence columns replace the old "Evidens / Begrunnelse" free-text
     headers = [
         "Artikkelnummer",
         "Produktnavn",
@@ -429,9 +430,16 @@ def _create_improvements_sheet(ws, results: list[ProductAnalysis]) -> None:
         "Felt",
         "Nåværende verdi",
         "Foreslått verdi",
-        "Kilde",
+        "Kilde brukt",
+        "Kilde-URL",
+        "Kildespråk",
+        "Oversatt",
+        "Variant bekreftet",
+        "Støy filtrert",
+        "Feltklassifisering",
         "Confidence",
-        "Evidens / Begrunnelse",
+        "Inriver-klar",
+        "Begrunnelse",
         "Krever gjennomgang",
         "Kildeverdi (før AI)",
         "Endret av AI",
@@ -478,6 +486,9 @@ def _create_improvements_sheet(ws, results: list[ProductAnalysis]) -> None:
             if was_translated:
                 output_value = translated
 
+            # Extract structured evidence tags (or fall back to legacy evidence)
+            ev = es.evidence_structured or {}
+
             _write_id_cell(ws, row_idx, 1, sku)
             ws.cell(row=row_idx, column=2, value=result.product_data.product_name or "")
             ws.cell(row=row_idx, column=3, value=producer or "")
@@ -485,15 +496,20 @@ def _create_improvements_sheet(ws, results: list[ProductAnalysis]) -> None:
             ws.cell(row=row_idx, column=5, value=es.field_name)
             ws.cell(row=row_idx, column=6, value=es.current_value or "")
             ws.cell(row=row_idx, column=7, value=output_value)
-            source_display = es.source or ""
-            if es.source_url:
-                source_display = f"{source_display} ({es.source_url})"
-            ws.cell(row=row_idx, column=8, value=source_display)
-            ws.cell(row=row_idx, column=9, value=es.confidence if es.confidence else "")
-            ws.cell(row=row_idx, column=10, value=es.evidence or "")
-            ws.cell(row=row_idx, column=11, value="Ja" if es.review_required else "Nei")
-            ws.cell(row=row_idx, column=12, value=es.original_suggested_value or "")
-            ws.cell(row=row_idx, column=13, value="Ja" if es.ai_modified else "Nei")
+            # Structured evidence columns
+            ws.cell(row=row_idx, column=8, value=ev.get("Kilde", es.source or ""))
+            ws.cell(row=row_idx, column=9, value=ev.get("Kilde-URL", es.source_url or ""))
+            ws.cell(row=row_idx, column=10, value=ev.get("Kildespråk", ""))
+            ws.cell(row=row_idx, column=11, value=ev.get("Oversatt til norsk", "nei"))
+            ws.cell(row=row_idx, column=12, value=ev.get("Variant sikkert identifisert", ""))
+            ws.cell(row=row_idx, column=13, value=ev.get("Støy filtrert bort", "nei"))
+            ws.cell(row=row_idx, column=14, value=ev.get("Felttypeklassifisering", ""))
+            ws.cell(row=row_idx, column=15, value=es.confidence if es.confidence else "")
+            ws.cell(row=row_idx, column=16, value=ev.get("Auto-egnet for Inriver", ""))
+            ws.cell(row=row_idx, column=17, value=es.evidence or "")  # Full text begrunnelse
+            ws.cell(row=row_idx, column=18, value="Ja" if es.review_required else "Nei")
+            ws.cell(row=row_idx, column=19, value=es.original_suggested_value or "")
+            ws.cell(row=row_idx, column=20, value="Ja" if es.ai_modified else "Nei")
             enriched_fields.add(es.field_name)
             row_idx += 1
 
@@ -523,12 +539,19 @@ def _create_improvements_sheet(ws, results: list[ProductAnalysis]) -> None:
                 ws.cell(row=row_idx, column=5, value=fa.field_name)
                 ws.cell(row=row_idx, column=6, value=fa.current_value or "")
                 ws.cell(row=row_idx, column=7, value=fa_output)
-                ws.cell(row=row_idx, column=8, value=fa.source or "")
-                ws.cell(row=row_idx, column=9, value=fa.confidence if fa.confidence else "")
-                ws.cell(row=row_idx, column=10, value=fa.comment or "")
-                ws.cell(row=row_idx, column=11, value="Ja")
-                ws.cell(row=row_idx, column=12, value="")
-                ws.cell(row=row_idx, column=13, value="Nei")
+                ws.cell(row=row_idx, column=8, value=fa.source or "")  # Kilde brukt
+                ws.cell(row=row_idx, column=9, value="")   # Kilde-URL
+                ws.cell(row=row_idx, column=10, value="")  # Kildespråk
+                ws.cell(row=row_idx, column=11, value="")  # Oversatt
+                ws.cell(row=row_idx, column=12, value="")  # Variant bekreftet
+                ws.cell(row=row_idx, column=13, value="")  # Støy filtrert
+                ws.cell(row=row_idx, column=14, value="")  # Feltklassifisering
+                ws.cell(row=row_idx, column=15, value=fa.confidence if fa.confidence else "")
+                ws.cell(row=row_idx, column=16, value="")  # Inriver-klar
+                ws.cell(row=row_idx, column=17, value=fa.comment or "")
+                ws.cell(row=row_idx, column=18, value="Ja")
+                ws.cell(row=row_idx, column=19, value="")
+                ws.cell(row=row_idx, column=20, value="Nei")
                 row_idx += 1
 
     if row_idx == 2:

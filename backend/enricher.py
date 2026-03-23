@@ -276,29 +276,32 @@ def _enrich_product_name(
     sku = product.article_number
 
     # Source 1: PDF
+    from backend.evidence import build_evidence
     pdf_val, pdf_evidence, pdf_conf = _get_enrichment_value(er_by_field, "product_name")
     if pdf_val and pdf_val != current:
-        # Clean noise before validation
         pdf_val = clean_all_noise(pdf_val, sku)
         is_valid, reject_reason = _validate_suggestion_value(pdf_val, "Produktnavn", sku)
         if not is_valid:
             logger.info(f"[enrich] Product name rejected: {reject_reason}")
         else:
-            # Translate if needed (sv/da → no automatically, en → flag)
             pdf_val, lang, translate_msg = _translate_if_needed(pdf_val)
             needs_manual = lang == "en"
-            rationale = f"Produktnavn hentet fra PDF-datablad. Kilde: {_get_enrichment_url(er_by_field, 'product_name') or 'PDF'}"
-            if translate_msg:
-                rationale += f" | {translate_msg}"
+            conf = pdf_conf if not needs_manual else min(pdf_conf, 0.55)
+            pdf_url = _get_enrichment_url(er_by_field, "product_name")
+            noise = ["kontaktinfo"] if pdf_val != (pdf_evidence or "") else []
+            ev_text, ev_dict = build_evidence(
+                "Produktnavn",
+                source_label="datablad (PDF)", source_url=pdf_url, source_tier=3,
+                lang=lang, translated=(lang in ("sv", "da")), translate_note=translate_msg,
+                variant_matched=True, variant_note=f"SKU {sku} bekreftet i dokument",
+                noise_filtered=noise if noise else None,
+                confidence=conf, auto_inriver=conf >= MIN_CONFIDENCE_AUTO and not needs_manual,
+            )
             return EnrichmentSuggestion(
-                field_name="Produktnavn",
-                current_value=current,
-                suggested_value=pdf_val,
-                source=SOURCE_PDF,
-                source_url=_get_enrichment_url(er_by_field, "product_name"),
-                evidence=rationale,
-                confidence=pdf_conf if not needs_manual else min(pdf_conf, 0.55),
-                review_required=pdf_conf < MIN_CONFIDENCE_AUTO or needs_manual,
+                field_name="Produktnavn", current_value=current,
+                suggested_value=pdf_val, source=SOURCE_PDF, source_url=pdf_url,
+                evidence=ev_text, evidence_structured=ev_dict,
+                confidence=conf, review_required=conf < MIN_CONFIDENCE_AUTO or needs_manual,
             )
 
     # Source 2: Manufacturer
@@ -309,20 +312,19 @@ def _enrich_product_name(
             conf = mfr.confidence * 0.9
             mfr_name, lang, translate_msg = _translate_if_needed(mfr_name)
             needs_manual = lang == "en"
-            rationale = f"Produktnavn fra produsentens nettside ({mfr.source_url or 'ukjent URL'})"
-            if translate_msg:
-                rationale += f" | {translate_msg}"
             if needs_manual:
                 conf = min(conf, 0.55)
+            ev_text, ev_dict = build_evidence(
+                "Produktnavn",
+                source_label="produsentside", source_url=mfr.source_url, source_tier=4,
+                lang=lang, translated=(lang in ("sv", "da")), translate_note=translate_msg,
+                confidence=conf, auto_inriver=conf >= MIN_CONFIDENCE_AUTO and not needs_manual,
+            )
             return EnrichmentSuggestion(
-                field_name="Produktnavn",
-                current_value=current,
-                suggested_value=mfr_name,
-                source=SOURCE_MANUFACTURER,
-                source_url=mfr.source_url,
-                evidence=rationale,
-                confidence=conf,
-                review_required=conf < MIN_CONFIDENCE_AUTO or needs_manual,
+                field_name="Produktnavn", current_value=current,
+                suggested_value=mfr_name, source=SOURCE_MANUFACTURER, source_url=mfr.source_url,
+                evidence=ev_text, evidence_structured=ev_dict,
+                confidence=conf, review_required=conf < MIN_CONFIDENCE_AUTO or needs_manual,
             )
 
     return None
@@ -498,54 +500,62 @@ def _enrich_description(
         return None
 
     # Quality gate: validate the cleaned text is webshop-ready
+    from backend.evidence import build_evidence
+    from backend.content_validator import classify_text_as_description_candidate
+
     gate_ok, gate_reason = validate_webshop_description(best_val)
     if not gate_ok:
         logger.info(
             f"[enrich] Description failed webshop quality gate: {gate_reason} "
             f"(value: {best_val[:80]})"
         )
-        # Still offer it but flag for review with explanation
+        gate_conf = min(best_conf, 0.45)
+        ev_text, ev_dict = build_evidence(
+            "Beskrivelse",
+            source_label=best_source or "ukjent", source_url=best_url,
+            confidence=gate_conf, auto_inriver=False,
+            notes=[f"Kvalitetssjekk feilet: {gate_reason}", "Krever manuell vurdering"],
+        )
         return EnrichmentSuggestion(
-            field_name="Beskrivelse",
-            current_value=current,
-            suggested_value=best_val,
-            source=best_source,
-            source_url=_get_enrichment_url(er_by_field, "description") if best_source == SOURCE_PDF else (mfr.source_url if mfr else None),
-            evidence=f"Kvalitetssjekk feilet: {gate_reason}. Krever manuell vurdering.",
-            confidence=min(best_conf, 0.45),
-            review_required=True,
+            field_name="Beskrivelse", current_value=current,
+            suggested_value=best_val, source=best_source, source_url=best_url,
+            evidence=ev_text, evidence_structured=ev_dict,
+            confidence=gate_conf, review_required=True,
         )
 
-    # Translate if needed — sv/da automatically, en flagged for manual
+    # Translate if needed
     review = best_conf < MIN_CONFIDENCE_AUTO
-    rationale_parts = []
-
     best_val, lang, translate_msg = _translate_if_needed(best_val)
     needs_manual_translation = lang == "en"
-    if translate_msg:
-        rationale_parts.append(translate_msg)
     if needs_manual_translation:
         review = True
         best_conf = min(best_conf, 0.55)
 
-    # Build detailed rationale
-    if best_source == SOURCE_PDF:
-        rationale_parts.insert(0, f"Beskrivelse hentet fra PDF-datablad ({best_url or 'PDF'})")
-        rationale_parts.append("Validert: ingen kontaktinfo, ingen andre artikkelnumre, egnet som nettbutikkbeskrivelse")
-    elif best_source == SOURCE_MANUFACTURER:
-        rationale_parts.insert(0, f"Beskrivelse fra produsentens nettside ({best_url or 'ukjent URL'})")
+    # Build noise list
+    noise_list = []
+    if best_val != (best_evidence or ""):
+        noise_list.append("kontaktinfo/PDF-støy")
 
-    suggestion = EnrichmentSuggestion(
-        field_name="Beskrivelse",
-        current_value=current,
-        suggested_value=best_val,
-        source=best_source,
-        source_url=best_url,
-        evidence=" | ".join(rationale_parts) if rationale_parts else best_evidence,
-        confidence=best_conf,
-        review_required=review,
+    # Classification score
+    desc_score = classify_text_as_description_candidate(best_val)
+    source_tier = 3 if best_source == SOURCE_PDF else (4 if best_source == SOURCE_MANUFACTURER else 5)
+
+    ev_text, ev_dict = build_evidence(
+        "Beskrivelse",
+        source_label=best_source or "ukjent", source_url=best_url, source_tier=source_tier,
+        lang=lang, translated=(lang in ("sv", "da")), translate_note=translate_msg,
+        variant_matched=True, variant_note=f"SKU {sku}",
+        noise_filtered=noise_list if noise_list else None,
+        classification="beskrivelse", classification_score=desc_score,
+        confidence=best_conf, auto_inriver=best_conf >= MIN_CONFIDENCE_AUTO and not needs_manual_translation,
     )
-    return suggestion
+
+    return EnrichmentSuggestion(
+        field_name="Beskrivelse", current_value=current,
+        suggested_value=best_val, source=best_source, source_url=best_url,
+        evidence=ev_text, evidence_structured=ev_dict,
+        confidence=best_conf, review_required=review,
+    )
 
 
 def _enrich_specification(
@@ -618,30 +628,37 @@ def _enrich_specification(
         logger.info(f"[enrich] Specification rejected: {reject_reason}")
         return None
 
+    from backend.evidence import build_evidence
+
     source = ", ".join(sorted(set(sources_used))) if sources_used else SOURCE_SPEC_STRUCTURING
     added_str = ", ".join(sorted(added_keys))
-
-    # Confidence based on source count
     conf = 0.70 if SOURCE_PDF in sources_used else 0.60
 
-    # Translate spec values if needed (sv/da → no automatically)
     spec_text, lang, translate_msg = _translate_if_needed(spec_text)
     needs_manual = lang == "en"
-    rationale = f"Nye spesifikasjoner lagt til: {added_str}. Kilde: {source}"
-    if translate_msg:
-        rationale += f" | {translate_msg}"
     if needs_manual:
         conf = min(conf, 0.55)
+
+    source_tier = 3 if SOURCE_PDF in sources_used else (4 if SOURCE_MANUFACTURER in sources_used else 5)
+    spec_url = _get_enrichment_url(er_by_field, next(
+        (f for f in er_by_field if f.startswith("spec:")), ""
+    ))
+
+    ev_text, ev_dict = build_evidence(
+        "Spesifikasjon",
+        source_label=source, source_url=spec_url, source_tier=source_tier,
+        lang=lang, translated=(lang in ("sv", "da")), translate_note=translate_msg,
+        classification="spesifikasjon",
+        confidence=conf, auto_inriver=conf >= MIN_CONFIDENCE_AUTO and not needs_manual,
+        notes=[f"Nye attributter: {added_str}"],
+    )
 
     return EnrichmentSuggestion(
         field_name="Spesifikasjon",
         current_value=product.specification,
         suggested_value=spec_text,
-        source=source,
-        source_url=_get_enrichment_url(er_by_field, next(
-            (f for f in er_by_field if f.startswith("spec:")), ""
-        )),
-        evidence=rationale,
+        source=source, source_url=spec_url,
+        evidence=ev_text, evidence_structured=ev_dict,
         confidence=conf,
         review_required=conf < MIN_CONFIDENCE_AUTO or needs_manual,
     )
@@ -719,16 +736,19 @@ def _enrich_packaging(
                 f"(value: {pdf_val[:80]})"
             )
             return None
+        from backend.evidence import build_evidence
         source_url = _get_enrichment_url(er_by_field, "packaging_info")
+        ev_text, ev_dict = build_evidence(
+            "Pakningsinformasjon",
+            source_label="datablad (PDF)", source_url=source_url, source_tier=3,
+            confidence=pdf_conf, auto_inriver=pdf_conf >= MIN_CONFIDENCE_AUTO,
+            notes=["Validert som reell pakningsinformasjon"],
+        )
         return EnrichmentSuggestion(
-            field_name="Pakningsinformasjon",
-            current_value=current,
-            suggested_value=pdf_val,
-            source=SOURCE_PDF,
-            source_url=source_url,
-            evidence=f"Pakningsdata hentet fra PDF-datablad ({source_url or 'PDF'}). Validert som reell pakningsinformasjon.",
-            confidence=pdf_conf,
-            review_required=pdf_conf < MIN_CONFIDENCE_AUTO,
+            field_name="Pakningsinformasjon", current_value=current,
+            suggested_value=pdf_val, source=SOURCE_PDF, source_url=source_url,
+            evidence=ev_text, evidence_structured=ev_dict,
+            confidence=pdf_conf, review_required=pdf_conf < MIN_CONFIDENCE_AUTO,
         )
 
     return None
@@ -757,16 +777,18 @@ def _enrich_manufacturer(
         if not ok:
             logger.info(f"[enrich] Manufacturer name rejected (contact info): {pdf_val[:60]}")
         elif pdf_val:
+            from backend.evidence import build_evidence
             source_url = _get_enrichment_url(er_by_field, "manufacturer")
+            ev_text, ev_dict = build_evidence(
+                "Produsent",
+                source_label="datablad (PDF)", source_url=source_url, source_tier=3,
+                confidence=pdf_conf, auto_inriver=pdf_conf >= MIN_CONFIDENCE_AUTO,
+            )
             return EnrichmentSuggestion(
-                field_name="Produsent",
-                current_value=current,
-                suggested_value=pdf_val,
-                source=SOURCE_PDF,
-                source_url=source_url,
-                evidence=f"Produsent identifisert i PDF-datablad: '{pdf_val}'. Kilde: {source_url or 'PDF'}",
-                confidence=pdf_conf,
-                review_required=pdf_conf < MIN_CONFIDENCE_AUTO,
+                field_name="Produsent", current_value=current,
+                suggested_value=pdf_val, source=SOURCE_PDF, source_url=source_url,
+                evidence=ev_text, evidence_structured=ev_dict,
+                confidence=pdf_conf, review_required=pdf_conf < MIN_CONFIDENCE_AUTO,
             )
 
     # Source 2: Manufacturer lookup
