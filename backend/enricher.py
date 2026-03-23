@@ -566,6 +566,7 @@ def _enrich_specification(
     sku = product.article_number
 
     # Source 1: PDF spec fields
+    from backend.medical_safety import screen_suggestion as _medical_screen
     for field_name_key, er in er_by_field.items():
         if field_name_key.startswith("spec:") and er.suggested_value:
             key = field_name_key[5:]
@@ -577,6 +578,11 @@ def _enrich_specification(
             if not ok:
                 logger.debug(f"[enrich] Spec value rejected (contact info): {key}={val[:40]}")
                 continue
+            # Medical safety gate: block sensitive attributes with low confidence
+            med_result = _medical_screen(f"spec:{key}", val, er.confidence, SOURCE_PDF)
+            if med_result.blocked:
+                logger.info(f"[enrich] Spec '{key}' blocked by medical safety: {med_result.reason[:80]}")
+                continue
             if key not in new_specs and val:
                 new_specs[key] = val
                 sources_used.append(SOURCE_PDF)
@@ -587,6 +593,11 @@ def _enrich_specification(
             val = clean_all_noise(val, sku) if val else ""
             ok, _ = validate_no_contact_info(val)
             if not ok:
+                continue
+            mfr_conf = mfr.confidence * 0.7 if mfr.confidence else 0.5
+            med_result = _medical_screen(f"spec:{key}", val, mfr_conf, SOURCE_MANUFACTURER)
+            if med_result.blocked:
+                logger.info(f"[enrich] Mfr spec '{key}' blocked by medical safety: {med_result.reason[:80]}")
                 continue
             if key not in new_specs and val:
                 new_specs[key] = val
@@ -1183,13 +1194,27 @@ def final_quality_gate(suggestions: list[EnrichmentSuggestion]) -> list[Enrichme
     - Contain obvious extraction artifacts
     - Have very low confidence
     - Are near-paraphrases of current value (>80% token overlap)
+    - Contain medically sensitive attributes below required confidence
     """
+    from backend.medical_safety import screen_suggestion as _medical_screen
+
     result = []
     for s in suggestions:
         if not s.suggested_value or not s.suggested_value.strip():
             continue
 
         val = s.suggested_value.strip()
+
+        # Medical safety gate: block sensitive content with insufficient confidence
+        med_result = _medical_screen(
+            s.field_name, val, s.confidence, s.source or ""
+        )
+        if med_result.blocked:
+            logger.info(
+                f"[quality-gate] {s.field_name} BLOCKED by medical safety: "
+                f"{med_result.reason[:100]}"
+            )
+            continue
 
         # Reject suggestions with very low confidence
         if s.confidence < MIN_CONFIDENCE_SUGGEST:

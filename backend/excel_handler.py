@@ -1898,6 +1898,12 @@ def _validate_inriver_field_suggestion(
     if not ok:
         return False, "", reject_reason
 
+    # Medical safety gate — block sensitive attributes with insufficient confidence
+    from backend.medical_safety import screen_suggestion as _medical_screen
+    med_result = _medical_screen(field_name, raw_suggestion, confidence, "inriver_export")
+    if med_result.blocked:
+        return False, "", f"Medisinsk sikkerhet: {med_result.reason}"
+
     # Translate sv/da → Norwegian before export
     translated, _lang, _changed = translate_to_norwegian_if_needed(raw_suggestion)
 
