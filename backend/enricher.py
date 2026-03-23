@@ -30,6 +30,7 @@ from backend.content_validator import (
     detect_language,
     normalize_for_webshop_description,
     normalize_for_webshop_specification,
+    translate_to_norwegian_if_needed,
     validate_no_contact_info,
     validate_single_product_scope,
     validate_suggestion_output,
@@ -283,11 +284,12 @@ def _enrich_product_name(
         if not is_valid:
             logger.info(f"[enrich] Product name rejected: {reject_reason}")
         else:
-            # Check language
-            is_no, lang, lang_msg = _check_language(pdf_val)
+            # Translate if needed (sv/da → no automatically, en → flag)
+            pdf_val, lang, translate_msg = _translate_if_needed(pdf_val)
+            needs_manual = lang == "en"
             rationale = f"Produktnavn hentet fra PDF-datablad. Kilde: {_get_enrichment_url(er_by_field, 'product_name') or 'PDF'}"
-            if not is_no:
-                rationale += f" | {lang_msg}"
+            if translate_msg:
+                rationale += f" | {translate_msg}"
             return EnrichmentSuggestion(
                 field_name="Produktnavn",
                 current_value=current,
@@ -295,8 +297,8 @@ def _enrich_product_name(
                 source=SOURCE_PDF,
                 source_url=_get_enrichment_url(er_by_field, "product_name"),
                 evidence=rationale,
-                confidence=pdf_conf if is_no else min(pdf_conf, 0.55),
-                review_required=pdf_conf < MIN_CONFIDENCE_AUTO or not is_no,
+                confidence=pdf_conf if not needs_manual else min(pdf_conf, 0.55),
+                review_required=pdf_conf < MIN_CONFIDENCE_AUTO or needs_manual,
             )
 
     # Source 2: Manufacturer
@@ -305,10 +307,12 @@ def _enrich_product_name(
         is_valid, reject_reason = _validate_suggestion_value(mfr_name, "Produktnavn", sku)
         if is_valid:
             conf = mfr.confidence * 0.9
-            is_no, lang, lang_msg = _check_language(mfr_name)
+            mfr_name, lang, translate_msg = _translate_if_needed(mfr_name)
+            needs_manual = lang == "en"
             rationale = f"Produktnavn fra produsentens nettside ({mfr.source_url or 'ukjent URL'})"
-            if not is_no:
-                rationale += f" | {lang_msg}"
+            if translate_msg:
+                rationale += f" | {translate_msg}"
+            if needs_manual:
                 conf = min(conf, 0.55)
             return EnrichmentSuggestion(
                 field_name="Produktnavn",
@@ -318,7 +322,7 @@ def _enrich_product_name(
                 source_url=mfr.source_url,
                 evidence=rationale,
                 confidence=conf,
-                review_required=conf < MIN_CONFIDENCE_AUTO or not is_no,
+                review_required=conf < MIN_CONFIDENCE_AUTO or needs_manual,
             )
 
     return None
@@ -503,15 +507,17 @@ def _enrich_description(
             review_required=True,
         )
 
-    # Check language — detect Swedish, Danish, English
+    # Translate if needed — sv/da automatically, en flagged for manual
     review = best_conf < MIN_CONFIDENCE_AUTO
     rationale_parts = []
 
-    is_no, lang, lang_msg = _check_language(best_val)
-    if not is_no:
+    best_val, lang, translate_msg = _translate_if_needed(best_val)
+    needs_manual_translation = lang == "en"
+    if translate_msg:
+        rationale_parts.append(translate_msg)
+    if needs_manual_translation:
         review = True
         best_conf = min(best_conf, 0.55)
-        rationale_parts.append(lang_msg)
 
     # Build detailed rationale
     if best_source == SOURCE_PDF:
@@ -598,11 +604,13 @@ def _enrich_specification(
     # Confidence based on source count
     conf = 0.70 if SOURCE_PDF in sources_used else 0.60
 
-    # Check language of spec values
-    is_no, lang, lang_msg = _check_language(spec_text)
+    # Translate spec values if needed (sv/da → no automatically)
+    spec_text, lang, translate_msg = _translate_if_needed(spec_text)
+    needs_manual = lang == "en"
     rationale = f"Nye spesifikasjoner lagt til: {added_str}. Kilde: {source}"
-    if not is_no:
-        rationale += f" | {lang_msg}"
+    if translate_msg:
+        rationale += f" | {translate_msg}"
+    if needs_manual:
         conf = min(conf, 0.55)
 
     return EnrichmentSuggestion(
@@ -615,7 +623,7 @@ def _enrich_specification(
         )),
         evidence=rationale,
         confidence=conf,
-        review_required=conf < MIN_CONFIDENCE_AUTO or not is_no,
+        review_required=conf < MIN_CONFIDENCE_AUTO or needs_manual,
     )
 
 
@@ -876,6 +884,23 @@ def _check_language(text: str) -> tuple[bool, str, str]:
     """
     from backend.content_validator import validate_language_is_norwegian
     return validate_language_is_norwegian(text)
+
+
+def _translate_if_needed(text: str) -> tuple[str, str, str]:
+    """Translate text to Norwegian if needed. Returns (text, lang, message).
+
+    For Swedish/Danish: performs rule-based translation and returns translated text.
+    For English: returns original text with flag (too different for rule-based).
+    For Norwegian/unknown: returns original text unchanged.
+    """
+    translated, lang, was_translated = translate_to_norwegian_if_needed(text)
+    if was_translated:
+        lang_names = {"sv": "svensk", "da": "dansk"}
+        lang_name = lang_names.get(lang, lang)
+        return translated, lang, f"Automatisk oversatt fra {lang_name} til norsk"
+    if lang == "en":
+        return text, lang, "Teksten er på engelsk — manuell oversettelse til norsk påkrevet"
+    return text, lang, ""
 
 
 def _build_description_from_specs(product: ProductData) -> Optional[str]:

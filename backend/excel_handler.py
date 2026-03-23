@@ -12,6 +12,7 @@ from openpyxl.utils import get_column_letter
 
 from backend.content_validator import (
     get_best_producer_info,
+    translate_to_norwegian_if_needed,
     validate_suggestion_output,
 )
 from backend.identifiers import normalize_identifier, normalize_identifier_strict
@@ -447,13 +448,19 @@ def _create_improvements_sheet(ws, results: list[ProductAnalysis]) -> None:
                 )
                 continue
 
+            # Safety net: translate any remaining sv/da content to Norwegian
+            output_value = es.suggested_value
+            translated, _lang, was_translated = translate_to_norwegian_if_needed(output_value)
+            if was_translated:
+                output_value = translated
+
             _write_id_cell(ws, row_idx, 1, sku)
             ws.cell(row=row_idx, column=2, value=result.product_data.product_name or "")
             ws.cell(row=row_idx, column=3, value=producer or "")
             ws.cell(row=row_idx, column=4, value=producer_artnr or "")
             ws.cell(row=row_idx, column=5, value=es.field_name)
             ws.cell(row=row_idx, column=6, value=es.current_value or "")
-            ws.cell(row=row_idx, column=7, value=es.suggested_value)
+            ws.cell(row=row_idx, column=7, value=output_value)
             source_display = es.source or ""
             if es.source_url:
                 source_display = f"{source_display} ({es.source_url})"
@@ -479,13 +486,19 @@ def _create_improvements_sheet(ws, results: list[ProductAnalysis]) -> None:
                     )
                     continue
 
+                # Safety net: translate remaining sv/da
+                fa_output = fa.suggested_value
+                fa_translated, _fa_lang, fa_was_translated = translate_to_norwegian_if_needed(fa_output)
+                if fa_was_translated:
+                    fa_output = fa_translated
+
                 _write_id_cell(ws, row_idx, 1, sku)
                 ws.cell(row=row_idx, column=2, value=result.product_data.product_name or "")
                 ws.cell(row=row_idx, column=3, value=producer or "")
                 ws.cell(row=row_idx, column=4, value=producer_artnr or "")
                 ws.cell(row=row_idx, column=5, value=fa.field_name)
                 ws.cell(row=row_idx, column=6, value=fa.current_value or "")
-                ws.cell(row=row_idx, column=7, value=fa.suggested_value)
+                ws.cell(row=row_idx, column=7, value=fa_output)
                 ws.cell(row=row_idx, column=8, value=fa.source or "")
                 ws.cell(row=row_idx, column=9, value=fa.confidence if fa.confidence else "")
                 ws.cell(row=row_idx, column=10, value=fa.comment or "")
@@ -1876,8 +1889,10 @@ def _create_inriver_import_sheet(ws, results: list[ProductAnalysis]) -> None:
                 if ok:
                     # Check if it's a material change
                     if _is_material_change(current_val, raw_suggestion):
+                        # Translate sv/da → no before writing to Inriver
+                        translated_val, _t_lang, _t_changed = translate_to_norwegian_if_needed(raw_suggestion)
                         is_valid_suggestion = True
-                        display_suggestion = raw_suggestion
+                        display_suggestion = translated_val
                 else:
                     logger.debug(
                         f"[inriver] Rejected suggestion for {sku}/{field_name}: {reject_reason}"

@@ -471,9 +471,224 @@ def validate_language_is_norwegian(text: str) -> tuple[bool, str, str]:
     return False, lang, f"Teksten er på {lang_name} — oversettelse til norsk påkrevet"
 
 
-# ═══════════════════════════════════════════════════════════
-# PUBLIC API — Description vs. Specification classification
-# ═══════════════════════════════════════════════════════════
+# ── Swedish → Norwegian word mapping ──
+# Swedish and Norwegian are mutually intelligible; these are the most common
+# divergent words in medical/product contexts.
+_SV_TO_NO: dict[str, str] = {
+    # Conjunctions & common words
+    "och": "og", "för": "for", "inte": "ikke", "eller": "eller",
+    "detta": "dette", "dessa": "disse", "alla": "alle", "utan": "uten",
+    "också": "også", "från": "fra", "som": "som", "med": "med",
+    "kan": "kan", "har": "har", "vara": "være", "är": "er",
+    "den": "den", "det": "det", "de": "de", "att": "å",
+    "ska": "skal", "skulle": "skulle", "bara": "bare",
+    "mycket": "mye", "mer": "mer", "mest": "mest",
+    "sedan": "siden", "efter": "etter", "innan": "før",
+    "under": "under", "över": "over", "mellan": "mellom",
+    "genom": "gjennom", "vid": "ved", "till": "til",
+    "hos": "hos", "här": "her", "där": "der",
+    "vilken": "hvilken", "vilka": "hvilke", "vilkas": "hvis",
+    "varje": "hver", "annan": "annen", "andra": "andre",
+    "samma": "samme", "sådana": "slike", "sådan": "slik",
+    "både": "både", "antingen": "enten", "varken": "verken",
+    "nej": "nei", "ja": "ja", "inte": "ikke",
+    # Medical / product terms
+    "användas": "brukes", "använd": "bruk", "användning": "bruk",
+    "handske": "hanske", "handskar": "hansker",
+    "storlek": "størrelse", "storlekar": "størrelser",
+    "förpackning": "forpakning", "förpackningar": "forpakninger",
+    "skydd": "beskyttelse", "steril": "steril",
+    "engångs": "engangs", "engångshandske": "engangshanske",
+    "materiale": "materiale", "material": "materiale",
+    "längd": "lengde", "bredd": "bredde",
+    "tjocklek": "tykkelse", "vikt": "vekt",
+    "färg": "farge", "färger": "farger",
+    "innehåller": "inneholder", "innehåll": "innhold",
+    "tillverkad": "laget", "tillverkare": "produsent",
+    "egenskaper": "egenskaper", "egenskap": "egenskap",
+    "passande": "passende", "lämplig": "egnet",
+    "sjukvård": "helsevesen", "sjukhus": "sykehus",
+    "patient": "pasient", "patienter": "pasienter",
+    "behandling": "behandling",
+    "sårvård": "sårpleie", "sår": "sår",
+    "bandage": "bandasje", "kompress": "kompress",
+    "plåster": "plaster", "spruta": "sprøyte",
+    "nål": "nål", "nålar": "nåler",
+    "kanyl": "kanyle", "kanyler": "kanyler",
+    "kateter": "kateter",
+    "undersökning": "undersøkelse", "undersöknings": "undersøkelses",
+    "latexfri": "lateksfri", "puderfri": "pudderfri",
+    "nitril": "nitril", "vinyl": "vinyl",
+    "polyester": "polyester", "bomull": "bomull",
+    "vit": "hvit", "vitt": "hvitt", "vita": "hvite",
+    "blå": "blå", "grön": "grønn", "gröna": "grønne",
+    "svart": "svart", "svarta": "svarte",
+    "rosa": "rosa", "röd": "rød", "röda": "røde",
+    "ytterförpackning": "ytterforpakning",
+    "innerförpackning": "innerforpakning",
+    "stycke": "stykk", "stycken": "stykker",
+    "kartong": "kartong", "låda": "eske",
+    "produktblad": "produktdatablad",
+    "produktbeskrivning": "produktbeskrivelse",
+    "tekniska": "tekniske", "teknisk": "teknisk",
+    "specifikation": "spesifikasjon", "specifikationer": "spesifikasjoner",
+    "beskrivning": "beskrivelse", "beskrivningar": "beskrivelser",
+    "information": "informasjon",
+    "rekommenderas": "anbefales", "rekommendation": "anbefaling",
+    "avsedd": "beregnet", "avsedda": "beregnet",
+    "godkänd": "godkjent", "godkända": "godkjente",
+    "certifierad": "sertifisert",
+    "kvalitet": "kvalitet", "kvalitetskrav": "kvalitetskrav",
+    "säkerhet": "sikkerhet", "säker": "sikker",
+    "hygien": "hygiene", "hygienisk": "hygienisk",
+    "hållbarhet": "holdbarhet",
+    "temperatur": "temperatur",
+    "förvaras": "oppbevares", "förvaring": "oppbevaring",
+    "torrt": "tørt", "svalt": "kjølig",
+    "mörkt": "mørkt",
+}
+
+# ── Danish → Norwegian word mapping ──
+# Danish and Norwegian Bokmål are extremely close; only the most
+# divergent words need mapping.
+_DA_TO_NO: dict[str, str] = {
+    "bruges": "brukes", "brug": "bruk",
+    "emballage": "emballasje",
+    "vægt": "vekt",
+    "tykkelse": "tykkelse",
+    "længde": "lengde",
+    "bredde": "bredde",
+    "handske": "hanske", "handsker": "hansker",
+    "størrelse": "størrelse",
+    "pakke": "pakning", "pakker": "pakninger",
+    "beskyttelse": "beskyttelse",
+    "materiale": "materiale",
+    "anvendes": "brukes", "anvendelse": "bruk",
+    "beregnet": "beregnet",
+    "egnet": "egnet",
+    "farve": "farge", "farver": "farger",
+    "hvid": "hvit", "hvide": "hvite",
+    "blød": "myk", "bløde": "myke",
+    "sygepleje": "sykepleie", "sygehus": "sykehus",
+    "forbinding": "bandasje",
+    "såpleje": "sårpleie",
+    "plastik": "plast",
+    "gummi": "gummi",
+    "steriliseret": "sterilisert",
+    "beskrivelse": "beskrivelse",
+    "specifikation": "spesifikasjon", "specifikationer": "spesifikasjoner",
+    "kvalitet": "kvalitet",
+    "sikkerhed": "sikkerhet",
+    "temperatur": "temperatur",
+    "opbevares": "oppbevares", "opbevaring": "oppbevaring",
+    "tørt": "tørt", "køligt": "kjølig",
+    "mørkt": "mørkt",
+    "anbefales": "anbefales",
+    "godkendt": "godkjent", "godkendte": "godkjente",
+    "certificeret": "sertifisert",
+    "holdbarhed": "holdbarhet",
+    "indhold": "innhold", "indeholder": "inneholder",
+    "engangs": "engangs",
+    "stykke": "stykk", "stykker": "stykker",
+    "æske": "eske",
+}
+
+
+def _translate_word_sv_to_no(word: str) -> str:
+    """Translate a single Swedish word to Norwegian, preserving case."""
+    lower = word.lower()
+    replacement = _SV_TO_NO.get(lower)
+    if replacement is None:
+        return word
+    # Preserve original capitalization
+    if word[0].isupper() and not word.isupper():
+        return replacement.capitalize()
+    if word.isupper():
+        return replacement.upper()
+    return replacement
+
+
+def _translate_word_da_to_no(word: str) -> str:
+    """Translate a single Danish word to Norwegian, preserving case."""
+    lower = word.lower()
+    replacement = _DA_TO_NO.get(lower)
+    if replacement is None:
+        return word
+    if word[0].isupper() and not word.isupper():
+        return replacement.capitalize()
+    if word.isupper():
+        return replacement.upper()
+    return replacement
+
+
+def translate_to_norwegian_if_needed(
+    text: str, source_lang: Optional[str] = None
+) -> tuple[str, str, bool]:
+    """Translate text to Norwegian if it's in Swedish, Danish, or English.
+
+    For Swedish and Danish: performs rule-based word-level translation
+    (these languages are mutually intelligible with Norwegian).
+
+    For English: flags for manual translation (too different for rule-based).
+
+    Args:
+        text: The text to translate.
+        source_lang: If known, the source language code ('sv', 'da', 'en').
+            If None, auto-detected.
+
+    Returns:
+        (translated_text, language_code, was_translated)
+        - translated_text: The Norwegian text (or original if English/unknown)
+        - language_code: Detected/provided language code
+        - was_translated: True if text was actually modified
+    """
+    if not text or len(text.strip()) < 5:
+        return text, "unknown", False
+
+    # Detect language if not provided
+    lang = source_lang or detect_language(text)
+
+    if lang in ("no", "unknown"):
+        return text, lang, False
+
+    if lang == "sv":
+        # Swedish → Norwegian: word-by-word replacement
+        words = re.split(r"(\W+)", text)  # Split keeping delimiters
+        translated_words = [
+            _translate_word_sv_to_no(w) if w.strip() else w
+            for w in words
+        ]
+        result = "".join(translated_words)
+        changed = result != text
+        if changed:
+            logger.info(
+                f"Translated Swedish → Norwegian: "
+                f"'{text[:60]}' → '{result[:60]}'"
+            )
+        return result, lang, changed
+
+    if lang == "da":
+        # Danish → Norwegian: word-by-word replacement
+        words = re.split(r"(\W+)", text)
+        translated_words = [
+            _translate_word_da_to_no(w) if w.strip() else w
+            for w in words
+        ]
+        result = "".join(translated_words)
+        changed = result != text
+        if changed:
+            logger.info(
+                f"Translated Danish → Norwegian: "
+                f"'{text[:60]}' → '{result[:60]}'"
+            )
+        return result, lang, changed
+
+    if lang == "en":
+        # English → Norwegian: cannot do rule-based translation.
+        # Return original with flag so caller can mark for manual review.
+        return text, lang, False
+
+    return text, lang, False
 
 
 def classify_text_as_description_candidate(text: str) -> float:
