@@ -41,6 +41,7 @@ from backend.information_scope import (
     detect_information_scope,
     InformationScope,
 )
+from backend.regression_guard import block_regressive_suggestion
 from backend.description_cleaner import clean_description_source, validate_webshop_description
 from backend.models import (
     EnrichmentMatchStatus,
@@ -253,6 +254,20 @@ def enrich_product(
                         f"{tag} {field_label}: scope={scope_result.scope.value}, "
                         f"confidence {original_conf:.2f}→{suggestion.confidence:.2f}"
                     )
+
+            # ── Regression guard: block suggestions that make data worse ──
+            if suggestion.current_value and suggestion.suggested_value:
+                should_block, block_reason = block_regressive_suggestion(
+                    suggestion.current_value,
+                    suggestion.suggested_value,
+                    field_name=field_label,
+                    confidence=suggestion.confidence,
+                )
+                if should_block:
+                    logger.info(
+                        f"{tag} {field_label}: BLOCKED by regression guard — {block_reason}"
+                    )
+                    continue
 
             suggestions.append(suggestion)
             logger.debug(
@@ -1346,6 +1361,20 @@ def final_quality_gate(suggestions: list[EnrichmentSuggestion]) -> list[Enrichme
                 f"[quality-gate] {s.field_name} dropped at final gate: {reason}"
             )
             continue
+
+        # ── Regression guard (safety net): block if proposed is worse ──
+        if s.current_value and s.current_value.strip():
+            should_block, block_reason = block_regressive_suggestion(
+                s.current_value, val,
+                field_name=s.field_name,
+                confidence=s.confidence,
+            )
+            if should_block:
+                logger.info(
+                    f"[quality-gate] {s.field_name} BLOCKED by regression guard: "
+                    f"{block_reason}"
+                )
+                continue
 
         result.append(s)
 
