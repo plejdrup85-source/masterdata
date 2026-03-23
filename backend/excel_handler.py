@@ -1793,18 +1793,204 @@ def _is_material_change(current: str | None, suggested: str | None) -> bool:
     return True
 
 
-def _create_inriver_import_sheet(ws, results: list[ProductAnalysis]) -> None:
-    """Create the Inriver Import staging sheet — a strict change-only export.
+# ═══════════════════════════════════════════════════════════
+# Inriver Import — strict change-only export helpers
+# ═══════════════════════════════════════════════════════════
 
-    Key rules:
-    - Only includes rows for products with at least one VALID proposed change
-    - Only fields with actual proposed changes get values in _forslag
-    - Fields without proposed changes are marked "ikke relevant" in _godkjent
-    - All suggestions are validated (no contact info, no other SKUs, no PDF noise)
-    - A row is NEVER included just because current data exists
-    - Empty/invalid/rejected suggestions are not exported
+# Minimum confidence to include a suggestion in Inriver Import.
+# Lower-confidence suggestions belong in Forbedringsforslag (analysis),
+# NOT in the production import sheet.
+_INRIVER_MIN_CONFIDENCE = 0.50
+
+
+def _get_suggestion_with_confidence(
+    result: "ProductAnalysis", field_name: str
+) -> tuple[Optional[str], float, str]:
+    """Get the best suggestion, its confidence, and source for a field.
+
+    Returns (suggested_value, confidence, source).
+    Returns (None, 0.0, "") if no suggestion exists.
+
+    Priority: enrichment_suggestions > field_analyses > enrichment_results.
+    AI enrichment (Priority 4) is EXCLUDED from Inriver — too unreliable.
     """
-    # Field definitions for the import sheet
+    # Priority 1: Enrichment suggestions (quality-gated, source-grounded)
+    for es in result.enrichment_suggestions:
+        if es.field_name == field_name and es.suggested_value:
+            return es.suggested_value, es.confidence or 0.0, es.source or "enrichment"
+
+    # Priority 2: Field analysis suggestions
+    for fa in result.field_analyses:
+        if fa.field_name == field_name and fa.suggested_value:
+            return fa.suggested_value, fa.confidence or 0.0, fa.source or "analysis"
+
+    # Priority 3: Enrichment results (raw extractions with sufficient confidence)
+    enrichment_field_map = {
+        "Produktnavn": "product_name",
+        "Beskrivelse": "description",
+        "Produsent": "manufacturer",
+        "Produsentens varenummer": "manufacturer_article_number",
+        "Pakningsinformasjon": "packaging_info",
+    }
+    er_key = enrichment_field_map.get(field_name)
+    if er_key:
+        for er in result.enrichment_results:
+            if er.field_name == er_key and er.suggested_value and er.match_status != "NOT_FOUND":
+                if er.confidence >= _INRIVER_MIN_CONFIDENCE:
+                    source_label = "produktdatablad" if er.source_level == "internal_product_sheet" else "produsentens nettside"
+                    return er.suggested_value, er.confidence, source_label
+
+    # AI enrichment is deliberately EXCLUDED from Inriver Import.
+    # It belongs in analysis sheets, not in production data.
+    return None, 0.0, ""
+
+
+def _validate_inriver_field_suggestion(
+    raw_suggestion: str, field_name: str, sku: str, confidence: float
+) -> tuple[bool, str, str]:
+    """Validate and clean a single field suggestion for Inriver export.
+
+    Returns (is_valid, cleaned_value, reject_reason).
+
+    A suggestion is REJECTED (not exported) if:
+    - It is empty or whitespace-only
+    - It contains contact information (phone, email, address)
+    - It contains article numbers for other products
+    - It contains PDF noise (page numbers, headers, footers)
+    - Its confidence is below the Inriver minimum threshold
+    - It fails content validation
+    """
+    if not raw_suggestion or not raw_suggestion.strip():
+        return False, "", "Tom verdi"
+
+    raw_suggestion = raw_suggestion.strip()
+
+    # Confidence gate — Inriver demands higher certainty than analysis sheets
+    if confidence < _INRIVER_MIN_CONFIDENCE:
+        return False, "", f"Confidence {confidence:.2f} er under grensen ({_INRIVER_MIN_CONFIDENCE}) for Inriver Import"
+
+    # Content validation — contact info, other SKUs, PDF noise, variant tables
+    ok, reject_reason = validate_suggestion_output(raw_suggestion, field_name, sku)
+    if not ok:
+        return False, "", reject_reason
+
+    # Translate sv/da → Norwegian before export
+    translated, _lang, _changed = translate_to_norwegian_if_needed(raw_suggestion)
+
+    # Final sanity: the translated value must still have substance
+    if not translated or not translated.strip():
+        return False, "", "Verdi ble tom etter oversettelse"
+
+    return True, translated.strip(), ""
+
+
+def _evaluate_inriver_row(
+    result: "ProductAnalysis",
+    import_fields: list[tuple[str, callable]],
+) -> tuple[bool, list[dict]]:
+    """Evaluate whether a product should appear in Inriver Import.
+
+    Returns (should_export, field_evaluations).
+
+    should_export is True ONLY if at least one field has a VALID,
+    MATERIAL, CONFIDENT suggestion that passed all checks.
+
+    Each field_evaluation dict contains:
+        field_name, current_value, suggested_value, is_changed,
+        source, confidence, reject_reason
+    """
+    sku = result.article_number
+    field_evaluations = []
+    valid_change_count = 0
+
+    for field_name, current_fn in import_fields:
+        current_val = current_fn(result)
+
+        # Get the best suggestion with confidence
+        raw_suggestion, confidence, source = _get_suggestion_with_confidence(result, field_name)
+
+        eval_entry = {
+            "field_name": field_name,
+            "current_value": current_val,
+            "suggested_value": "",
+            "is_changed": False,
+            "source": source,
+            "confidence": confidence,
+            "reject_reason": "",
+        }
+
+        if not raw_suggestion:
+            eval_entry["reject_reason"] = "Ingen forslag"
+            field_evaluations.append(eval_entry)
+            continue
+
+        # Is this a material change from current?
+        if not _is_material_change(current_val, raw_suggestion):
+            eval_entry["reject_reason"] = "Forslaget er identisk med nåværende verdi"
+            field_evaluations.append(eval_entry)
+            continue
+
+        # Validate, clean, and translate the suggestion
+        is_valid, cleaned_value, reject_reason = _validate_inriver_field_suggestion(
+            raw_suggestion, field_name, sku, confidence
+        )
+
+        if not is_valid:
+            eval_entry["reject_reason"] = reject_reason
+            logger.debug(f"[inriver] {sku}/{field_name}: avvist — {reject_reason}")
+            field_evaluations.append(eval_entry)
+            continue
+
+        # This field has a valid, exportable change
+        eval_entry["suggested_value"] = cleaned_value
+        eval_entry["is_changed"] = True
+        valid_change_count += 1
+        field_evaluations.append(eval_entry)
+
+    should_export = valid_change_count > 0
+    return should_export, field_evaluations
+
+
+def _collect_inriver_sources(result: "ProductAnalysis") -> set[str]:
+    """Collect source labels for a product's enrichment data."""
+    sources = set()
+    pd = result.product_data
+    if pd.found_on_onemed:
+        sources.add("onemed.no")
+    if result.pdf_available:
+        sources.add("produktdatablad")
+    for er in result.enrichment_results:
+        if er.match_status != "NOT_FOUND":
+            if er.source_level == "internal_product_sheet":
+                sources.add("produktdatablad")
+            elif er.source_level == "manufacturer_source":
+                sources.add("produsentens nettside")
+    return sources or {"eksisterende katalog"}
+
+
+def _create_inriver_import_sheet(ws, results: list[ProductAnalysis]) -> None:
+    """Create the Inriver Import sheet — a strict, change-only export.
+
+    This is NOT an analysis sheet. It is a production staging sheet for
+    direct import into Inriver PIM. Every row represents a concrete,
+    validated change that a human can approve or reject.
+
+    Strict rules:
+    1. A product appears ONLY if it has ≥1 valid proposed change.
+       "Has current data" is NOT a reason to include a row.
+    2. For each field, ONLY fields with a validated change get a value
+       in _forslag. All other fields show "ikke relevant" in _godkjent.
+    3. A change is "valid" only if:
+       - A suggestion exists from a grounded source (not pure AI)
+       - The suggestion is materially different from the current value
+       - The suggestion passes content validation (no contact info,
+         no other SKUs, no PDF noise, no variant tables)
+       - The confidence meets the Inriver threshold (≥0.50)
+       - The suggestion is in Norwegian (translated if sv/da)
+    4. If ALL fields for a product fail validation, the row is excluded.
+    5. AI-only suggestions (no source evidence) are excluded entirely —
+       they belong in Forbedringsforslag, not in Inriver Import.
+    """
     import_fields = [
         ("Produktnavn", lambda r: r.product_data.product_name or ""),
         ("Beskrivelse", lambda r: r.product_data.description or ""),
@@ -1825,107 +2011,69 @@ def _create_inriver_import_sheet(ws, results: list[ProductAnalysis]) -> None:
         headers.append(f"{field_name}_forslag")
         headers.append(f"{field_name}_godkjent")
     headers.extend([
-        "Datablad_URL",
-        "Bilde_URL",
-        "Quality_Score",
-        "Enrichment_Status",
-        "Kommentar",
+        "Antall endringer",
         "Kilde",
+        "Enrichment_Status",
         "Sist_oppdatert",
     ])
 
-    # Write headers
     for col, header in enumerate(headers, 1):
         ws.cell(row=1, column=col, value=header)
     _style_header(ws, 1, len(headers))
 
-    approval_fill = PatternFill(start_color="FFF2CC", end_color="FFF2CC", fill_type="solid")
-    not_relevant_fill = PatternFill(start_color="F2F2F2", end_color="F2F2F2", fill_type="solid")
-    not_relevant_font = Font(color="808080", italic=True)
+    # Styles
+    change_fill = PatternFill(start_color="E2EFDA", end_color="E2EFDA", fill_type="solid")  # Light green
+    approval_fill = PatternFill(start_color="FFF2CC", end_color="FFF2CC", fill_type="solid")  # Light yellow
+    not_relevant_fill = PatternFill(start_color="F2F2F2", end_color="F2F2F2", fill_type="solid")  # Gray
+    not_relevant_font = Font(color="999999", italic=True)
+    empty_sugg_fill = PatternFill(start_color="F2F2F2", end_color="F2F2F2", fill_type="solid")
 
     now_str = datetime.now().strftime("%Y-%m-%d %H:%M")
     wrap_alignment = Alignment(wrap_text=True, vertical="top")
     top_alignment = Alignment(vertical="top")
 
     row_idx = 2
+    exported_count = 0
+    skipped_count = 0
+
     for result in results:
-        pd = result.product_data
         sku = result.article_number
 
-        enrichment_status, _review_req, comment = _determine_enrichment_status(result)
+        # ── Core decision: should this product be in Inriver Import? ──
+        should_export, field_evals = _evaluate_inriver_row(result, import_fields)
 
-        # Collect sources
-        sources = set()
-        if pd.found_on_onemed:
-            sources.add("onemed.no")
-        if result.pdf_available:
-            sources.add("produktdatablad")
-        for er in result.enrichment_results:
-            if er.match_status != "NOT_FOUND":
-                if er.source_level == "internal_product_sheet":
-                    sources.add("produktdatablad")
-                elif er.source_level == "manufacturer_source":
-                    sources.add("produsentens nettside")
-        if not sources:
-            sources.add("eksisterende katalog")
-
-        # ── Evaluate each field: is there a valid, material change? ──
-        valid_change_count = 0
-        field_data = []  # (current_val, suggestion_or_empty, has_valid_change)
-
-        for field_name, current_fn in import_fields:
-            current_val = current_fn(result)
-            raw_suggestion = _get_suggestion_for_field(result, field_name) or ""
-
-            # Validate the suggestion before accepting it
-            is_valid_suggestion = False
-            display_suggestion = ""
-
-            if raw_suggestion:
-                # Validate: no contact info, no other SKUs, no PDF noise
-                ok, reject_reason = validate_suggestion_output(
-                    raw_suggestion, field_name, sku
-                )
-                if ok:
-                    # Check if it's a material change
-                    if _is_material_change(current_val, raw_suggestion):
-                        # Translate sv/da → no before writing to Inriver
-                        translated_val, _t_lang, _t_changed = translate_to_norwegian_if_needed(raw_suggestion)
-                        is_valid_suggestion = True
-                        display_suggestion = translated_val
-                else:
-                    logger.debug(
-                        f"[inriver] Rejected suggestion for {sku}/{field_name}: {reject_reason}"
-                    )
-
-            if is_valid_suggestion:
-                valid_change_count += 1
-
-            field_data.append((current_val, display_suggestion, is_valid_suggestion))
-
-        # ── Skip if NO valid changes — do not pollute Inriver Import ──
-        if valid_change_count == 0:
+        if not should_export:
+            skipped_count += 1
             continue
 
-        # Col 1: Artikkelnummer
+        # Count how many fields actually have changes
+        change_count = sum(1 for fe in field_evals if fe["is_changed"])
+
+        # Determine enrichment status and sources
+        enrichment_status, _, _ = _determine_enrichment_status(result)
+        sources = _collect_inriver_sources(result)
+
+        # ── Write row ──
         _write_id_cell(ws, row_idx, 1, sku, top_alignment)
 
-        # Write field triplets
         col = 2
-        for (current_val, display_suggestion, has_valid_change) in field_data:
-            # Current value
-            ws.cell(row=row_idx, column=col, value=current_val).alignment = wrap_alignment
+        for fe in field_evals:
+            # _nåværende
+            ws.cell(row=row_idx, column=col, value=fe["current_value"]).alignment = wrap_alignment
             col += 1
 
-            # Suggestion
-            sugg_cell = ws.cell(row=row_idx, column=col, value=display_suggestion)
-            sugg_cell.alignment = wrap_alignment
-            if display_suggestion:
-                sugg_cell.fill = PatternFill(start_color="E2EFDA", end_color="E2EFDA", fill_type="solid")
+            # _forslag
+            if fe["is_changed"]:
+                sugg_cell = ws.cell(row=row_idx, column=col, value=fe["suggested_value"])
+                sugg_cell.alignment = wrap_alignment
+                sugg_cell.fill = change_fill
+            else:
+                sugg_cell = ws.cell(row=row_idx, column=col, value="")
+                sugg_cell.fill = empty_sugg_fill
             col += 1
 
-            # Approval — "ikke relevant" for unchanged fields, "Ikke godkjent" for changed
-            if has_valid_change:
+            # _godkjent
+            if fe["is_changed"]:
                 approval_cell = ws.cell(row=row_idx, column=col, value="Ikke godkjent")
                 approval_cell.alignment = top_alignment
                 approval_cell.fill = approval_fill
@@ -1936,32 +2084,37 @@ def _create_inriver_import_sheet(ws, results: list[ProductAnalysis]) -> None:
                 approval_cell.font = not_relevant_font
             col += 1
 
-        # Trailing columns
-        ws.cell(row=row_idx, column=col, value=result.pdf_url or "").alignment = top_alignment; col += 1
-        ws.cell(row=row_idx, column=col, value=pd.image_url or "").alignment = top_alignment; col += 1
-        score = result.total_score
-        if result.ai_score and "overall_score" in result.ai_score:
-            ai_score_val = result.ai_score["overall_score"]
-            score = round(score * 0.4 + ai_score_val * 0.6, 1)
-        ws.cell(row=row_idx, column=col, value=score).alignment = top_alignment; col += 1
+        # Trailing metadata columns
+        ws.cell(row=row_idx, column=col, value=change_count).alignment = top_alignment
+        col += 1
+        ws.cell(row=row_idx, column=col, value="; ".join(sorted(sources))).alignment = top_alignment
+        col += 1
         status_cell = ws.cell(row=row_idx, column=col, value=enrichment_status)
         status_cell.alignment = top_alignment
         if enrichment_status in INRIVER_STATUS_COLORS:
             status_cell.fill = INRIVER_STATUS_COLORS[enrichment_status]
             status_cell.font = INRIVER_STATUS_FONTS.get(enrichment_status, Font())
         col += 1
-        ws.cell(row=row_idx, column=col, value=comment).alignment = wrap_alignment; col += 1
-        ws.cell(row=row_idx, column=col, value="; ".join(sorted(sources))).alignment = top_alignment; col += 1
-        ws.cell(row=row_idx, column=col, value=now_str).alignment = top_alignment; col += 1
+        ws.cell(row=row_idx, column=col, value=now_str).alignment = top_alignment
+        col += 1
 
         row_idx += 1
+        exported_count += 1
 
+    # Empty state message
     if row_idx == 2:
-        ws.cell(row=2, column=1, value="Ingen produkter med gyldige forbedringsforslag")
+        ws.cell(row=2, column=1, value="Ingen produkter med eksportklare endringsforslag")
 
-    for col in range(1, len(headers) + 1):
-        header_text = headers[col - 1]
-        ws.column_dimensions[get_column_letter(col)].width = max(14, min(40, len(header_text) + 4))
+    # Log summary
+    logger.info(
+        f"[inriver] Eksport ferdig: {exported_count} produkter med endringer, "
+        f"{skipped_count} produkter filtrert bort (ingen gyldige endringer)"
+    )
+
+    # Column widths
+    for col_idx in range(1, len(headers) + 1):
+        header_text = headers[col_idx - 1]
+        ws.column_dimensions[get_column_letter(col_idx)].width = max(14, min(40, len(header_text) + 4))
 
     ws.freeze_panes = "A2"
     if row_idx > 2:
