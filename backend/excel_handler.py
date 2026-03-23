@@ -15,6 +15,7 @@ from backend.content_validator import (
     translate_to_norwegian_if_needed,
     validate_suggestion_output,
 )
+from backend.diff_display import build_field_diff, detect_change_scope, summarize_change_type
 from backend.identifiers import normalize_identifier, normalize_identifier_strict
 from backend.models import EnrichmentSuggestion, JeevesData, ProductAnalysis, QualityStatus
 
@@ -370,6 +371,8 @@ def _create_detail_sheet(ws, results: list[ProductAnalysis]) -> None:
         "Jeeves-verdi",
         "Foreslått verdi",
         "Forslag-kilde",
+        "Endringstype",
+        "Diff",
     ]
 
     for col, header in enumerate(headers, 1):
@@ -407,6 +410,10 @@ def _create_detail_sheet(ws, results: list[ProductAnalysis]) -> None:
             ws.cell(row=row_idx, column=13, value=fa.jeeves_value or "")
             ws.cell(row=row_idx, column=14, value=fa.suggested_value or "")
             ws.cell(row=row_idx, column=15, value=fa.suggestion_source or fa.source or "")
+            # Diff columns — only populated when a suggestion exists
+            if fa.suggested_value:
+                ws.cell(row=row_idx, column=16, value=summarize_change_type(fa.current_value, fa.suggested_value))
+                ws.cell(row=row_idx, column=17, value=build_field_diff(fa.current_value, fa.suggested_value))
             row_idx += 1
 
     for col in range(1, len(headers) + 1):
@@ -446,6 +453,9 @@ def _create_improvements_sheet(ws, results: list[ProductAnalysis]) -> None:
         "Krever gjennomgang",
         "Kildeverdi (før AI)",
         "Endret av AI",
+        "Diff",
+        "Endringstype",
+        "Endringsomfang",
     ]
 
     for col, header in enumerate(headers, 1):
@@ -513,6 +523,10 @@ def _create_improvements_sheet(ws, results: list[ProductAnalysis]) -> None:
             ws.cell(row=row_idx, column=18, value="Ja" if es.review_required else "Nei")
             ws.cell(row=row_idx, column=19, value=es.original_suggested_value or "")
             ws.cell(row=row_idx, column=20, value="Ja" if es.ai_modified else "Nei")
+            # Diff columns
+            ws.cell(row=row_idx, column=21, value=build_field_diff(es.current_value, output_value))
+            ws.cell(row=row_idx, column=22, value=summarize_change_type(es.current_value, output_value))
+            ws.cell(row=row_idx, column=23, value=detect_change_scope(es.current_value, output_value))
             enriched_fields.add(es.field_name)
             row_idx += 1
 
@@ -555,6 +569,10 @@ def _create_improvements_sheet(ws, results: list[ProductAnalysis]) -> None:
                 ws.cell(row=row_idx, column=18, value="Ja")
                 ws.cell(row=row_idx, column=19, value="")
                 ws.cell(row=row_idx, column=20, value="Nei")
+                # Diff columns
+                ws.cell(row=row_idx, column=21, value=build_field_diff(fa.current_value, fa_output))
+                ws.cell(row=row_idx, column=22, value=summarize_change_type(fa.current_value, fa_output))
+                ws.cell(row=row_idx, column=23, value=detect_change_scope(fa.current_value, fa_output))
                 row_idx += 1
 
     if row_idx == 2:
@@ -2381,6 +2399,7 @@ def _create_inriver_import_sheet(ws, results: list[ProductAnalysis]) -> None:
         headers.append(f"{field_name}_godkjent")
     headers.extend([
         "Antall endringer",
+        "Endringstyper",
         "Kilde",
         "Enrichment_Status",
         "Sist_oppdatert",
@@ -2455,6 +2474,14 @@ def _create_inriver_import_sheet(ws, results: list[ProductAnalysis]) -> None:
 
         # Trailing metadata columns
         ws.cell(row=row_idx, column=col, value=change_count).alignment = top_alignment
+        col += 1
+        # Compact change type summary for all changed fields
+        change_types_summary = "; ".join(sorted({
+            f"{fe['field_name']}: {summarize_change_type(fe['current_value'], fe['suggested_value'])}"
+            for fe in field_evals
+            if fe["is_changed"] and fe.get("suggested_value")
+        }))
+        ws.cell(row=row_idx, column=col, value=change_types_summary).alignment = wrap_alignment
         col += 1
         ws.cell(row=row_idx, column=col, value="; ".join(sorted(sources))).alignment = top_alignment
         col += 1
