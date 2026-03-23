@@ -129,6 +129,15 @@ class EnrichmentResult(BaseModel):
     review_status: str = "auto"  # "auto", "needs_review", "conflict"
 
 
+class ApprovalStatus(str, Enum):
+    """Approval status for enrichment suggestions."""
+    NOT_REVIEWED = "Ikke gjennomgått"     # Default — not yet looked at
+    APPROVED = "Godkjent"                  # Human approved for use
+    AUTO_APPROVED = "Auto-godkjent"        # System auto-approved (high conf + low risk)
+    REJECTED = "Avvist"                    # Human rejected
+    NEEDS_REVIEW = "Krever vurdering"      # Flagged for manual review
+
+
 class EnrichmentSuggestion(BaseModel):
     """A single field enrichment suggestion with source traceability.
 
@@ -145,6 +154,11 @@ class EnrichmentSuggestion(BaseModel):
     confidence: float = 0.0  # 0.0-1.0
     review_required: bool = True  # Must a human verify this?
     ai_modified: bool = False  # True if AI review changed the value
+    # Approval workflow
+    approval_status: ApprovalStatus = ApprovalStatus.NOT_REVIEWED
+    approval_comment: Optional[str] = None  # Reviewer note
+    approved_by: Optional[str] = None       # Who approved (if tracked)
+    approved_at: Optional[str] = None       # ISO timestamp of approval action
 
 
 class FieldAnalysis(BaseModel):

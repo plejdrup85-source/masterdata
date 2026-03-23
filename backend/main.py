@@ -1007,6 +1007,91 @@ async def get_recheck_presets(job_id: str):
     }
 
 
+# ── Approval Workflow API ──
+
+
+@app.put("/api/approve/{job_id}/{article_number}/{suggestion_index}")
+async def approve_suggestion(
+    job_id: str,
+    article_number: str,
+    suggestion_index: int,
+    data: dict = Body(...),
+):
+    """Set approval status for a specific suggestion.
+
+    Body: {"status": "Godkjent"|"Avvist"|"Krever vurdering", "comment": "", "reviewer": ""}
+    """
+    job = jobs.get(job_id)
+    if not job or job.status != JobStatus.COMPLETED:
+        raise HTTPException(404, "Jobb ikke funnet eller ikke fullført")
+
+    from backend.approval import set_approval
+    status = data.get("status", "")
+    comment = data.get("comment", "")
+    reviewer = data.get("reviewer", "")
+
+    success = set_approval(job.results, article_number, suggestion_index, status, comment, reviewer)
+    if not success:
+        raise HTTPException(400, "Kunne ikke oppdatere godkjenningsstatus")
+
+    return {"message": "Godkjenningsstatus oppdatert", "article_number": article_number, "index": suggestion_index, "status": status}
+
+
+@app.put("/api/approve/{job_id}/{article_number}")
+async def approve_product_suggestions(
+    job_id: str,
+    article_number: str,
+    data: dict = Body(...),
+):
+    """Set approval status for ALL suggestions of a product.
+
+    Body: {"status": "Godkjent"|"Avvist", "comment": "", "reviewer": ""}
+    """
+    job = jobs.get(job_id)
+    if not job or job.status != JobStatus.COMPLETED:
+        raise HTTPException(404, "Jobb ikke funnet eller ikke fullført")
+
+    from backend.approval import bulk_set_approval
+    status = data.get("status", "")
+    count = bulk_set_approval(job.results, article_number, status, data.get("comment", ""), data.get("reviewer", ""))
+    if count == 0:
+        raise HTTPException(400, "Ingen forslag funnet for dette produktet")
+
+    return {"message": f"{count} forslag oppdatert", "article_number": article_number, "status": status, "count": count}
+
+
+@app.get("/api/approve/{job_id}/summary")
+async def get_approval_summary_endpoint(job_id: str):
+    """Get approval status summary for a job."""
+    job = jobs.get(job_id)
+    if not job or job.status != JobStatus.COMPLETED:
+        raise HTTPException(404, "Jobb ikke funnet eller ikke fullført")
+
+    from backend.approval import get_approval_summary
+    return get_approval_summary(job.results)
+
+
+@app.get("/api/download/{job_id}/approved")
+async def download_approved_only(job_id: str):
+    """Download Excel with only approved suggestions."""
+    job = jobs.get(job_id)
+    if not job or job.status != JobStatus.COMPLETED:
+        raise HTTPException(404, "Jobb ikke funnet eller ikke fullført")
+
+    from backend.approval import filter_by_approval
+    approved = filter_by_approval(job.results, approved_only=True)
+    if not approved:
+        raise HTTPException(400, "Ingen godkjente forslag funnet")
+
+    timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+    filename = f"masterdata_godkjent_{job_id}_{timestamp}.xlsx"
+    filepath = str(OUTPUT_DIR / filename)
+    create_output_excel(approved, filepath, analysis_mode=job.analysis_mode, focus_areas=job.focus_areas)
+
+    return FileResponse(filepath, filename=f"masterdata_godkjent_{job_id}.xlsx",
+                       media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")
+
+
 @app.get("/api/status/{job_id}")
 async def get_status(job_id: str):
     """Get the status of an analysis job."""
@@ -1281,6 +1366,8 @@ async def get_results(job_id: str):
                         "evidence": es.evidence,
                         "confidence": es.confidence,
                         "review_required": es.review_required,
+                        "approval_status": es.approval_status.value,
+                        "approval_comment": es.approval_comment,
                     }
                     for es in r.enrichment_suggestions
                 ],
@@ -3215,6 +3302,12 @@ async def _run_analysis(
                 msg = f"SELECTOR WARNING: {no_cat}/{len(found_results)} products missing category — website structure may have changed"
                 logger.error(f"[{job_id}] {msg}")
                 job.errors.append(msg)
+
+        # Auto-approve safe suggestions before export
+        from backend.approval import mark_auto_approved
+        auto_count = mark_auto_approved(job.results)
+        if auto_count:
+            logger.info(f"[{job_id}] Auto-godkjent {auto_count} forslag (høy confidence, lav risiko)")
 
         # Generate output Excel
         timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")

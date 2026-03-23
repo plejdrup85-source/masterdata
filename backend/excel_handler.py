@@ -2383,6 +2383,12 @@ def _evaluate_inriver_row(
         if fa.confidence is not None:
             field_confidence_map[fa.field_name] = fa.confidence
 
+    # Build approval status lookup from enrichment suggestions
+    approval_map = {}
+    for es in result.enrichment_suggestions:
+        if es.suggested_value and es.field_name not in approval_map:
+            approval_map[es.field_name] = es.approval_status.value if hasattr(es.approval_status, 'value') else str(es.approval_status)
+
     for field_name, current_fn in import_fields:
         current_val = current_fn(result)
 
@@ -2401,6 +2407,7 @@ def _evaluate_inriver_row(
             "confidence": confidence,
             "field_confidence": field_conf,
             "reject_reason": "",
+            "approval_status": approval_map.get(field_name, "Ikke gjennomgått"),
         }
 
         if not raw_suggestion:
@@ -2557,11 +2564,19 @@ def _create_inriver_import_sheet(ws, results: list[ProductAnalysis]) -> None:
                 sugg_cell.fill = empty_sugg_fill
             col += 1
 
-            # _godkjent
+            # _godkjent — use approval status from suggestion if available
             if fe["is_changed"]:
-                approval_cell = ws.cell(row=row_idx, column=col, value="Ikke godkjent")
+                approval_value = fe.get("approval_status", "Ikke gjennomgått")
+                approval_cell = ws.cell(row=row_idx, column=col, value=approval_value)
                 approval_cell.alignment = top_alignment
-                approval_cell.fill = approval_fill
+                if approval_value in ("Godkjent", "Auto-godkjent"):
+                    approval_cell.fill = PatternFill(start_color="C6EFCE", end_color="C6EFCE", fill_type="solid")
+                    approval_cell.font = Font(color="006100")
+                elif approval_value == "Avvist":
+                    approval_cell.fill = PatternFill(start_color="FFC7CE", end_color="FFC7CE", fill_type="solid")
+                    approval_cell.font = Font(color="9C0006")
+                else:
+                    approval_cell.fill = approval_fill
             else:
                 approval_cell = ws.cell(row=row_idx, column=col, value="ikke relevant")
                 approval_cell.alignment = top_alignment

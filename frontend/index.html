@@ -909,6 +909,7 @@
                 <div class="actions">
                     <button class="btn btn-success" id="downloadBtn">Last ned Excel-rapport</button>
                     <button class="btn" id="downloadQuickWinsBtn" style="background:#059669;color:#fff;font-size:0.85rem" title="Eksporter kun høy-confidence, lav-risiko forslag">Quick Wins</button>
+                    <button class="btn" id="downloadApprovedBtn" style="background:#0d9488;color:#fff;font-size:0.85rem" title="Eksporter kun godkjente og auto-godkjente forslag">Godkjente</button>
                     <button class="btn" id="downloadFilteredBtn" style="background:#2563eb;color:#fff;font-size:0.85rem;display:none" title="Eksporter kun filtrerte produkter">Eksporter filtrerte (<span id="filteredExportCount">0</span>)</button>
                     <button class="btn" id="recheckFilteredBtn" style="background:#f59e0b;color:#fff;font-size:0.85rem;display:none" title="Re-kjør analyse kun for filtrerte produkter">Re-sjekk filtrerte (<span id="recheckCount">0</span>)</button>
                     <select id="recheckPreset" style="font-size:0.8rem;padding:0.3rem 0.5rem;border:1px solid var(--border);border-radius:4px;background:#fff;cursor:pointer" title="Velg en forhåndsdefinert re-sjekk">
@@ -2778,6 +2779,33 @@
                                             </div>` : ''}
                                         </div>
                                     </div>` : ''}
+                                    ${(() => {
+                                        const suggestions = r.enrichment_suggestions || [];
+                                        if (!suggestions.length) return '';
+                                        const approvalColors = {'Godkjent':'#16a34a','Auto-godkjent':'#059669','Avvist':'#dc2626','Krever vurdering':'#d97706','Ikke gjennomgått':'#64748b'};
+                                        const approvalBg = {'Godkjent':'#f0fdf4','Auto-godkjent':'#ecfdf5','Avvist':'#fef2f2','Krever vurdering':'#fffbeb','Ikke gjennomgått':'#f8fafc'};
+                                        let sgHtml = '<div style="margin-top:0.75rem"><h4 style="font-size:0.85rem;font-weight:600;margin-bottom:0.5rem">Forbedringsforslag</h4>';
+                                        suggestions.forEach((s, si) => {
+                                            if (!s.suggested_value) return;
+                                            const as = s.approval_status || 'Ikke gjennomgått';
+                                            const aClr = approvalColors[as] || '#64748b';
+                                            const aBg = approvalBg[as] || '#f8fafc';
+                                            const confPct = Math.round((s.confidence || 0) * 100);
+                                            sgHtml += `<div style="padding:0.4rem 0.5rem;margin-bottom:0.4rem;border:1px solid #e2e8f0;border-radius:6px;background:#fff;font-size:0.8rem" data-art="${r.article_number}" data-si="${si}">`;
+                                            sgHtml += `<div style="display:flex;align-items:center;gap:0.5rem;flex-wrap:wrap">`;
+                                            sgHtml += `<strong>${s.field_name}</strong>`;
+                                            sgHtml += `<span style="font-size:0.72rem;color:var(--text-muted)">${s.source || ''} (${confPct}%)</span>`;
+                                            sgHtml += `<span style="margin-left:auto;padding:0.1rem 0.4rem;border-radius:3px;font-size:0.7rem;font-weight:600;color:${aClr};background:${aBg}">${as}</span>`;
+                                            sgHtml += '</div>';
+                                            sgHtml += `<div style="margin-top:0.3rem;color:var(--text-muted);font-size:0.78rem">${escapeHtml((s.suggested_value || '').substring(0, 150))}${(s.suggested_value || '').length > 150 ? '...' : ''}</div>`;
+                                            sgHtml += `<div style="margin-top:0.3rem;display:flex;gap:0.3rem">`;
+                                            sgHtml += `<button style="font-size:0.68rem;padding:0.1rem 0.35rem;border:1px solid #bbf7d0;border-radius:3px;background:#f0fdf4;color:#16a34a;cursor:pointer" onclick="event.stopPropagation();setApproval('${r.article_number}',${si},'Godkjent',this)">Godkjenn</button>`;
+                                            sgHtml += `<button style="font-size:0.68rem;padding:0.1rem 0.35rem;border:1px solid #fecaca;border-radius:3px;background:#fef2f2;color:#dc2626;cursor:pointer" onclick="event.stopPropagation();setApproval('${r.article_number}',${si},'Avvist',this)">Avvis</button>`;
+                                            sgHtml += '</div></div>';
+                                        });
+                                        sgHtml += '</div>';
+                                        return sgHtml;
+                                    })()}
                                     ${aiDetailHtml}
                                 </div>
                             </td>
@@ -2806,6 +2834,41 @@
             if (row && detail) {
                 row.classList.toggle('expanded');
                 detail.classList.toggle('visible');
+            }
+        }
+
+        async function setApproval(articleNumber, suggestionIndex, status, btn) {
+            if (!currentJobId) return;
+            try {
+                const resp = await fetch(`${API_BASE}/api/approve/${currentJobId}/${articleNumber}/${suggestionIndex}`, {
+                    method: 'PUT',
+                    headers: {'Content-Type': 'application/json'},
+                    body: JSON.stringify({status}),
+                });
+                if (!resp.ok) {
+                    const err = await resp.json().catch(() => ({}));
+                    alert(err.detail || 'Godkjenning feilet');
+                    return;
+                }
+                // Update the status badge in the UI
+                const container = btn.closest('[data-art]');
+                if (container) {
+                    const badge = container.querySelector('span[style*="margin-left:auto"]');
+                    if (badge) {
+                        const colors = {'Godkjent':'#16a34a','Avvist':'#dc2626'};
+                        const bgs = {'Godkjent':'#f0fdf4','Avvist':'#fef2f2'};
+                        badge.textContent = status;
+                        badge.style.color = colors[status] || '#64748b';
+                        badge.style.background = bgs[status] || '#f8fafc';
+                    }
+                }
+                // Also update allResultsData
+                const rData = allResultsData.find(r => r.article_number === articleNumber);
+                if (rData && rData.enrichment_suggestions && rData.enrichment_suggestions[suggestionIndex]) {
+                    rData.enrichment_suggestions[suggestionIndex].approval_status = status;
+                }
+            } catch (e) {
+                alert('Feil: ' + e.message);
             }
         }
 
@@ -2892,6 +2955,27 @@
                 URL.revokeObjectURL(url);
             } catch (e) {
                 alert(`Nedlasting feilet: ${e.message}`);
+            }
+        });
+
+        // Approved-only download button
+        document.getElementById('downloadApprovedBtn').addEventListener('click', async () => {
+            if (!currentJobId) return;
+            try {
+                const resp = await fetch(`${API_BASE}/api/download/${currentJobId}/approved`);
+                if (!resp.ok) {
+                    const err = await resp.json().catch(() => ({}));
+                    alert(err.detail || 'Ingen godkjente forslag funnet');
+                    return;
+                }
+                const blob = await resp.blob();
+                const url = URL.createObjectURL(blob);
+                const a = document.createElement('a');
+                a.href = url; a.download = `masterdata_godkjent_${currentJobId}.xlsx`;
+                document.body.appendChild(a); a.click(); document.body.removeChild(a);
+                URL.revokeObjectURL(url);
+            } catch (e) {
+                alert('Nedlasting feilet: ' + e.message);
             }
         });
 
