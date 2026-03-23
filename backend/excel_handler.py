@@ -264,7 +264,9 @@ def _apply_image_status_style(cell, status: str) -> None:
 
 
 def _create_overview_sheet(ws, results: list[ProductAnalysis]) -> None:
-    """Create the overview sheet with one row per product."""
+    """Create the overview sheet with one row per product, sorted by priority (highest first)."""
+    # Sort by priority score descending (products needing attention first)
+    results = sorted(results, key=lambda r: r.priority_score or 0, reverse=True)
     headers = [
         "Artikkelnummer",
         "Produktnavn",
@@ -278,6 +280,9 @@ def _create_overview_sheet(ws, results: list[ProductAnalysis]) -> None:
         "Samsvarskvalitet (snitt)",
         "Nettbutikk-klar",
         "Nettbutikk-mangler",
+        "Prioritet",
+        "Prioritetsscore",
+        "Prioritetsbegrunnelse",
         "Status",
         "Kommentar",
         "Kategori",
@@ -353,36 +358,52 @@ def _create_overview_sheet(ws, results: list[ProductAnalysis]) -> None:
             ws_cell.fill = PatternFill(start_color="FFC7CE", end_color="FFC7CE", fill_type="solid")
             ws_cell.font = Font(color="9C0006")
         ws.cell(row=row_idx, column=12, value=result.webshop_missing or "")
-        status_cell = ws.cell(row=row_idx, column=13, value=result.overall_status.value)
+        # Priority scoring
+        prio_label = result.priority_label or ""
+        prio_cell = ws.cell(row=row_idx, column=13, value=prio_label)
+        if prio_label == "Høy":
+            prio_cell.fill = PatternFill(start_color="FFC7CE", end_color="FFC7CE", fill_type="solid")
+            prio_cell.font = Font(color="9C0006", bold=True)
+        elif prio_label == "Middels":
+            prio_cell.fill = PatternFill(start_color="FFEB9C", end_color="FFEB9C", fill_type="solid")
+            prio_cell.font = Font(color="9C6500")
+        elif prio_label == "Lav":
+            prio_cell.fill = PatternFill(start_color="C6EFCE", end_color="C6EFCE", fill_type="solid")
+            prio_cell.font = Font(color="006100")
+        prio_score_cell = ws.cell(row=row_idx, column=14, value=result.priority_score or 0)
+        if isinstance(result.priority_score, (int, float)):
+            _apply_quality_score_color(prio_score_cell, 100 - result.priority_score)  # invert: high prio = red
+        ws.cell(row=row_idx, column=15, value=result.priority_reasons or "")
+        status_cell = ws.cell(row=row_idx, column=16, value=result.overall_status.value)
         _apply_status_style(status_cell, result.overall_status)
-        ws.cell(row=row_idx, column=14, value=result.overall_comment or "")
+        ws.cell(row=row_idx, column=17, value=result.overall_comment or "")
         # Show full breadcrumb path when available, fall back to leaf category
         cat_display = ""
         if pd.category_breadcrumb:
             cat_display = " > ".join(pd.category_breadcrumb)
         elif pd.category:
             cat_display = pd.category
-        ws.cell(row=row_idx, column=15, value=cat_display)
+        ws.cell(row=row_idx, column=18, value=cat_display)
         # Image quality columns
         img_score = iq.get("avg_image_score", 0)
         img_status = iq.get("image_quality_status", "MISSING")
         img_count = iq.get("image_count_found", 0)
-        ws.cell(row=row_idx, column=16, value=round(img_score, 1) if img_score else 0)
-        img_status_cell = ws.cell(row=row_idx, column=17, value=img_status)
+        ws.cell(row=row_idx, column=19, value=round(img_score, 1) if img_score else 0)
+        img_status_cell = ws.cell(row=row_idx, column=20, value=img_status)
         _apply_image_status_style(img_status_cell, img_status)
-        ws.cell(row=row_idx, column=18, value=img_count)
+        ws.cell(row=row_idx, column=21, value=img_count)
         # Enrichment columns
-        ws.cell(row=row_idx, column=19, value="Ja" if result.pdf_available else "Nei")
-        ws.cell(row=row_idx, column=20, value=len(enriched))
-        conflict_cell = ws.cell(row=row_idx, column=21, value=len(conflicts))
+        ws.cell(row=row_idx, column=22, value="Ja" if result.pdf_available else "Nei")
+        ws.cell(row=row_idx, column=23, value=len(enriched))
+        conflict_cell = ws.cell(row=row_idx, column=24, value=len(conflicts))
         if conflicts:
             conflict_cell.fill = PatternFill(start_color="FFEB9C", end_color="FFEB9C", fill_type="solid")
             conflict_cell.font = Font(color="9C6500")
-        ws.cell(row=row_idx, column=22, value="Ja" if result.auto_fix_possible else "Nei")
-        ws.cell(row=row_idx, column=23, value="Ja" if result.manual_review_needed else "Nei")
-        ws.cell(row=row_idx, column=24, value="Ja" if result.requires_manufacturer_contact else "Nei")
-        ws.cell(row=row_idx, column=25, value=pd.product_url or "")
-        ws.cell(row=row_idx, column=26, value=result.pdf_url or "")
+        ws.cell(row=row_idx, column=25, value="Ja" if result.auto_fix_possible else "Nei")
+        ws.cell(row=row_idx, column=26, value="Ja" if result.manual_review_needed else "Nei")
+        ws.cell(row=row_idx, column=27, value="Ja" if result.requires_manufacturer_contact else "Nei")
+        ws.cell(row=row_idx, column=28, value=pd.product_url or "")
+        ws.cell(row=row_idx, column=29, value=result.pdf_url or "")
 
     for col in range(1, len(headers) + 1):
         ws.column_dimensions[get_column_letter(col)].width = max(15, len(headers[col - 1]) + 5)
@@ -1694,6 +1715,18 @@ def _create_summary_sheet(ws, results: list[ProductAnalysis],
     rows.append(("Ikke klar", ws_not_ready, 1))
     if ws_unknown:
         rows.append(("Ikke vurdert", ws_unknown, 1))
+    rows.append(("", "", 0))
+
+    # Priority distribution
+    prio_high = sum(1 for r in results if r.priority_label == "Høy")
+    prio_med = sum(1 for r in results if r.priority_label == "Middels")
+    prio_low = sum(1 for r in results if r.priority_label == "Lav")
+    prio_avg = round(sum(r.priority_score or 0 for r in results) / max(len(results), 1))
+    rows.append(("PRIORITERING", "", 0))
+    rows.append(("Høy prioritet", prio_high, 1))
+    rows.append(("Middels prioritet", prio_med, 1))
+    rows.append(("Lav prioritet", prio_low, 1))
+    rows.append(("Gjennomsnittlig prioritetsscore", prio_avg, 1))
     rows.append(("", "", 0))
 
     # Status distribution

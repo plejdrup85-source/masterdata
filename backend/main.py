@@ -2814,6 +2814,13 @@ async def _run_analysis(
                     analysis.webshop_summary = readiness.summary
                     analysis.webshop_missing = readiness.missing_list
 
+                    # Calculate priority score
+                    from backend.priority_scoring import calculate_priority_score
+                    priority = calculate_priority_score(analysis)
+                    analysis.priority_score = priority.score
+                    analysis.priority_label = priority.label
+                    analysis.priority_reasons = "; ".join(priority.reasons) if priority.reasons else ""
+
                 return analysis
 
             except Exception as e:

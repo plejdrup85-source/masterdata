@@ -288,6 +288,10 @@ class ProductAnalysis(BaseModel):
     webshop_status: Optional[str] = None          # "Klar" / "Delvis klar" / "Ikke klar"
     webshop_summary: Optional[str] = None         # One-line summary
     webshop_missing: Optional[str] = None         # Comma-separated missing items
+    # Priority scoring (populated by priority_scoring module)
+    priority_score: Optional[int] = None            # 0-100, higher = fix sooner
+    priority_label: Optional[str] = None            # "Høy" / "Middels" / "Lav"
+    priority_reasons: Optional[str] = None          # Semicolon-separated reasons
     # AI scoring results (populated by ai_scorer)
     ai_score: Optional[dict] = None
     ai_enrichment: Optional[dict] = None
