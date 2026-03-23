@@ -2799,6 +2799,14 @@ async def _run_analysis(
                     from backend.analyzer import upgrade_statuses_after_enrichment
                     upgrade_statuses_after_enrichment(analysis, enrichment_suggestions or [])
 
+                    # Recalculate conformity scores with enrichment data
+                    from backend.field_confidence import update_conformity_scores
+                    update_conformity_scores(
+                        analysis.field_analyses,
+                        enrichment_results=enrichment_results,
+                        manufacturer_data=mfr_data,
+                    )
+
                 return analysis
 
             except Exception as e:

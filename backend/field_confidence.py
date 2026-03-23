@@ -418,12 +418,56 @@ def calculate_field_confidence(fa: FieldAnalysis) -> tuple[int, str]:
     return score, details
 
 
-def calculate_all_field_confidences(field_analyses: list[FieldAnalysis]) -> None:
+def calculate_all_field_confidences(
+    field_analyses: list[FieldAnalysis],
+    enrichment_results: Optional[list] = None,
+    manufacturer_data: Optional[object] = None,
+) -> None:
     """Calculate and set confidence for all field analyses in a list.
+
+    Computes the legacy composite confidence AND the two-dimensional
+    quality scores (content quality + conformity quality).
 
     Modifies the FieldAnalysis objects in place.
     """
+    from backend.quality_dimensions import (
+        compute_quality_dimensions,
+        quality_summary_label,
+    )
+
     for fa in field_analyses:
         score, details = calculate_field_confidence(fa)
         fa.confidence = score
         fa.confidence_details = details
+
+        # Compute two-dimensional quality scores
+        cq, conf = compute_quality_dimensions(fa, enrichment_results, manufacturer_data)
+        fa.content_quality = cq.total
+        fa.content_quality_details = cq.details
+        fa.conformity_quality = conf.total
+        fa.conformity_quality_details = conf.details
+        fa.quality_label = quality_summary_label(cq.total, conf.total)
+
+
+def update_conformity_scores(
+    field_analyses: list[FieldAnalysis],
+    enrichment_results: Optional[list] = None,
+    manufacturer_data: Optional[object] = None,
+) -> None:
+    """Recalculate conformity scores after enrichment data becomes available.
+
+    Called after the enrichment pipeline to incorporate PDF and manufacturer
+    agreement into the conformity dimension. Content quality is unchanged.
+    """
+    from backend.quality_dimensions import (
+        score_conformity_quality,
+        quality_summary_label,
+    )
+
+    for fa in field_analyses:
+        conf = score_conformity_quality(fa, enrichment_results, manufacturer_data)
+        fa.conformity_quality = conf.total
+        fa.conformity_quality_details = conf.details
+        # Recalculate quadrant label with updated conformity
+        if fa.content_quality is not None:
+            fa.quality_label = quality_summary_label(fa.content_quality, conf.total)

@@ -245,6 +245,16 @@ IMAGE_STATUS_FONT_COLORS = {
 }
 
 
+def _apply_quality_score_color(cell, score: int) -> None:
+    """Apply color coding to a quality dimension score (0-100)."""
+    if score >= 75:
+        cell.font = Font(color="006100")  # Green
+    elif score >= 50:
+        cell.font = Font(color="9C6500")  # Orange
+    else:
+        cell.font = Font(color="9C0006", bold=True)  # Red
+
+
 def _apply_image_status_style(cell, status: str) -> None:
     """Apply color styling based on image quality status."""
     fill_color = IMAGE_STATUS_COLORS.get(status, "FFFFFF")
@@ -264,6 +274,8 @@ def _create_overview_sheet(ws, results: list[ProductAnalysis]) -> None:
         "Verifiseringsstatus",
         "Verifiseringsbevis",
         "Total score (%)",
+        "Innholdskvalitet (snitt)",
+        "Samsvarskvalitet (snitt)",
         "Status",
         "Kommentar",
         "Kategori",
@@ -315,36 +327,47 @@ def _create_overview_sheet(ws, results: list[ProductAnalysis]) -> None:
         v_evidence = VS.business_evidence(pd.verification_status, pd.verification_evidence)
         ws.cell(row=row_idx, column=7, value=v_evidence)
         ws.cell(row=row_idx, column=8, value=result.total_score)
-        status_cell = ws.cell(row=row_idx, column=9, value=result.overall_status.value)
+        # Average content quality and conformity quality across fields
+        cq_scores = [fa.content_quality for fa in result.field_analyses if fa.content_quality is not None]
+        conf_scores = [fa.conformity_quality for fa in result.field_analyses if fa.conformity_quality is not None]
+        avg_cq = round(sum(cq_scores) / len(cq_scores)) if cq_scores else ""
+        avg_conf = round(sum(conf_scores) / len(conf_scores)) if conf_scores else ""
+        cq_cell = ws.cell(row=row_idx, column=9, value=avg_cq)
+        if isinstance(avg_cq, (int, float)):
+            _apply_quality_score_color(cq_cell, avg_cq)
+        conf_cell = ws.cell(row=row_idx, column=10, value=avg_conf)
+        if isinstance(avg_conf, (int, float)):
+            _apply_quality_score_color(conf_cell, avg_conf)
+        status_cell = ws.cell(row=row_idx, column=11, value=result.overall_status.value)
         _apply_status_style(status_cell, result.overall_status)
-        ws.cell(row=row_idx, column=10, value=result.overall_comment or "")
+        ws.cell(row=row_idx, column=12, value=result.overall_comment or "")
         # Show full breadcrumb path when available, fall back to leaf category
         cat_display = ""
         if pd.category_breadcrumb:
             cat_display = " > ".join(pd.category_breadcrumb)
         elif pd.category:
             cat_display = pd.category
-        ws.cell(row=row_idx, column=11, value=cat_display)
+        ws.cell(row=row_idx, column=13, value=cat_display)
         # Image quality columns
         img_score = iq.get("avg_image_score", 0)
         img_status = iq.get("image_quality_status", "MISSING")
         img_count = iq.get("image_count_found", 0)
-        ws.cell(row=row_idx, column=12, value=round(img_score, 1) if img_score else 0)
-        img_status_cell = ws.cell(row=row_idx, column=13, value=img_status)
+        ws.cell(row=row_idx, column=14, value=round(img_score, 1) if img_score else 0)
+        img_status_cell = ws.cell(row=row_idx, column=15, value=img_status)
         _apply_image_status_style(img_status_cell, img_status)
-        ws.cell(row=row_idx, column=14, value=img_count)
+        ws.cell(row=row_idx, column=16, value=img_count)
         # Enrichment columns
-        ws.cell(row=row_idx, column=15, value="Ja" if result.pdf_available else "Nei")
-        ws.cell(row=row_idx, column=16, value=len(enriched))
-        conflict_cell = ws.cell(row=row_idx, column=17, value=len(conflicts))
+        ws.cell(row=row_idx, column=17, value="Ja" if result.pdf_available else "Nei")
+        ws.cell(row=row_idx, column=18, value=len(enriched))
+        conflict_cell = ws.cell(row=row_idx, column=19, value=len(conflicts))
         if conflicts:
             conflict_cell.fill = PatternFill(start_color="FFEB9C", end_color="FFEB9C", fill_type="solid")
             conflict_cell.font = Font(color="9C6500")
-        ws.cell(row=row_idx, column=18, value="Ja" if result.auto_fix_possible else "Nei")
-        ws.cell(row=row_idx, column=19, value="Ja" if result.manual_review_needed else "Nei")
-        ws.cell(row=row_idx, column=20, value="Ja" if result.requires_manufacturer_contact else "Nei")
-        ws.cell(row=row_idx, column=21, value=pd.product_url or "")
-        ws.cell(row=row_idx, column=22, value=result.pdf_url or "")
+        ws.cell(row=row_idx, column=20, value="Ja" if result.auto_fix_possible else "Nei")
+        ws.cell(row=row_idx, column=21, value="Ja" if result.manual_review_needed else "Nei")
+        ws.cell(row=row_idx, column=22, value="Ja" if result.requires_manufacturer_contact else "Nei")
+        ws.cell(row=row_idx, column=23, value=pd.product_url or "")
+        ws.cell(row=row_idx, column=24, value=result.pdf_url or "")
 
     for col in range(1, len(headers) + 1):
         ws.column_dimensions[get_column_letter(col)].width = max(15, len(headers[col - 1]) + 5)
@@ -364,6 +387,9 @@ def _create_detail_sheet(ws, results: list[ProductAnalysis]) -> None:
         "Nåværende verdi",
         "Status",
         "Confidence",
+        "Innholdskvalitet",
+        "Samsvarskvalitet",
+        "Kvalitetsvurdering",
         "Confidence-detaljer",
         "Statusårsak",
         "Verdikilde",
@@ -403,17 +429,27 @@ def _create_detail_sheet(ws, results: list[ProductAnalysis]) -> None:
                     conf_cell.font = Font(color="9C6500")
                 else:
                     conf_cell.font = Font(color="9C0006", bold=True)
-            ws.cell(row=row_idx, column=9, value=fa.confidence_details or "")
-            ws.cell(row=row_idx, column=10, value=fa.status_reason or fa.comment or "")
-            ws.cell(row=row_idx, column=11, value=fa.value_origin or fa.source or "")
-            ws.cell(row=row_idx, column=12, value=fa.website_value or "")
-            ws.cell(row=row_idx, column=13, value=fa.jeeves_value or "")
-            ws.cell(row=row_idx, column=14, value=fa.suggested_value or "")
-            ws.cell(row=row_idx, column=15, value=fa.suggestion_source or fa.source or "")
+            # Two-dimensional quality scores
+            cq_val = fa.content_quality if fa.content_quality is not None else ""
+            cq_cell = ws.cell(row=row_idx, column=9, value=cq_val)
+            if isinstance(cq_val, (int, float)):
+                _apply_quality_score_color(cq_cell, cq_val)
+            conf_q_val = fa.conformity_quality if fa.conformity_quality is not None else ""
+            conf_q_cell = ws.cell(row=row_idx, column=10, value=conf_q_val)
+            if isinstance(conf_q_val, (int, float)):
+                _apply_quality_score_color(conf_q_cell, conf_q_val)
+            ws.cell(row=row_idx, column=11, value=fa.quality_label or "")
+            ws.cell(row=row_idx, column=12, value=fa.confidence_details or "")
+            ws.cell(row=row_idx, column=13, value=fa.status_reason or fa.comment or "")
+            ws.cell(row=row_idx, column=14, value=fa.value_origin or fa.source or "")
+            ws.cell(row=row_idx, column=15, value=fa.website_value or "")
+            ws.cell(row=row_idx, column=16, value=fa.jeeves_value or "")
+            ws.cell(row=row_idx, column=17, value=fa.suggested_value or "")
+            ws.cell(row=row_idx, column=18, value=fa.suggestion_source or fa.source or "")
             # Diff columns — only populated when a suggestion exists
             if fa.suggested_value:
-                ws.cell(row=row_idx, column=16, value=summarize_change_type(fa.current_value, fa.suggested_value))
-                ws.cell(row=row_idx, column=17, value=build_field_diff(fa.current_value, fa.suggested_value))
+                ws.cell(row=row_idx, column=19, value=summarize_change_type(fa.current_value, fa.suggested_value))
+                ws.cell(row=row_idx, column=20, value=build_field_diff(fa.current_value, fa.suggested_value))
             row_idx += 1
 
     for col in range(1, len(headers) + 1):

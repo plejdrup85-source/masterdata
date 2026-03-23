@@ -163,6 +163,12 @@ class FieldAnalysis(BaseModel):
     status_reason: Optional[str] = None         # Why this status was assigned
     suggestion_reason: Optional[str] = None     # Why suggestion was/wasn't created
     suggestion_source: Optional[str] = None     # What evidence supports the suggestion
+    # Two-dimensional quality scoring
+    content_quality: Optional[int] = None       # 0-100: how well-written for webshop
+    content_quality_details: Optional[str] = None
+    conformity_quality: Optional[int] = None    # 0-100: how well it matches sources
+    conformity_quality_details: Optional[str] = None
+    quality_label: Optional[str] = None         # Quadrant label (e.g., "Klar for produksjon")
 
 
 class JeevesData(BaseModel):
