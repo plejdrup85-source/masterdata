@@ -125,6 +125,17 @@ def _is_junk_line(line: str) -> bool:
     if re.match(r"(?i)^\s*antall\s*(?:pr|per|i|/)\s*", stripped):
         return True
 
+    # Contact information — phone, email, address (should never be in descriptions)
+    if re.search(r"(?i)(?:tel|telefon|tlf|fax|phone|mob)\s*[.:]?\s*[\+\d\(\)\s\-]{7,}", stripped):
+        return True
+    if re.search(r"[a-zA-Z0-9._%+\-]+@[a-zA-Z0-9.\-]+\.[a-zA-Z]{2,}", stripped):
+        return True
+    if re.match(r"(?i)^\s*(?:postboks|pb|p\.?o\.?\s*box)\s+\d+", stripped):
+        return True
+    # Line that is primarily a postal address (4-digit zip + city name)
+    if re.match(r"^\s*\d{4}\s+[A-ZÆØÅ][a-zæøå]+\s*$", stripped):
+        return True
+
     # Variant row inline: article number + text + packaging ratio anywhere in line
     # e.g. "222001 SELEFA® Optimia gaskompresser, Hvit 120 / 10800"
     if _VARIANT_ROW_INLINE.search(stripped):
@@ -300,6 +311,12 @@ _REJECT_PATTERNS = [
     # Section markers that should not be in descriptions
     re.compile(r"(?i)\bsalgsenhet\b"),
     re.compile(r"(?i)\btransportkartong\b"),
+    # Contact information (should never appear in webshop descriptions)
+    re.compile(r"(?i)(?:tel|telefon|tlf|fax|phone)\s*[.:]?\s*[\+\d\(\)\s\-]{7,}"),
+    re.compile(r"[a-zA-Z0-9._%+\-]+@[a-zA-Z0-9.\-]+\.[a-zA-Z]{2,}"),
+    # Catalog/PDF metadata markers
+    re.compile(r"(?i)\bvelg\s+mellom\b"),
+    re.compile(r"(?i)\bart\.?\s*nr\.?\s*[:.]\s*\d"),
 ]
 
 

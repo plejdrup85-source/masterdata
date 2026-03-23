@@ -10,6 +10,10 @@ from openpyxl import Workbook, load_workbook
 from openpyxl.styles import Alignment, Border, Font, PatternFill, Side
 from openpyxl.utils import get_column_letter
 
+from backend.content_validator import (
+    get_best_producer_info,
+    validate_suggestion_output,
+)
 from backend.identifiers import normalize_identifier, normalize_identifier_strict
 from backend.models import EnrichmentSuggestion, JeevesData, ProductAnalysis, QualityStatus
 
@@ -236,13 +240,14 @@ def _create_overview_sheet(ws, results: list[ProductAnalysis]) -> None:
     headers = [
         "Artikkelnummer",
         "Produktnavn",
+        "Produsent",
+        "Produsentens varenummer",
         "Funnet p\u00e5 OneMed",
         "Verifiseringsstatus",
         "Verifiseringsbevis",
         "Total score (%)",
         "Status",
         "Kommentar",
-        "Produsent",
         "Kategori",
         "Bildescore",
         "Bildestatus",
@@ -266,13 +271,21 @@ def _create_overview_sheet(ws, results: list[ProductAnalysis]) -> None:
         iq = result.image_quality or {}
         enriched = [e for e in result.enrichment_results if e.match_status != "NOT_FOUND"]
         conflicts = [e for e in result.enrichment_results if e.match_status == "FOUND_IN_BOTH_CONFLICT"]
+
+        # Get best producer info from all available sources
+        producer, producer_artnr = get_best_producer_info(
+            pd, result.jeeves_data, result.manufacturer_lookup
+        )
+
         _write_id_cell(ws, row_idx, 1, result.article_number)
         ws.cell(row=row_idx, column=2, value=pd.product_name or "")
-        ws.cell(row=row_idx, column=3, value="Ja" if pd.found_on_onemed else "Nei")
-        # Verification status and evidence — business-friendly labels (Task 7)
+        ws.cell(row=row_idx, column=3, value=producer or "")
+        ws.cell(row=row_idx, column=4, value=producer_artnr or "")
+        ws.cell(row=row_idx, column=5, value="Ja" if pd.found_on_onemed else "Nei")
+        # Verification status and evidence — business-friendly labels
         from backend.models import VerificationStatus as VS
         v_label = VS.business_label(pd.verification_status)
-        v_cell = ws.cell(row=row_idx, column=4, value=v_label)
+        v_cell = ws.cell(row=row_idx, column=6, value=v_label)
         # Color-code verification: green=exact, yellow=weak, red=mismatch
         if pd.verification_status in (VS.EXACT_MATCH, VS.NORMALIZED_MATCH):
             v_cell.fill = PatternFill(start_color="C6EFCE", end_color="C6EFCE", fill_type="solid")
@@ -282,39 +295,38 @@ def _create_overview_sheet(ws, results: list[ProductAnalysis]) -> None:
             v_cell.fill = PatternFill(start_color="FFC7CE", end_color="FFC7CE", fill_type="solid")
         # Business-friendly evidence text
         v_evidence = VS.business_evidence(pd.verification_status, pd.verification_evidence)
-        ws.cell(row=row_idx, column=5, value=v_evidence)
-        ws.cell(row=row_idx, column=6, value=result.total_score)
-        status_cell = ws.cell(row=row_idx, column=7, value=result.overall_status.value)
+        ws.cell(row=row_idx, column=7, value=v_evidence)
+        ws.cell(row=row_idx, column=8, value=result.total_score)
+        status_cell = ws.cell(row=row_idx, column=9, value=result.overall_status.value)
         _apply_status_style(status_cell, result.overall_status)
-        ws.cell(row=row_idx, column=8, value=result.overall_comment or "")
-        ws.cell(row=row_idx, column=9, value=pd.manufacturer or "")
+        ws.cell(row=row_idx, column=10, value=result.overall_comment or "")
         # Show full breadcrumb path when available, fall back to leaf category
         cat_display = ""
         if pd.category_breadcrumb:
             cat_display = " > ".join(pd.category_breadcrumb)
         elif pd.category:
             cat_display = pd.category
-        ws.cell(row=row_idx, column=10, value=cat_display)
+        ws.cell(row=row_idx, column=11, value=cat_display)
         # Image quality columns
         img_score = iq.get("avg_image_score", 0)
         img_status = iq.get("image_quality_status", "MISSING")
         img_count = iq.get("image_count_found", 0)
-        ws.cell(row=row_idx, column=11, value=round(img_score, 1) if img_score else 0)
-        img_status_cell = ws.cell(row=row_idx, column=12, value=img_status)
+        ws.cell(row=row_idx, column=12, value=round(img_score, 1) if img_score else 0)
+        img_status_cell = ws.cell(row=row_idx, column=13, value=img_status)
         _apply_image_status_style(img_status_cell, img_status)
-        ws.cell(row=row_idx, column=13, value=img_count)
+        ws.cell(row=row_idx, column=14, value=img_count)
         # Enrichment columns
-        ws.cell(row=row_idx, column=14, value="Ja" if result.pdf_available else "Nei")
-        ws.cell(row=row_idx, column=15, value=len(enriched))
-        conflict_cell = ws.cell(row=row_idx, column=16, value=len(conflicts))
+        ws.cell(row=row_idx, column=15, value="Ja" if result.pdf_available else "Nei")
+        ws.cell(row=row_idx, column=16, value=len(enriched))
+        conflict_cell = ws.cell(row=row_idx, column=17, value=len(conflicts))
         if conflicts:
             conflict_cell.fill = PatternFill(start_color="FFEB9C", end_color="FFEB9C", fill_type="solid")
             conflict_cell.font = Font(color="9C6500")
-        ws.cell(row=row_idx, column=17, value="Ja" if result.auto_fix_possible else "Nei")
-        ws.cell(row=row_idx, column=18, value="Ja" if result.manual_review_needed else "Nei")
-        ws.cell(row=row_idx, column=19, value="Ja" if result.requires_manufacturer_contact else "Nei")
-        ws.cell(row=row_idx, column=20, value=pd.product_url or "")
-        ws.cell(row=row_idx, column=21, value=result.pdf_url or "")
+        ws.cell(row=row_idx, column=18, value="Ja" if result.auto_fix_possible else "Nei")
+        ws.cell(row=row_idx, column=19, value="Ja" if result.manual_review_needed else "Nei")
+        ws.cell(row=row_idx, column=20, value="Ja" if result.requires_manufacturer_contact else "Nei")
+        ws.cell(row=row_idx, column=21, value=pd.product_url or "")
+        ws.cell(row=row_idx, column=22, value=result.pdf_url or "")
 
     for col in range(1, len(headers) + 1):
         ws.column_dimensions[get_column_letter(col)].width = max(15, len(headers[col - 1]) + 5)
@@ -328,6 +340,8 @@ def _create_detail_sheet(ws, results: list[ProductAnalysis]) -> None:
     headers = [
         "Artikkelnummer",
         "Produktnavn",
+        "Produsent",
+        "Produsentens varenummer",
         "Felt",
         "Nåværende verdi",
         "Status",
@@ -346,21 +360,25 @@ def _create_detail_sheet(ws, results: list[ProductAnalysis]) -> None:
 
     row_idx = 2
     for result in results:
+        producer, producer_artnr = get_best_producer_info(
+            result.product_data, result.jeeves_data, result.manufacturer_lookup
+        )
         for fa in result.field_analyses:
             _write_id_cell(ws, row_idx, 1, result.article_number)
             ws.cell(row=row_idx, column=2, value=result.product_data.product_name or "")
-            ws.cell(row=row_idx, column=3, value=fa.field_name)
-            ws.cell(row=row_idx, column=4, value=fa.current_value or "")
-            status_cell = ws.cell(row=row_idx, column=5, value=fa.status.value)
+            ws.cell(row=row_idx, column=3, value=producer or "")
+            ws.cell(row=row_idx, column=4, value=producer_artnr or "")
+            ws.cell(row=row_idx, column=5, value=fa.field_name)
+            ws.cell(row=row_idx, column=6, value=fa.current_value or "")
+            status_cell = ws.cell(row=row_idx, column=7, value=fa.status.value)
             _apply_status_style(status_cell, fa.status)
-            # P1 FIX: Traceability columns
-            ws.cell(row=row_idx, column=6, value=fa.status_reason or fa.comment or "")
-            ws.cell(row=row_idx, column=7, value=fa.value_origin or fa.source or "")
-            ws.cell(row=row_idx, column=8, value=fa.website_value or "")
-            ws.cell(row=row_idx, column=9, value=fa.jeeves_value or "")
-            ws.cell(row=row_idx, column=10, value=fa.suggested_value or "")
-            ws.cell(row=row_idx, column=11, value=fa.suggestion_source or fa.source or "")
-            ws.cell(row=row_idx, column=12, value=fa.confidence if fa.confidence else "")
+            ws.cell(row=row_idx, column=8, value=fa.status_reason or fa.comment or "")
+            ws.cell(row=row_idx, column=9, value=fa.value_origin or fa.source or "")
+            ws.cell(row=row_idx, column=10, value=fa.website_value or "")
+            ws.cell(row=row_idx, column=11, value=fa.jeeves_value or "")
+            ws.cell(row=row_idx, column=12, value=fa.suggested_value or "")
+            ws.cell(row=row_idx, column=13, value=fa.suggestion_source or fa.source or "")
+            ws.cell(row=row_idx, column=14, value=fa.confidence if fa.confidence else "")
             row_idx += 1
 
     for col in range(1, len(headers) + 1):
@@ -375,11 +393,14 @@ def _create_improvements_sheet(ws, results: list[ProductAnalysis]) -> None:
     """Create improvements suggestion sheet.
 
     Combines field analysis suggestions with enrichment engine suggestions.
-    Enrichment suggestions include source evidence and review-required flag.
+    All suggestions are validated before writing — contact info, other SKUs,
+    PDF noise, and wrong-language content is rejected or flagged.
     """
     headers = [
         "Artikkelnummer",
         "Produktnavn",
+        "Produsent",
+        "Produsentens varenummer",
         "Felt",
         "Nåværende verdi",
         "Foreslått verdi",
@@ -397,11 +418,15 @@ def _create_improvements_sheet(ws, results: list[ProductAnalysis]) -> None:
 
     row_idx = 2
     for result in results:
-        # Track which fields already have enrichment suggestions (to avoid duplicates)
         enriched_fields = set()
+        sku = result.article_number
 
-        # P2 FIX: Only show enrichment suggestions that are meaningful.
-        # Skip suggestions that are identical to current value after normalization.
+        # Get best producer info
+        producer, producer_artnr = get_best_producer_info(
+            result.product_data, result.jeeves_data, result.manufacturer_lookup
+        )
+
+        # Enrichment suggestions — validated before writing
         for es in result.enrichment_suggestions:
             if not es.suggested_value:
                 continue
@@ -411,39 +436,62 @@ def _create_improvements_sheet(ws, results: list[ProductAnalysis]) -> None:
                 sv = es.suggested_value.strip().lower()
                 if cv == sv:
                     continue
-            if es.suggested_value:
-                _write_id_cell(ws, row_idx, 1, result.article_number)
-                ws.cell(row=row_idx, column=2, value=result.product_data.product_name or "")
-                ws.cell(row=row_idx, column=3, value=es.field_name)
-                ws.cell(row=row_idx, column=4, value=es.current_value or "")
-                ws.cell(row=row_idx, column=5, value=es.suggested_value)
-                source_display = es.source or ""
-                if es.source_url:
-                    source_display = f"{source_display} ({es.source_url})"
-                ws.cell(row=row_idx, column=6, value=source_display)
-                ws.cell(row=row_idx, column=7, value=es.confidence if es.confidence else "")
-                ws.cell(row=row_idx, column=8, value=es.evidence or "")
-                ws.cell(row=row_idx, column=9, value="Ja" if es.review_required else "Nei")
-                # Diff trail columns (P0-2: medical safety)
-                ws.cell(row=row_idx, column=10, value=es.original_suggested_value or "")
-                ws.cell(row=row_idx, column=11, value="Ja" if es.ai_modified else "Nei")
-                enriched_fields.add(es.field_name)
-                row_idx += 1
 
-        # Then: field analysis suggestions (for fields not covered by enricher)
+            # Validate suggestion output — reject contact info, other SKUs, PDF noise
+            is_valid, reject_reason = validate_suggestion_output(
+                es.suggested_value, es.field_name, sku
+            )
+            if not is_valid:
+                logger.info(
+                    f"[excel] Suggestion rejected for {sku}/{es.field_name}: {reject_reason}"
+                )
+                continue
+
+            _write_id_cell(ws, row_idx, 1, sku)
+            ws.cell(row=row_idx, column=2, value=result.product_data.product_name or "")
+            ws.cell(row=row_idx, column=3, value=producer or "")
+            ws.cell(row=row_idx, column=4, value=producer_artnr or "")
+            ws.cell(row=row_idx, column=5, value=es.field_name)
+            ws.cell(row=row_idx, column=6, value=es.current_value or "")
+            ws.cell(row=row_idx, column=7, value=es.suggested_value)
+            source_display = es.source or ""
+            if es.source_url:
+                source_display = f"{source_display} ({es.source_url})"
+            ws.cell(row=row_idx, column=8, value=source_display)
+            ws.cell(row=row_idx, column=9, value=es.confidence if es.confidence else "")
+            ws.cell(row=row_idx, column=10, value=es.evidence or "")
+            ws.cell(row=row_idx, column=11, value="Ja" if es.review_required else "Nei")
+            ws.cell(row=row_idx, column=12, value=es.original_suggested_value or "")
+            ws.cell(row=row_idx, column=13, value="Ja" if es.ai_modified else "Nei")
+            enriched_fields.add(es.field_name)
+            row_idx += 1
+
+        # Field analysis suggestions (for fields not covered by enricher)
         for fa in result.field_analyses:
             if fa.suggested_value and fa.field_name not in enriched_fields:
-                _write_id_cell(ws, row_idx, 1, result.article_number)
+                # Validate before writing
+                is_valid, reject_reason = validate_suggestion_output(
+                    fa.suggested_value, fa.field_name, sku
+                )
+                if not is_valid:
+                    logger.info(
+                        f"[excel] Field suggestion rejected for {sku}/{fa.field_name}: {reject_reason}"
+                    )
+                    continue
+
+                _write_id_cell(ws, row_idx, 1, sku)
                 ws.cell(row=row_idx, column=2, value=result.product_data.product_name or "")
-                ws.cell(row=row_idx, column=3, value=fa.field_name)
-                ws.cell(row=row_idx, column=4, value=fa.current_value or "")
-                ws.cell(row=row_idx, column=5, value=fa.suggested_value)
-                ws.cell(row=row_idx, column=6, value=fa.source or "")
-                ws.cell(row=row_idx, column=7, value=fa.confidence if fa.confidence else "")
-                ws.cell(row=row_idx, column=8, value=fa.comment or "")
-                ws.cell(row=row_idx, column=9, value="Ja")
-                ws.cell(row=row_idx, column=10, value="")  # No AI diff for field suggestions
-                ws.cell(row=row_idx, column=11, value="Nei")
+                ws.cell(row=row_idx, column=3, value=producer or "")
+                ws.cell(row=row_idx, column=4, value=producer_artnr or "")
+                ws.cell(row=row_idx, column=5, value=fa.field_name)
+                ws.cell(row=row_idx, column=6, value=fa.current_value or "")
+                ws.cell(row=row_idx, column=7, value=fa.suggested_value)
+                ws.cell(row=row_idx, column=8, value=fa.source or "")
+                ws.cell(row=row_idx, column=9, value=fa.confidence if fa.confidence else "")
+                ws.cell(row=row_idx, column=10, value=fa.comment or "")
+                ws.cell(row=row_idx, column=11, value="Ja")
+                ws.cell(row=row_idx, column=12, value="")
+                ws.cell(row=row_idx, column=13, value="Nei")
                 row_idx += 1
 
     if row_idx == 2:
@@ -459,6 +507,7 @@ def _create_manufacturer_sheet(ws, results: list[ProductAnalysis]) -> None:
     """Create manufacturer follow-up sheet, grouped by manufacturer."""
     headers = [
         "Produsent",
+        "Produsentens varenummer",
         "Artikkelnummer",
         "Produktnavn",
         "Manglende felt",
@@ -470,11 +519,14 @@ def _create_manufacturer_sheet(ws, results: list[ProductAnalysis]) -> None:
         ws.cell(row=1, column=col, value=header)
     _style_header(ws, 1, len(headers))
 
-    # Group by manufacturer
+    # Group by manufacturer — use best producer info
     by_manufacturer: dict[str, list[ProductAnalysis]] = {}
     for result in results:
         if result.requires_manufacturer_contact:
-            mfr = result.product_data.manufacturer or "Ukjent produsent"
+            producer, _ = get_best_producer_info(
+                result.product_data, result.jeeves_data, result.manufacturer_lookup
+            )
+            mfr = producer or "Ukjent produsent"
             if mfr not in by_manufacturer:
                 by_manufacturer[mfr] = []
             by_manufacturer[mfr].append(result)
@@ -493,17 +545,21 @@ def _create_manufacturer_sheet(ws, results: list[ProductAnalysis]) -> None:
         row_idx += 1
 
         for result in products:
+            _, producer_artnr = get_best_producer_info(
+                result.product_data, result.jeeves_data, result.manufacturer_lookup
+            )
             missing_fields = [
                 fa.field_name for fa in result.field_analyses
                 if fa.status in (QualityStatus.MISSING, QualityStatus.REQUIRES_MANUFACTURER)
             ]
             ws.cell(row=row_idx, column=1, value=manufacturer)
-            _write_id_cell(ws, row_idx, 2, result.article_number)
-            ws.cell(row=row_idx, column=3, value=result.product_data.product_name or "")
-            ws.cell(row=row_idx, column=4, value=", ".join(missing_fields))
-            status_cell = ws.cell(row=row_idx, column=5, value=result.overall_status.value)
+            ws.cell(row=row_idx, column=2, value=producer_artnr or "")
+            _write_id_cell(ws, row_idx, 3, result.article_number)
+            ws.cell(row=row_idx, column=4, value=result.product_data.product_name or "")
+            ws.cell(row=row_idx, column=5, value=", ".join(missing_fields))
+            status_cell = ws.cell(row=row_idx, column=6, value=result.overall_status.value)
             _apply_status_style(status_cell, result.overall_status)
-            ws.cell(row=row_idx, column=6, value=result.suggested_manufacturer_message or "")
+            ws.cell(row=row_idx, column=7, value=result.suggested_manufacturer_message or "")
             row_idx += 1
 
     if row_idx == 2:
@@ -516,9 +572,16 @@ def _create_manufacturer_sheet(ws, results: list[ProductAnalysis]) -> None:
 
 
 def _create_image_detail_sheet(ws, results: list[ProductAnalysis]) -> None:
-    """Create detailed image analysis sheet with one row per image."""
+    """Create detailed image analysis sheet with one row per image.
+
+    Includes producer information and integrated improvement suggestions
+    for products with image problems.
+    """
     headers = [
         "Artikkelnummer",
+        "Produktnavn",
+        "Produsent",
+        "Produsentens varenummer",
         "Bilde",
         "URL",
         "Finnes",
@@ -553,34 +616,42 @@ def _create_image_detail_sheet(ws, results: list[ProductAnalysis]) -> None:
         iq = result.image_quality
         if not iq:
             continue
+
+        producer, producer_artnr = get_best_producer_info(
+            result.product_data, result.jeeves_data, result.manufacturer_lookup
+        )
+
         for img in iq.get("image_analyses", []):
             _write_id_cell(ws, row_idx, 1, result.article_number)
-            ws.cell(row=row_idx, column=2, value=img.get("image_name", ""))
-            ws.cell(row=row_idx, column=3, value=img.get("image_url", ""))
-            ws.cell(row=row_idx, column=4, value="Ja" if img.get("exists") else "Nei")
-            ws.cell(row=row_idx, column=5, value=img.get("file_size_kb", 0))
-            ws.cell(row=row_idx, column=6, value=img.get("width", 0))
-            ws.cell(row=row_idx, column=7, value=img.get("height", 0))
-            ws.cell(row=row_idx, column=8, value=img.get("aspect_ratio", 0))
-            ws.cell(row=row_idx, column=9, value=img.get("resolution_score", 0))
-            ws.cell(row=row_idx, column=10, value=img.get("blur_score_raw", 0))
-            ws.cell(row=row_idx, column=11, value=img.get("blur_score", 0))
-            ws.cell(row=row_idx, column=12, value=img.get("brightness_mean", 0))
-            ws.cell(row=row_idx, column=13, value=img.get("brightness_score", 0))
-            ws.cell(row=row_idx, column=14, value=img.get("contrast_std", 0))
-            ws.cell(row=row_idx, column=15, value=img.get("contrast_score", 0))
-            ws.cell(row=row_idx, column=16, value=img.get("white_bg_ratio", 0))
-            ws.cell(row=row_idx, column=17, value=img.get("background_score", 0))
-            ws.cell(row=row_idx, column=18, value=img.get("edge_density", 0))
-            ws.cell(row=row_idx, column=19, value=img.get("edge_score", 0))
-            ws.cell(row=row_idx, column=20, value=img.get("product_fill_ratio", 0))
-            ws.cell(row=row_idx, column=21, value=img.get("fill_score", 0))
-            ws.cell(row=row_idx, column=22, value=img.get("overall_score", 0))
+            ws.cell(row=row_idx, column=2, value=result.product_data.product_name or "")
+            ws.cell(row=row_idx, column=3, value=producer or "")
+            ws.cell(row=row_idx, column=4, value=producer_artnr or "")
+            ws.cell(row=row_idx, column=5, value=img.get("image_name", ""))
+            ws.cell(row=row_idx, column=6, value=img.get("image_url", ""))
+            ws.cell(row=row_idx, column=7, value="Ja" if img.get("exists") else "Nei")
+            ws.cell(row=row_idx, column=8, value=img.get("file_size_kb", 0))
+            ws.cell(row=row_idx, column=9, value=img.get("width", 0))
+            ws.cell(row=row_idx, column=10, value=img.get("height", 0))
+            ws.cell(row=row_idx, column=11, value=img.get("aspect_ratio", 0))
+            ws.cell(row=row_idx, column=12, value=img.get("resolution_score", 0))
+            ws.cell(row=row_idx, column=13, value=img.get("blur_score_raw", 0))
+            ws.cell(row=row_idx, column=14, value=img.get("blur_score", 0))
+            ws.cell(row=row_idx, column=15, value=img.get("brightness_mean", 0))
+            ws.cell(row=row_idx, column=16, value=img.get("brightness_score", 0))
+            ws.cell(row=row_idx, column=17, value=img.get("contrast_std", 0))
+            ws.cell(row=row_idx, column=18, value=img.get("contrast_score", 0))
+            ws.cell(row=row_idx, column=19, value=img.get("white_bg_ratio", 0))
+            ws.cell(row=row_idx, column=20, value=img.get("background_score", 0))
+            ws.cell(row=row_idx, column=21, value=img.get("edge_density", 0))
+            ws.cell(row=row_idx, column=22, value=img.get("edge_score", 0))
+            ws.cell(row=row_idx, column=23, value=img.get("product_fill_ratio", 0))
+            ws.cell(row=row_idx, column=24, value=img.get("fill_score", 0))
+            ws.cell(row=row_idx, column=25, value=img.get("overall_score", 0))
             status = img.get("status", "MISSING")
-            status_cell = ws.cell(row=row_idx, column=23, value=status)
+            status_cell = ws.cell(row=row_idx, column=26, value=status)
             _apply_image_status_style(status_cell, status)
             issues = img.get("issues", [])
-            ws.cell(row=row_idx, column=24, value=", ".join(issues) if issues else "")
+            ws.cell(row=row_idx, column=27, value=", ".join(issues) if issues else "")
             row_idx += 1
 
     if row_idx == 2:
@@ -593,13 +664,23 @@ def _create_image_detail_sheet(ws, results: list[ProductAnalysis]) -> None:
     if row_idx > 2:
         ws.auto_filter.ref = f"A1:{get_column_letter(len(headers))}{row_idx - 1}"
 
-    # Add image suggestion summary section below main data
-    # Skip a row then add suggestion header
+    # ── Image Improvement Suggestions section ──
+    # Separate table below main data with producer info and concrete suggestions
     sugg_start = row_idx + 2
     sugg_headers = [
-        "Artikkelnummer", "Nåværende bilde-URL", "Nåværende status",
-        "Foreslått bilde-URL", "Bildekilde", "Kilde-URL",
-        "Konfidensgrad", "Begrunnelse",
+        "Artikkelnummer",
+        "Produktnavn",
+        "Produsent",
+        "Produsentens varenummer",
+        "Bildeproblem",
+        "Nåværende bilde-URL",
+        "Nåværende status",
+        "Foreslått bilde-URL",
+        "Foreslått bildekilde",
+        "Kilde-URL",
+        "Bildesøk confidence",
+        "Forbedringsforslag",
+        "Krever manuell vurdering",
     ]
     for col, h in enumerate(sugg_headers, 1):
         ws.cell(row=sugg_start, column=col, value=h)
@@ -607,17 +688,64 @@ def _create_image_detail_sheet(ws, results: list[ProductAnalysis]) -> None:
 
     sugg_row = sugg_start + 1
     for result in results:
+        iq = result.image_quality or {}
         img_sugg = result.image_suggestion
-        if not img_sugg:
+        img_status = iq.get("image_quality_status", "MISSING")
+        img_issues = iq.get("image_issue_summary", "")
+
+        # Include rows for ALL products with image problems (not just those with suggestions)
+        has_problem = img_status in ("MISSING", "FAIL", "REVIEW")
+        has_suggestion = img_sugg is not None
+
+        if not has_problem and not has_suggestion:
             continue
+
+        producer, producer_artnr = get_best_producer_info(
+            result.product_data, result.jeeves_data, result.manufacturer_lookup
+        )
+
+        # Determine the image problem description
+        if img_status == "MISSING":
+            problem_desc = "Bilde mangler"
+        elif img_status == "FAIL":
+            problem_desc = f"Bildekvalitet for lav: {img_issues}" if img_issues else "Bildekvalitet for lav"
+        elif img_status == "REVIEW":
+            problem_desc = f"Bilde bør gjennomgås: {img_issues}" if img_issues else "Bilde bør gjennomgås"
+        else:
+            problem_desc = img_issues or ""
+
+        # Build improvement suggestion text
+        if has_suggestion and img_sugg.suggested_image_url:
+            improvement = (
+                f"Bedre bilde funnet hos {img_sugg.suggested_source or 'ekstern kilde'}. "
+                f"URL: {img_sugg.suggested_image_url}"
+            )
+        elif has_problem:
+            # No image suggestion found, but there's a problem — suggest manual action
+            search_hint = ""
+            if producer and producer_artnr:
+                search_hint = f"Søk hos {producer} med varenummer {producer_artnr}"
+            elif producer:
+                search_hint = f"Søk hos {producer} med produktnavn"
+            else:
+                search_hint = "Kontakt produsent for produktbilde"
+            improvement = f"Krever manuell bildesøk. {search_hint}"
+        else:
+            improvement = ""
+
         _write_id_cell(ws, sugg_row, 1, result.article_number)
-        ws.cell(row=sugg_row, column=2, value=img_sugg.current_image_url or "")
-        ws.cell(row=sugg_row, column=3, value=img_sugg.current_image_status or "")
-        ws.cell(row=sugg_row, column=4, value=img_sugg.suggested_image_url or "")
-        ws.cell(row=sugg_row, column=5, value=img_sugg.suggested_source or "")
-        ws.cell(row=sugg_row, column=6, value=img_sugg.suggested_source_url or "")
-        ws.cell(row=sugg_row, column=7, value=img_sugg.confidence if img_sugg.confidence else 0)
-        ws.cell(row=sugg_row, column=8, value=img_sugg.reason or "")
+        ws.cell(row=sugg_row, column=2, value=result.product_data.product_name or "")
+        ws.cell(row=sugg_row, column=3, value=producer or "")
+        ws.cell(row=sugg_row, column=4, value=producer_artnr or "")
+        ws.cell(row=sugg_row, column=5, value=problem_desc)
+        ws.cell(row=sugg_row, column=6, value=(img_sugg.current_image_url if img_sugg else result.product_data.image_url) or "")
+        ws.cell(row=sugg_row, column=7, value=(img_sugg.current_image_status if img_sugg else img_status) or "")
+        ws.cell(row=sugg_row, column=8, value=(img_sugg.suggested_image_url if img_sugg else "") or "")
+        ws.cell(row=sugg_row, column=9, value=(img_sugg.suggested_source if img_sugg else "") or "")
+        ws.cell(row=sugg_row, column=10, value=(img_sugg.suggested_source_url if img_sugg else "") or "")
+        ws.cell(row=sugg_row, column=11, value=(img_sugg.confidence if img_sugg and img_sugg.confidence else 0))
+        ws.cell(row=sugg_row, column=12, value=improvement)
+        ws.cell(row=sugg_row, column=13, value="Ja" if not has_suggestion or (img_sugg and img_sugg.review_required) else "Nei")
         sugg_row += 1
 
 
@@ -1653,16 +1781,15 @@ def _is_material_change(current: str | None, suggested: str | None) -> bool:
 
 
 def _create_inriver_import_sheet(ws, results: list[ProductAnalysis]) -> None:
-    """Create the Inriver Import staging sheet.
+    """Create the Inriver Import staging sheet — a strict change-only export.
 
-    Only includes rows where at least one field has a genuine improvement.
-    Each field has an approval column (Godkjent/Ikke godkjent).
-    Export logic: a value is included in the import only if:
-    1. There is a suggested improvement
-    2. The suggestion is materially different from the current value
-    3. The approval column is set to 'Godkjent'
-
-    Unchanged values and empty placeholders are NOT exported.
+    Key rules:
+    - Only includes rows for products with at least one VALID proposed change
+    - Only fields with actual proposed changes get values in _forslag
+    - Fields without proposed changes are marked "ikke relevant" in _godkjent
+    - All suggestions are validated (no contact info, no other SKUs, no PDF noise)
+    - A row is NEVER included just because current data exists
+    - Empty/invalid/rejected suggestions are not exported
     """
     # Field definitions for the import sheet
     import_fields = [
@@ -1699,23 +1826,22 @@ def _create_inriver_import_sheet(ws, results: list[ProductAnalysis]) -> None:
         ws.cell(row=1, column=col, value=header)
     _style_header(ws, 1, len(headers))
 
-    # Style the approval columns differently
     approval_fill = PatternFill(start_color="FFF2CC", end_color="FFF2CC", fill_type="solid")
+    not_relevant_fill = PatternFill(start_color="F2F2F2", end_color="F2F2F2", fill_type="solid")
+    not_relevant_font = Font(color="808080", italic=True)
 
     now_str = datetime.now().strftime("%Y-%m-%d %H:%M")
-
     wrap_alignment = Alignment(wrap_text=True, vertical="top")
     top_alignment = Alignment(vertical="top")
 
-    # Only include rows where at least one field has a material improvement
     row_idx = 2
     for result in results:
         pd = result.product_data
+        sku = result.article_number
 
-        # Determine enrichment status
         enrichment_status, _review_req, comment = _determine_enrichment_status(result)
 
-        # Collect all sources for this product
+        # Collect sources
         sources = set()
         if pd.found_on_onemed:
             sources.add("onemed.no")
@@ -1730,58 +1856,79 @@ def _create_inriver_import_sheet(ws, results: list[ProductAnalysis]) -> None:
         if not sources:
             sources.add("eksisterende katalog")
 
-        # Check each field for material changes
-        has_any_change = False
-        field_data = []
+        # ── Evaluate each field: is there a valid, material change? ──
+        valid_change_count = 0
+        field_data = []  # (current_val, suggestion_or_empty, has_valid_change)
+
         for field_name, current_fn in import_fields:
             current_val = current_fn(result)
-            suggested_val = _get_suggestion_for_field(result, field_name) or ""
-            # For specification, also check AI missing_specifications
-            if field_name == "Spesifikasjon" and not suggested_val:
-                ai = result.ai_enrichment or {}
-                missing_specs = ai.get("missing_specifications", [])
-                if missing_specs:
-                    suggested_val = "Manglende: " + ", ".join(missing_specs)
-            is_material = _is_material_change(current_val, suggested_val)
-            # Only include the suggestion if it's a material change
-            display_suggestion = suggested_val if is_material else ""
-            approval_default = "Ikke godkjent"  # Conservative default
-            if is_material:
-                has_any_change = True
-            field_data.append((current_val, display_suggestion, approval_default))
+            raw_suggestion = _get_suggestion_for_field(result, field_name) or ""
 
-        # Skip products with no material changes — do not pollute the import sheet
-        if not has_any_change:
+            # Validate the suggestion before accepting it
+            is_valid_suggestion = False
+            display_suggestion = ""
+
+            if raw_suggestion:
+                # Validate: no contact info, no other SKUs, no PDF noise
+                ok, reject_reason = validate_suggestion_output(
+                    raw_suggestion, field_name, sku
+                )
+                if ok:
+                    # Check if it's a material change
+                    if _is_material_change(current_val, raw_suggestion):
+                        is_valid_suggestion = True
+                        display_suggestion = raw_suggestion
+                else:
+                    logger.debug(
+                        f"[inriver] Rejected suggestion for {sku}/{field_name}: {reject_reason}"
+                    )
+
+            if is_valid_suggestion:
+                valid_change_count += 1
+
+            field_data.append((current_val, display_suggestion, is_valid_suggestion))
+
+        # ── Skip if NO valid changes — do not pollute Inriver Import ──
+        if valid_change_count == 0:
             continue
 
         # Col 1: Artikkelnummer
-        _write_id_cell(ws, row_idx, 1, result.article_number, top_alignment)
+        _write_id_cell(ws, row_idx, 1, sku, top_alignment)
 
-        # Write field triplets (current, suggestion, approval)
+        # Write field triplets
         col = 2
-        for (current_val, display_suggestion, approval_default) in field_data:
+        for (current_val, display_suggestion, has_valid_change) in field_data:
+            # Current value
             ws.cell(row=row_idx, column=col, value=current_val).alignment = wrap_alignment
             col += 1
+
+            # Suggestion
             sugg_cell = ws.cell(row=row_idx, column=col, value=display_suggestion)
             sugg_cell.alignment = wrap_alignment
             if display_suggestion:
                 sugg_cell.fill = PatternFill(start_color="E2EFDA", end_color="E2EFDA", fill_type="solid")
             col += 1
-            approval_cell = ws.cell(row=row_idx, column=col, value=approval_default)
-            approval_cell.alignment = top_alignment
-            approval_cell.fill = approval_fill
+
+            # Approval — "ikke relevant" for unchanged fields, "Ikke godkjent" for changed
+            if has_valid_change:
+                approval_cell = ws.cell(row=row_idx, column=col, value="Ikke godkjent")
+                approval_cell.alignment = top_alignment
+                approval_cell.fill = approval_fill
+            else:
+                approval_cell = ws.cell(row=row_idx, column=col, value="ikke relevant")
+                approval_cell.alignment = top_alignment
+                approval_cell.fill = not_relevant_fill
+                approval_cell.font = not_relevant_font
             col += 1
 
         # Trailing columns
         ws.cell(row=row_idx, column=col, value=result.pdf_url or "").alignment = top_alignment; col += 1
         ws.cell(row=row_idx, column=col, value=pd.image_url or "").alignment = top_alignment; col += 1
-        # Quality Score
         score = result.total_score
         if result.ai_score and "overall_score" in result.ai_score:
             ai_score_val = result.ai_score["overall_score"]
             score = round(score * 0.4 + ai_score_val * 0.6, 1)
         ws.cell(row=row_idx, column=col, value=score).alignment = top_alignment; col += 1
-        # Enrichment_Status
         status_cell = ws.cell(row=row_idx, column=col, value=enrichment_status)
         status_cell.alignment = top_alignment
         if enrichment_status in INRIVER_STATUS_COLORS:
@@ -1795,17 +1942,13 @@ def _create_inriver_import_sheet(ws, results: list[ProductAnalysis]) -> None:
         row_idx += 1
 
     if row_idx == 2:
-        ws.cell(row=2, column=1, value="Ingen produkter med forbedringsforslag")
+        ws.cell(row=2, column=1, value="Ingen produkter med gyldige forbedringsforslag")
 
-    # Auto-size columns based on header length
     for col in range(1, len(headers) + 1):
         header_text = headers[col - 1]
         ws.column_dimensions[get_column_letter(col)].width = max(14, min(40, len(header_text) + 4))
 
-    # Freeze header row
     ws.freeze_panes = "A2"
-
-    # Enable auto-filter on all columns
     if row_idx > 2:
         ws.auto_filter.ref = f"A1:{get_column_letter(len(headers))}{row_idx - 1}"
 

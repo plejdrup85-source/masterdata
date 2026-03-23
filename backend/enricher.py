@@ -23,6 +23,17 @@ import logging
 import re
 from typing import Optional
 
+from backend.content_validator import (
+    clean_all_noise,
+    classify_text_as_description_candidate,
+    classify_text_as_spec_candidate,
+    detect_language,
+    normalize_for_webshop_description,
+    normalize_for_webshop_specification,
+    validate_no_contact_info,
+    validate_single_product_scope,
+    validate_suggestion_output,
+)
 from backend.description_cleaner import clean_description_source, validate_webshop_description
 from backend.models import (
     EnrichmentMatchStatus,
@@ -59,7 +70,9 @@ NORWEGIAN_PRODUCT_KEYWORDS = {
 }
 
 
-def _validate_suggestion_value(value: str, field_name: str) -> tuple[bool, str]:
+def _validate_suggestion_value(
+    value: str, field_name: str, current_sku: str = ""
+) -> tuple[bool, str]:
     """Validate that a suggestion value is suitable for its target field.
 
     Returns (is_valid, reason). If not valid, the suggestion should be
@@ -70,13 +83,27 @@ def _validate_suggestion_value(value: str, field_name: str) -> tuple[bool, str]:
 
     value = value.strip()
 
-    # ── Universal checks ──
+    # ── Universal checks via content_validator ──
+
+    # Contact info check (phone, email, address)
+    ok, reason = validate_no_contact_info(value)
+    if not ok:
+        return False, reason
+
+    # Multi-SKU check (only references to current product allowed)
+    if current_sku:
+        ok, reason = validate_single_product_scope(value, current_sku)
+        if not ok:
+            return False, reason
+
+    # Full output validation (PDF noise, variant tables, etc.)
+    if current_sku:
+        ok, reason = validate_suggestion_output(value, field_name, current_sku)
+        if not ok:
+            return False, reason
+
     # Fragment detection: looks genuinely truncated mid-sentence
-    # Short values (< 40 chars) are likely titles/labels — not truncated
-    # Only flag longer texts that end abruptly without punctuation AND look like
-    # they were cut from a larger sentence (contain spaces, commas, etc.)
     if len(value) > 40 and value[-1] not in ".!?)\"':;,–—0123456789%":
-        # Has sentence-like structure (multiple words with connectors)?
         has_sentence_structure = bool(re.search(r"\b(?:og|for|som|med|til|av|er|i|and|for|with|the|is)\b", value))
         if has_sentence_structure:
             return False, "Teksten ser ut til å være avkortet midt i en setning"
@@ -95,7 +122,6 @@ def _validate_suggestion_value(value: str, field_name: str) -> tuple[bool, str]:
         ]
         has_packaging = any(re.search(p, value) for p in packaging_indicators)
 
-        # Reject non-packaging content
         non_packaging = [
             r"(?i)(?:oppbevar|lagr)\w*\s+(?:tørt|kjølig|mørkt)",
             r"(?i)(?:brukes?\s+til|designed\s+for|intended\s+for|suitable\s+for)",
@@ -115,6 +141,20 @@ def _validate_suggestion_value(value: str, field_name: str) -> tuple[bool, str]:
             return False, "Produktnavnet er for langt — ser ut som en beskrivelse"
         if value.count(".") > 2:
             return False, "Produktnavnet inneholder flere setninger"
+
+    # ── Description: check if it's actually spec content ──
+    if field_name == "Beskrivelse":
+        spec_score = classify_text_as_spec_candidate(value)
+        desc_score = classify_text_as_description_candidate(value)
+        if spec_score > desc_score + 0.3:
+            return False, "Innholdet er teknisk/strukturert og passer bedre som spesifikasjon enn beskrivelse"
+
+    # ── Specification: check if it's actually description content ──
+    if field_name == "Spesifikasjon":
+        spec_score = classify_text_as_spec_candidate(value)
+        desc_score = classify_text_as_description_candidate(value)
+        if desc_score > spec_score + 0.3:
+            return False, "Innholdet er prosa/narrativt og passer bedre som beskrivelse enn spesifikasjon"
 
     return True, ""
 
@@ -232,38 +272,53 @@ def _enrich_product_name(
 
     current = product.product_name
 
+    sku = product.article_number
+
     # Source 1: PDF
     pdf_val, pdf_evidence, pdf_conf = _get_enrichment_value(er_by_field, "product_name")
     if pdf_val and pdf_val != current:
-        is_valid, reject_reason = _validate_suggestion_value(pdf_val, "Produktnavn")
+        # Clean noise before validation
+        pdf_val = clean_all_noise(pdf_val, sku)
+        is_valid, reject_reason = _validate_suggestion_value(pdf_val, "Produktnavn", sku)
         if not is_valid:
             logger.info(f"[enrich] Product name rejected: {reject_reason}")
         else:
+            # Check language
+            is_no, lang, lang_msg = _check_language(pdf_val)
+            rationale = f"Produktnavn hentet fra PDF-datablad. Kilde: {_get_enrichment_url(er_by_field, 'product_name') or 'PDF'}"
+            if not is_no:
+                rationale += f" | {lang_msg}"
             return EnrichmentSuggestion(
                 field_name="Produktnavn",
                 current_value=current,
                 suggested_value=pdf_val,
                 source=SOURCE_PDF,
                 source_url=_get_enrichment_url(er_by_field, "product_name"),
-                evidence=pdf_evidence,
-                confidence=pdf_conf,
-                review_required=pdf_conf < MIN_CONFIDENCE_AUTO,
+                evidence=rationale,
+                confidence=pdf_conf if is_no else min(pdf_conf, 0.55),
+                review_required=pdf_conf < MIN_CONFIDENCE_AUTO or not is_no,
             )
 
     # Source 2: Manufacturer
     if mfr and mfr.found and mfr.product_name and mfr.product_name != current:
-        is_valid, reject_reason = _validate_suggestion_value(mfr.product_name, "Produktnavn")
+        mfr_name = clean_all_noise(mfr.product_name, sku)
+        is_valid, reject_reason = _validate_suggestion_value(mfr_name, "Produktnavn", sku)
         if is_valid:
             conf = mfr.confidence * 0.9
+            is_no, lang, lang_msg = _check_language(mfr_name)
+            rationale = f"Produktnavn fra produsentens nettside ({mfr.source_url or 'ukjent URL'})"
+            if not is_no:
+                rationale += f" | {lang_msg}"
+                conf = min(conf, 0.55)
             return EnrichmentSuggestion(
                 field_name="Produktnavn",
                 current_value=current,
-                suggested_value=mfr.product_name,
+                suggested_value=mfr_name,
                 source=SOURCE_MANUFACTURER,
                 source_url=mfr.source_url,
-                evidence=f"Produsentens produktnavn: {mfr.product_name}",
+                evidence=rationale,
                 confidence=conf,
-                review_required=conf < MIN_CONFIDENCE_AUTO,
+                review_required=conf < MIN_CONFIDENCE_AUTO or not is_no,
             )
 
     return None
@@ -342,6 +397,7 @@ def _enrich_description(
         return None
 
     current = product.description
+    sku = product.article_number
 
     # Source 1: PDF description
     pdf_val, pdf_evidence, pdf_conf = _get_enrichment_value(er_by_field, "description")
@@ -356,10 +412,15 @@ def _enrich_description(
     best_evidence = None
     best_conf = 0.0
 
-    # Clean PDF text before using it — remove tables, metadata, variant lists
+    # Clean PDF text before using it — remove tables, metadata, variant lists, contact info
     if pdf_val:
+        # First apply content_validator cleaning (contact info, other SKUs, PDF noise)
+        pdf_val = clean_all_noise(pdf_val, sku)
+        # Then apply description-specific cleaning (table headers, variant blocks)
         cleaned_pdf = clean_description_source(pdf_val)
         if cleaned_pdf:
+            # Normalize for webshop
+            cleaned_pdf = normalize_for_webshop_description(cleaned_pdf)
             logger.debug(
                 f"[enrich] PDF description cleaned: {len(pdf_val)} → {len(cleaned_pdf)} chars"
             )
@@ -371,8 +432,7 @@ def _enrich_description(
             )
             pdf_val = None
 
-    # P1-1: Quality-based comparison instead of length-based.
-    # A shorter but well-structured description beats a longer noisy one.
+    # Quality-based comparison instead of length-based.
     if pdf_val and (not current or _description_quality_score(pdf_val) > _description_quality_score(current)):
         best_val = pdf_val
         best_source = SOURCE_PDF
@@ -380,11 +440,12 @@ def _enrich_description(
         best_evidence = pdf_evidence
         best_conf = pdf_conf
 
-    # Clean manufacturer description too
+    # Clean manufacturer description too — apply full noise removal
     if mfr_desc:
+        mfr_desc = clean_all_noise(mfr_desc, sku)
         cleaned_mfr = clean_description_source(mfr_desc)
         if cleaned_mfr:
-            mfr_desc = cleaned_mfr
+            mfr_desc = normalize_for_webshop_description(cleaned_mfr)
         else:
             mfr_desc = None
 
@@ -408,14 +469,14 @@ def _enrich_description(
                     current_value=current,
                     suggested_value=structured,
                     source=SOURCE_SPEC_STRUCTURING,
-                    evidence="Generert fra produktnavn og tekniske spesifikasjoner",
+                    evidence="Generert fra produktnavn og tekniske spesifikasjoner. Bør gjennomgås manuelt.",
                     confidence=0.55,
                     review_required=True,
                 )
         return None
 
-    # Validate basic suggestion quality
-    is_valid, reject_reason = _validate_suggestion_value(best_val, "Beskrivelse")
+    # Validate basic suggestion quality (incl. contact info, multi-SKU, etc.)
+    is_valid, reject_reason = _validate_suggestion_value(best_val, "Beskrivelse", sku)
     if not is_valid:
         logger.info(
             f"[enrich] Description suggestion rejected: {reject_reason} "
@@ -437,23 +498,27 @@ def _enrich_description(
             suggested_value=best_val,
             source=best_source,
             source_url=_get_enrichment_url(er_by_field, "description") if best_source == SOURCE_PDF else (mfr.source_url if mfr else None),
-            evidence=f"Kvalitetssjekk: {gate_reason}",
+            evidence=f"Kvalitetssjekk feilet: {gate_reason}. Krever manuell vurdering.",
             confidence=min(best_conf, 0.45),
             review_required=True,
         )
 
-    # If source is English, note translation needed
+    # Check language — detect Swedish, Danish, English
     review = best_conf < MIN_CONFIDENCE_AUTO
-    rationale = ""
-    if best_val and _looks_english(best_val):
-        best_source = f"{best_source} (oversettelse påkrevet)"
+    rationale_parts = []
+
+    is_no, lang, lang_msg = _check_language(best_val)
+    if not is_no:
         review = True
-        best_conf = min(best_conf, 0.65)
-        rationale = "Engelsk kildetekst — oversettelse påkrevet"
-    elif best_source == SOURCE_PDF:
-        rationale = "PDF-beskrivelse validert som komplett"
+        best_conf = min(best_conf, 0.55)
+        rationale_parts.append(lang_msg)
+
+    # Build detailed rationale
+    if best_source == SOURCE_PDF:
+        rationale_parts.insert(0, f"Beskrivelse hentet fra PDF-datablad ({best_url or 'PDF'})")
+        rationale_parts.append("Validert: ingen kontaktinfo, ingen andre artikkelnumre, egnet som nettbutikkbeskrivelse")
     elif best_source == SOURCE_MANUFACTURER:
-        rationale = "Produsentens beskrivelse brukt som supplement"
+        rationale_parts.insert(0, f"Beskrivelse fra produsentens nettside ({best_url or 'ukjent URL'})")
 
     suggestion = EnrichmentSuggestion(
         field_name="Beskrivelse",
@@ -461,12 +526,10 @@ def _enrich_description(
         suggested_value=best_val,
         source=best_source,
         source_url=best_url,
-        evidence=best_evidence,
+        evidence=" | ".join(rationale_parts) if rationale_parts else best_evidence,
         confidence=best_conf,
         review_required=review,
     )
-    if rationale:
-        suggestion = _add_rationale(suggestion, rationale)
     return suggestion
 
 
@@ -485,19 +548,32 @@ def _enrich_specification(
     current_specs = product.technical_details or {}
     new_specs = dict(current_specs)  # Start with what we have
     sources_used = []
+    sku = product.article_number
 
     # Source 1: PDF spec fields
-    for field_name, er in er_by_field.items():
-        if field_name.startswith("spec:") and er.suggested_value:
-            key = field_name[5:]
-            if key not in new_specs:
-                new_specs[key] = er.suggested_value
+    for field_name_key, er in er_by_field.items():
+        if field_name_key.startswith("spec:") and er.suggested_value:
+            key = field_name_key[5:]
+            val = er.suggested_value.strip()
+            # Clean the value — no contact info, no other SKUs
+            val = clean_all_noise(val, sku)
+            # Validate individual spec values
+            ok, _ = validate_no_contact_info(val)
+            if not ok:
+                logger.debug(f"[enrich] Spec value rejected (contact info): {key}={val[:40]}")
+                continue
+            if key not in new_specs and val:
+                new_specs[key] = val
                 sources_used.append(SOURCE_PDF)
 
     # Source 2: Manufacturer specs
     if mfr and mfr.found and mfr.specifications:
         for key, val in mfr.specifications.items():
-            if key not in new_specs:
+            val = clean_all_noise(val, sku) if val else ""
+            ok, _ = validate_no_contact_info(val)
+            if not ok:
+                continue
+            if key not in new_specs and val:
                 new_specs[key] = val
                 sources_used.append(SOURCE_MANUFACTURER)
 
@@ -506,13 +582,28 @@ def _enrich_specification(
     if not added_keys:
         return None
 
-    # Build structured spec text
+    # Build structured spec text and normalize for webshop
     spec_text = "; ".join(f"{k}: {v}" for k, v in new_specs.items())
+    spec_text = normalize_for_webshop_specification(spec_text)
+
+    # Final validation
+    is_valid, reject_reason = _validate_suggestion_value(spec_text, "Spesifikasjon", sku)
+    if not is_valid:
+        logger.info(f"[enrich] Specification rejected: {reject_reason}")
+        return None
+
     source = ", ".join(sorted(set(sources_used))) if sources_used else SOURCE_SPEC_STRUCTURING
     added_str = ", ".join(sorted(added_keys))
 
     # Confidence based on source count
     conf = 0.70 if SOURCE_PDF in sources_used else 0.60
+
+    # Check language of spec values
+    is_no, lang, lang_msg = _check_language(spec_text)
+    rationale = f"Nye spesifikasjoner lagt til: {added_str}. Kilde: {source}"
+    if not is_no:
+        rationale += f" | {lang_msg}"
+        conf = min(conf, 0.55)
 
     return EnrichmentSuggestion(
         field_name="Spesifikasjon",
@@ -522,9 +613,9 @@ def _enrich_specification(
         source_url=_get_enrichment_url(er_by_field, next(
             (f for f in er_by_field if f.startswith("spec:")), ""
         )),
-        evidence=f"Nye spesifikasjoner funnet: {added_str}",
+        evidence=rationale,
         confidence=conf,
-        review_required=conf < MIN_CONFIDENCE_AUTO,
+        review_required=conf < MIN_CONFIDENCE_AUTO or not is_no,
     )
 
 
@@ -558,7 +649,10 @@ def _enrich_category(
         ),
         suggested_value=suggested,
         source=SOURCE_SPEC_STRUCTURING,
-        evidence="Basert på produktnavn og spesifikasjoner",
+        evidence=(
+            f"Kategori utledet fra produktnavn '{product.product_name or ''}' "
+            f"og tekniske spesifikasjoner. Automatisk klassifisering — krever manuell verifisering."
+        ),
         confidence=0.50,
         review_required=True,  # Category inference always needs review
     )
@@ -582,29 +676,31 @@ def _enrich_packaging(
 
     current = product.packaging_info or product.packaging_unit
 
+    sku = product.article_number
+
     # Source 1: PDF packaging
     pdf_val, pdf_evidence, pdf_conf = _get_enrichment_value(er_by_field, "packaging_info")
     if pdf_val and pdf_val != current:
+        # Clean noise before validation
+        pdf_val = clean_all_noise(pdf_val, sku)
         # Validate that this is actual packaging content
-        is_valid, reject_reason = _validate_suggestion_value(pdf_val, "Pakningsinformasjon")
+        is_valid, reject_reason = _validate_suggestion_value(pdf_val, "Pakningsinformasjon", sku)
         if not is_valid:
             logger.info(
                 f"[enrich] Packaging suggestion rejected: {reject_reason} "
                 f"(value: {pdf_val[:80]})"
             )
             return None
-        return _add_rationale(
-            EnrichmentSuggestion(
-                field_name="Pakningsinformasjon",
-                current_value=current,
-                suggested_value=pdf_val,
-                source=SOURCE_PDF,
-                source_url=_get_enrichment_url(er_by_field, "packaging_info"),
-                evidence=pdf_evidence,
-                confidence=pdf_conf,
-                review_required=pdf_conf < MIN_CONFIDENCE_AUTO,
-            ),
-            "PDF pakningsdata validert",
+        source_url = _get_enrichment_url(er_by_field, "packaging_info")
+        return EnrichmentSuggestion(
+            field_name="Pakningsinformasjon",
+            current_value=current,
+            suggested_value=pdf_val,
+            source=SOURCE_PDF,
+            source_url=source_url,
+            evidence=f"Pakningsdata hentet fra PDF-datablad ({source_url or 'PDF'}). Validert som reell pakningsinformasjon.",
+            confidence=pdf_conf,
+            review_required=pdf_conf < MIN_CONFIDENCE_AUTO,
         )
 
     return None
@@ -622,20 +718,28 @@ def _enrich_manufacturer(
         return None
 
     current = product.manufacturer
+    sku = product.article_number
 
     # Source 1: PDF
     pdf_val, pdf_evidence, pdf_conf = _get_enrichment_value(er_by_field, "manufacturer")
     if pdf_val and pdf_val != current:
-        return EnrichmentSuggestion(
-            field_name="Produsent",
-            current_value=current,
-            suggested_value=pdf_val,
-            source=SOURCE_PDF,
-            source_url=_get_enrichment_url(er_by_field, "manufacturer"),
-            evidence=pdf_evidence,
-            confidence=pdf_conf,
-            review_required=pdf_conf < MIN_CONFIDENCE_AUTO,
-        )
+        # Clean — manufacturer name should not contain phone/email
+        pdf_val = clean_all_noise(pdf_val, sku).strip()
+        ok, reason = validate_no_contact_info(pdf_val)
+        if not ok:
+            logger.info(f"[enrich] Manufacturer name rejected (contact info): {pdf_val[:60]}")
+        elif pdf_val:
+            source_url = _get_enrichment_url(er_by_field, "manufacturer")
+            return EnrichmentSuggestion(
+                field_name="Produsent",
+                current_value=current,
+                suggested_value=pdf_val,
+                source=SOURCE_PDF,
+                source_url=source_url,
+                evidence=f"Produsent identifisert i PDF-datablad: '{pdf_val}'. Kilde: {source_url or 'PDF'}",
+                confidence=pdf_conf,
+                review_required=pdf_conf < MIN_CONFIDENCE_AUTO,
+            )
 
     # Source 2: Manufacturer lookup
     # If manufacturer lookup was done but manufacturer name itself is what we're
@@ -761,17 +865,17 @@ def _get_enrichment_url(
 
 def _looks_english(text: str) -> bool:
     """Quick check if text appears to be in English rather than Norwegian."""
-    if not text or len(text) < 20:
-        return False
-    english_words = {
-        "the", "and", "for", "with", "this", "that", "from", "are",
-        "is", "was", "has", "have", "will", "can", "use", "used",
-        "glove", "gloves", "bandage", "sterile", "non-sterile",
-        "disposable", "latex-free", "powder-free",
-    }
-    words = text.lower().split()
-    english_count = sum(1 for w in words if w in english_words)
-    return english_count >= 3 and english_count / max(len(words), 1) > 0.15
+    lang = detect_language(text)
+    return lang == "en"
+
+
+def _check_language(text: str) -> tuple[bool, str, str]:
+    """Check if text is in Norwegian. Uses content_validator.
+
+    Returns (is_norwegian, language_code, message).
+    """
+    from backend.content_validator import validate_language_is_norwegian
+    return validate_language_is_norwegian(text)
 
 
 def _build_description_from_specs(product: ProductData) -> Optional[str]:
