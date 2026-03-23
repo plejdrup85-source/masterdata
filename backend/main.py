@@ -109,55 +109,64 @@ async def preload_data():
         )
 
     # Pre-load sitemap XML and cached SKU→URL index on startup.
-    # This downloads ONE sitemap XML file and loads the cached SKU index from disk.
-    # It does NOT scan/crawl product pages — that only happens in discovery mode.
+    # Uses persistent cache — does NOT rebuild unless sitemap content has changed.
     try:
         import httpx
         async with httpx.AsyncClient() as client:
             await _load_sitemap(client)
-        logger.info("Sitemap index pre-loaded on startup (no page scanning)")
+        logger.info("Sitemap og indeks lastet ved oppstart")
     except Exception as e:
-        logger.warning(f"Failed to pre-load sitemap on startup: {e}")
+        logger.warning(f"Kunne ikke laste sitemap ved oppstart: {e}")
 
-    # Auto-start full index build if index coverage is low.
-    # This runs in the background and doesn't block startup.
+    # Check if full index build is needed — only if fingerprint says so.
+    # This prevents the 15-25 min rebuild that was triggered on every deploy.
     idx = get_index_stats()
     if idx["sitemap_url_count"] > 0 and idx["coverage_pct"] < 80:
-        logger.info(
-            f"SKU index coverage is {idx['coverage_pct']}% "
-            f"({idx['sku_index_count']}/{idx['sitemap_url_count']}). "
-            f"Starting background index build..."
+        # Check fingerprint before deciding to rebuild
+        from backend.index_fingerprint import should_rebuild_index
+        from backend.scraper import CACHE_DIR, _sitemap_urls, _sku_to_url, _checked_no_sku
+        needs_rebuild, reason = should_rebuild_index(
+            CACHE_DIR, _sitemap_urls, len(_sku_to_url), len(_checked_no_sku),
         )
+        if needs_rebuild:
+            logger.info(
+                f"Indeksdekning er {idx['coverage_pct']}% — {reason}. "
+                f"Starter bakgrunns-indeksering..."
+            )
 
-        async def _auto_build():
-            global _index_build_status, _index_build_task
-            _index_build_status = {
-                "status": "running",
-                "started_at": datetime.now().isoformat(),
-                "checked": 0, "total": 0, "new_indexed": 0,
-                "trigger": "auto_startup",
-            }
+            async def _auto_build():
+                global _index_build_status, _index_build_task
+                _index_build_status = {
+                    "status": "running",
+                    "started_at": datetime.now().isoformat(),
+                    "checked": 0, "total": 0, "new_indexed": 0,
+                    "trigger": "auto_startup",
+                }
 
-            async def _progress(checked, total, new_in_batch):
-                _index_build_status["checked"] = checked
-                _index_build_status["total"] = total
-                _index_build_status["new_indexed"] += new_in_batch
+                async def _progress(checked, total, new_in_batch):
+                    _index_build_status["checked"] = checked
+                    _index_build_status["total"] = total
+                    _index_build_status["new_indexed"] += new_in_batch
 
-            try:
-                result = await build_full_index(on_progress=_progress)
-                _index_build_status.update({"status": "completed", **result})
-                logger.info(f"Auto index build completed: {result}")
-            except Exception as exc:
-                _index_build_status["status"] = "failed"
-                _index_build_status["error"] = str(exc)
-                logger.error(f"Auto index build failed: {exc}")
+                try:
+                    result = await build_full_index(on_progress=_progress)
+                    _index_build_status.update({"status": "completed", **result})
+                    logger.info(f"Auto-indeksering fullført: {result}")
+                except Exception as exc:
+                    _index_build_status["status"] = "failed"
+                    _index_build_status["error"] = str(exc)
+                    logger.error(f"Auto-indeksering feilet: {exc}")
 
-        _index_build_task = asyncio.create_task(_auto_build())
-        _background_tasks.add(_index_build_task)
-        _index_build_task.add_done_callback(_background_tasks.discard)
+            _index_build_task = asyncio.create_task(_auto_build())
+            _background_tasks.add(_index_build_task)
+            _index_build_task.add_done_callback(_background_tasks.discard)
+        else:
+            logger.info(
+                f"Indeksdekning er {idx['coverage_pct']}%, men rebuild ikke nødvendig: {reason}"
+            )
     else:
         logger.info(
-            f"SKU index coverage OK: {idx['coverage_pct']}% "
+            f"Indeksdekning OK: {idx['coverage_pct']}% "
             f"({idx['sku_index_count']}/{idx['sitemap_url_count']})"
         )
 

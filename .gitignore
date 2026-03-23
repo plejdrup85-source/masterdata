@@ -9,4 +9,4 @@ dist/
 build/
 .venv/
 venv/
-data/history/
+data/
