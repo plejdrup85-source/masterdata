@@ -390,6 +390,15 @@ def validate_suggestion_output(
     if _VARIANT_TABLE_INDICATORS.search(text):
         return False, "Inneholder varianttabell-data"
 
+    # Information scope check: block family/packaging content for SKU-specific fields
+    if current_sku and field_name in ("Beskrivelse", "Spesifikasjon", "Produktnavn"):
+        from backend.information_scope import block_family_content_for_sku
+        should_block, block_reason, _scope = block_family_content_for_sku(
+            text, current_sku, field_name,
+        )
+        if should_block:
+            return False, block_reason
+
     return True, ""
 
 

@@ -35,6 +35,12 @@ from backend.content_validator import (
     validate_single_product_scope,
     validate_suggestion_output,
 )
+from backend.information_scope import (
+    block_family_content_for_sku,
+    adjust_confidence_for_scope,
+    detect_information_scope,
+    InformationScope,
+)
 from backend.description_cleaner import clean_description_source, validate_webshop_description
 from backend.models import (
     EnrichmentMatchStatus,
@@ -157,6 +163,14 @@ def _validate_suggestion_value(
         if desc_score > spec_score + 0.3:
             return False, "Innholdet er prosa/narrativt og passer bedre som beskrivelse enn spesifikasjon"
 
+    # ── Information scope check: block family/packaging content for SKU fields ──
+    if current_sku and field_name in ("Beskrivelse", "Spesifikasjon", "Produktnavn"):
+        should_block, block_reason, _scope = block_family_content_for_sku(
+            value, current_sku, field_name,
+        )
+        if should_block:
+            return False, block_reason
+
     return True, ""
 
 
@@ -205,6 +219,41 @@ def enrich_product(
     for field_label, fn in field_fns:
         suggestion = fn(product, analysis, er_by_field, manufacturer_data)
         if suggestion:
+            # ── Scope-based confidence adjustment ──
+            # If the suggested value looks like family/variant content,
+            # reduce confidence and mark for review.
+            if suggestion.suggested_value and field_label in (
+                "Produktnavn", "Beskrivelse", "Spesifikasjon",
+            ):
+                scope_result = detect_information_scope(
+                    suggestion.suggested_value,
+                    current_sku=product.article_number,
+                    product_name=product.product_name or "",
+                )
+                if scope_result.scope in (
+                    InformationScope.FAMILY,
+                    InformationScope.VARIANT,
+                    InformationScope.PACKAGING,
+                ):
+                    original_conf = suggestion.confidence
+                    suggestion.confidence = adjust_confidence_for_scope(
+                        suggestion.confidence, scope_result,
+                    )
+                    if suggestion.confidence < MIN_CONFIDENCE_AUTO:
+                        suggestion.review_required = True
+                    scope_note = (
+                        f"Scope: {scope_result.scope.value} "
+                        f"({scope_result.reason})"
+                    )
+                    if suggestion.evidence:
+                        suggestion.evidence = f"{suggestion.evidence} | {scope_note}"
+                    else:
+                        suggestion.evidence = scope_note
+                    logger.info(
+                        f"{tag} {field_label}: scope={scope_result.scope.value}, "
+                        f"confidence {original_conf:.2f}→{suggestion.confidence:.2f}"
+                    )
+
             suggestions.append(suggestion)
             logger.debug(
                 f"{tag} {field_label}: ENRICHED → "
