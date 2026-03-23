@@ -812,6 +812,10 @@ def analyze_product(
 
     analysis.field_analyses = field_analyses
 
+    # Calculate per-field confidence scores
+    from backend.field_confidence import calculate_all_field_confidences
+    calculate_all_field_confidences(field_analyses)
+
     # Log per-field status with reasons for missing/weak
     for fa in field_analyses:
         if fa.status in (QualityStatus.MISSING, QualityStatus.PROBABLE_ERROR):

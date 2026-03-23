@@ -359,13 +359,14 @@ def _create_detail_sheet(ws, results: list[ProductAnalysis]) -> None:
         "Felt",
         "Nåværende verdi",
         "Status",
+        "Confidence",
+        "Confidence-detaljer",
         "Statusårsak",
         "Verdikilde",
         "Nettside-verdi",
         "Jeeves-verdi",
         "Foreslått verdi",
         "Forslag-kilde",
-        "Confidence",
     ]
 
     for col, header in enumerate(headers, 1):
@@ -386,13 +387,23 @@ def _create_detail_sheet(ws, results: list[ProductAnalysis]) -> None:
             ws.cell(row=row_idx, column=6, value=fa.current_value or "")
             status_cell = ws.cell(row=row_idx, column=7, value=fa.status.value)
             _apply_status_style(status_cell, fa.status)
-            ws.cell(row=row_idx, column=8, value=fa.status_reason or fa.comment or "")
-            ws.cell(row=row_idx, column=9, value=fa.value_origin or fa.source or "")
-            ws.cell(row=row_idx, column=10, value=fa.website_value or "")
-            ws.cell(row=row_idx, column=11, value=fa.jeeves_value or "")
-            ws.cell(row=row_idx, column=12, value=fa.suggested_value or "")
-            ws.cell(row=row_idx, column=13, value=fa.suggestion_source or fa.source or "")
-            ws.cell(row=row_idx, column=14, value=fa.confidence if fa.confidence else "")
+            # Confidence score with color coding
+            conf_val = fa.confidence if fa.confidence is not None else ""
+            conf_cell = ws.cell(row=row_idx, column=8, value=conf_val)
+            if isinstance(conf_val, (int, float)):
+                if conf_val >= 75:
+                    conf_cell.font = Font(color="006100")
+                elif conf_val >= 50:
+                    conf_cell.font = Font(color="9C6500")
+                else:
+                    conf_cell.font = Font(color="9C0006", bold=True)
+            ws.cell(row=row_idx, column=9, value=fa.confidence_details or "")
+            ws.cell(row=row_idx, column=10, value=fa.status_reason or fa.comment or "")
+            ws.cell(row=row_idx, column=11, value=fa.value_origin or fa.source or "")
+            ws.cell(row=row_idx, column=12, value=fa.website_value or "")
+            ws.cell(row=row_idx, column=13, value=fa.jeeves_value or "")
+            ws.cell(row=row_idx, column=14, value=fa.suggested_value or "")
+            ws.cell(row=row_idx, column=15, value=fa.suggestion_source or fa.source or "")
             row_idx += 1
 
     for col in range(1, len(headers) + 1):
@@ -1916,11 +1927,20 @@ def _evaluate_inriver_row(
     field_evaluations = []
     valid_change_count = 0
 
+    # Build a lookup of field confidence scores from the analysis
+    field_confidence_map = {}
+    for fa in result.field_analyses:
+        if fa.confidence is not None:
+            field_confidence_map[fa.field_name] = fa.confidence
+
     for field_name, current_fn in import_fields:
         current_val = current_fn(result)
 
         # Get the best suggestion with confidence
         raw_suggestion, confidence, source = _get_suggestion_with_confidence(result, field_name)
+
+        # Get the field's own confidence from the analyzer
+        field_conf = field_confidence_map.get(field_name, None)
 
         eval_entry = {
             "field_name": field_name,
@@ -1929,6 +1949,7 @@ def _evaluate_inriver_row(
             "is_changed": False,
             "source": source,
             "confidence": confidence,
+            "field_confidence": field_conf,
             "reject_reason": "",
         }
 

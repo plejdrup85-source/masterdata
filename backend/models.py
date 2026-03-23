@@ -151,7 +151,8 @@ class FieldAnalysis(BaseModel):
     current_value: Optional[str] = None
     suggested_value: Optional[str] = None
     source: Optional[str] = None
-    confidence: Optional[float] = None
+    confidence: Optional[float] = None          # 0-100 composite confidence score
+    confidence_details: Optional[str] = None    # Human-readable breakdown of score components
     status: QualityStatus = QualityStatus.OK
     comment: Optional[str] = None
     # P1 FIX: Traceability fields — explain WHY each result exists
