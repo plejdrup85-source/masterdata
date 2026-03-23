@@ -990,6 +990,85 @@ async def download_result(
     )
 
 
+@app.get("/api/results/{job_id}/filter-counts")
+async def get_filter_counts_endpoint(job_id: str):
+    """Get available filter options with counts for the current job results."""
+    job = jobs.get(job_id)
+    if not job:
+        raise HTTPException(404, "Jobb ikke funnet")
+    if job.status != JobStatus.COMPLETED:
+        raise HTTPException(400, "Analysen er ikke fullført enda")
+
+    from backend.batch_filters import get_filter_counts, AVAILABLE_FILTERS
+    counts = get_filter_counts(job.results)
+    # Include filter metadata for UI
+    filter_meta = {
+        k: {"label": v["label"], "takes_value": v.get("takes_value", False),
+            "options": v.get("options")}
+        for k, v in AVAILABLE_FILTERS.items()
+    }
+    return {"counts": counts, "filters": filter_meta, "total": len(job.results)}
+
+
+@app.get("/api/download/{job_id}/filtered")
+async def download_filtered(
+    job_id: str,
+    request: Request,
+):
+    """Download a filtered Excel export based on query parameters.
+
+    Accepts any combination of filter parameters as query string:
+      ?webshop_status=Ikke klar&priority=Høy
+      ?image_problem=1&quick_wins=1
+      ?manufacturer=Ansell&field_problem=Beskrivelse
+      ?min_priority_score=50
+
+    Boolean filters use any truthy value (1, true, yes).
+    Multiple filters are combined with AND logic.
+    """
+    job = jobs.get(job_id)
+    if not job:
+        raise HTTPException(404, "Jobb ikke funnet")
+    if job.status != JobStatus.COMPLETED:
+        raise HTTPException(400, "Analysen er ikke fullført enda")
+
+    from backend.batch_filters import apply_filters, AVAILABLE_FILTERS
+
+    # Parse filters from query parameters
+    filters = {}
+    for param, value in request.query_params.items():
+        if param in AVAILABLE_FILTERS:
+            spec = AVAILABLE_FILTERS[param]
+            if spec.get("takes_value"):
+                filters[param] = value
+            elif value.lower() in ("1", "true", "yes", "ja"):
+                filters[param] = ""
+
+    if not filters:
+        raise HTTPException(400, "Ingen filtre angitt. Bruk standard nedlasting.")
+
+    filtered_results = apply_filters(job.results, filters)
+    if not filtered_results:
+        filter_desc = ", ".join(f"{k}={v}" for k, v in filters.items())
+        raise HTTPException(400, f"Ingen produkter matcher filtrene: {filter_desc}")
+
+    timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+    filter_tag = "_".join(filters.keys())[:50]
+    filename = f"masterdata_filtrert_{filter_tag}_{job_id}_{timestamp}.xlsx"
+    filepath = str(OUTPUT_DIR / filename)
+    create_output_excel(
+        filtered_results, filepath,
+        analysis_mode=job.analysis_mode, focus_areas=job.focus_areas,
+    )
+
+    download_name = f"masterdata_{filter_tag}_{job_id}.xlsx"
+    return FileResponse(
+        filepath,
+        filename=download_name,
+        media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+    )
+
+
 @app.get("/api/results/{job_id}")
 async def get_results(job_id: str):
     """Get analysis results as JSON."""
@@ -1079,6 +1158,13 @@ async def get_results(job_id: str):
                     }
                     for fa in r.field_analyses
                 ],
+                # Webshop readiness
+                "webshop_status": r.webshop_status,
+                "webshop_missing": r.webshop_missing,
+                # Priority scoring
+                "priority_score": r.priority_score,
+                "priority_label": r.priority_label,
+                "priority_reasons": r.priority_reasons,
             }
             for r in job.results
         ],

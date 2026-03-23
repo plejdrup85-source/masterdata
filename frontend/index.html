@@ -909,6 +909,7 @@
                 <div class="actions">
                     <button class="btn btn-success" id="downloadBtn">Last ned Excel-rapport</button>
                     <button class="btn" id="downloadQuickWinsBtn" style="background:#059669;color:#fff;font-size:0.85rem" title="Eksporter kun høy-confidence, lav-risiko forslag">Quick Wins</button>
+                    <button class="btn" id="downloadFilteredBtn" style="background:#2563eb;color:#fff;font-size:0.85rem;display:none" title="Eksporter kun filtrerte produkter">Eksporter filtrerte (<span id="filteredExportCount">0</span>)</button>
                     <button class="btn btn-primary" id="newAnalysisBtn">Ny analyse</button>
                     <button class="btn" id="handoffToFamilyBtn" style="background:#7c3aed;color:#fff;font-size:0.85rem" onclick="handoffToRelationshipModule()">Analyser produktfamilier for disse artiklene</button>
                 </div>
@@ -927,12 +928,53 @@
                         <input type="checkbox" id="thresholdExportOnly"> Eksporter kun filtrerte
                     </label>
                 </div>
+                <!-- Batch Filter Bar -->
+                <div id="batchFilterBar" style="display:flex;align-items:center;gap:0.5rem;margin-bottom:0.75rem;padding:0.5rem 0.75rem;background:var(--bg);border-radius:6px;border:1px solid var(--border);flex-wrap:wrap">
+                    <span style="font-size:0.82rem;font-weight:600;white-space:nowrap;margin-right:0.25rem">Filtrer:</span>
+                    <select id="filterWebshop" style="font-size:0.8rem;padding:0.2rem 0.4rem;border:1px solid var(--border);border-radius:4px;background:#fff">
+                        <option value="">Nettbutikk-status</option>
+                        <option value="Ikke klar">Ikke klar</option>
+                        <option value="Delvis klar">Delvis klar</option>
+                        <option value="Klar">Klar</option>
+                    </select>
+                    <select id="filterPriority" style="font-size:0.8rem;padding:0.2rem 0.4rem;border:1px solid var(--border);border-radius:4px;background:#fff">
+                        <option value="">Prioritet</option>
+                        <option value="Høy">Høy</option>
+                        <option value="Middels">Middels</option>
+                        <option value="Lav">Lav</option>
+                    </select>
+                    <select id="filterField" style="font-size:0.8rem;padding:0.2rem 0.4rem;border:1px solid var(--border);border-radius:4px;background:#fff">
+                        <option value="">Felt med problem</option>
+                        <option value="Produktnavn">Produktnavn</option>
+                        <option value="Beskrivelse">Beskrivelse</option>
+                        <option value="Spesifikasjon">Spesifikasjon</option>
+                        <option value="Produsent">Produsent</option>
+                        <option value="Produsentens varenummer">Prod.varenr</option>
+                        <option value="Kategori">Kategori</option>
+                        <option value="Pakningsinformasjon">Pakning</option>
+                    </select>
+                    <label style="font-size:0.78rem;white-space:nowrap;cursor:pointer" title="Kun produkter med bildeproblemer">
+                        <input type="checkbox" id="filterImageProblem"> Bildeproblem
+                    </label>
+                    <label style="font-size:0.78rem;white-space:nowrap;cursor:pointer" title="Kun produkter med quick wins">
+                        <input type="checkbox" id="filterQuickWins"> Quick wins
+                    </label>
+                    <label style="font-size:0.78rem;white-space:nowrap;cursor:pointer" title="Kun produkter med høy-confidence forslag">
+                        <input type="checkbox" id="filterHighConf"> Høy confidence
+                    </label>
+                    <label style="font-size:0.78rem;white-space:nowrap;cursor:pointer" title="Kun produkter som mangler produsentens varenummer">
+                        <input type="checkbox" id="filterMissingArtno"> Mangler prod.varenr
+                    </label>
+                    <span id="batchFilterCount" style="font-size:0.78rem;color:var(--text-muted);margin-left:auto"></span>
+                    <button id="clearFiltersBtn" style="font-size:0.75rem;padding:0.15rem 0.5rem;border:1px solid var(--border);border-radius:4px;background:#fff;cursor:pointer;display:none" title="Fjern alle filtre">Nullstill</button>
+                </div>
                 <div style="overflow-x:auto">
                     <table class="results-table">
                         <thead>
                             <tr>
                                 <th>Artikkelnr</th>
                                 <th>Produktnavn</th>
+                                <th>Nettbutikk</th>
                                 <th>Prioritet</th>
                                 <th>Score</th>
                                 <th>AI Score</th>
@@ -1869,6 +1911,147 @@
             }
         }
 
+        // ── Batch filters ──
+        const batchFilterEls = {
+            webshop: document.getElementById('filterWebshop'),
+            priority: document.getElementById('filterPriority'),
+            field: document.getElementById('filterField'),
+            imageProblem: document.getElementById('filterImageProblem'),
+            quickWins: document.getElementById('filterQuickWins'),
+            highConf: document.getElementById('filterHighConf'),
+            missingArtno: document.getElementById('filterMissingArtno'),
+        };
+        const clearFiltersBtn = document.getElementById('clearFiltersBtn');
+        const downloadFilteredBtn = document.getElementById('downloadFilteredBtn');
+
+        function getActiveFilters() {
+            const filters = {};
+            if (batchFilterEls.webshop.value) filters.webshop_status = batchFilterEls.webshop.value;
+            if (batchFilterEls.priority.value) filters.priority = batchFilterEls.priority.value;
+            if (batchFilterEls.field.value) filters.field_problem = batchFilterEls.field.value;
+            if (batchFilterEls.imageProblem.checked) filters.image_problem = '1';
+            if (batchFilterEls.quickWins.checked) filters.quick_wins = '1';
+            if (batchFilterEls.highConf.checked) filters.high_confidence = '1';
+            if (batchFilterEls.missingArtno.checked) filters.missing_mfr_artno = '1';
+            return filters;
+        }
+
+        function applyBatchFilters() {
+            if (!allResultsData.length) return;
+            const filters = getActiveFilters();
+            const hasFilters = Object.keys(filters).length > 0;
+            clearFiltersBtn.style.display = hasFilters ? '' : 'none';
+            downloadFilteredBtn.style.display = hasFilters ? '' : 'none';
+
+            const rows = document.querySelectorAll('#resultsBody tr.expandable');
+            const details = document.querySelectorAll('#resultsBody tr.detail-row');
+            let shown = 0;
+
+            rows.forEach((row, i) => {
+                const r = allResultsData[i];
+                if (!r) return;
+
+                let visible = true;
+                if (hasFilters) {
+                    // Client-side filtering to match what the server will do
+                    if (filters.webshop_status && (r.webshop_status || '') !== filters.webshop_status) visible = false;
+                    if (filters.priority && (r.priority_label || '') !== filters.priority) visible = false;
+                    if (filters.field_problem && visible) {
+                        const fa = (r.field_analyses || []).find(f => f.field_name === filters.field_problem);
+                        if (!fa || fa.status === 'OK' || fa.status === 'Sterk') visible = false;
+                    }
+                    if (filters.image_problem && visible) {
+                        const iq = r.image_quality || {};
+                        const imgSt = iq.status || 'MISSING';
+                        const imgCnt = iq.count || 0;
+                        if (imgSt === 'PASS' && imgCnt > 0) visible = false;
+                    }
+                    if (filters.quick_wins && visible) {
+                        // Approximate: check for high-confidence suggestions
+                        const es = r.enrichment_suggestions || [];
+                        const hasQw = es.some(s => s.confidence >= 0.75 && s.suggested_value && !s.review_required);
+                        if (!hasQw) visible = false;
+                    }
+                    if (filters.high_confidence && visible) {
+                        const es = r.enrichment_suggestions || [];
+                        if (!es.some(s => s.confidence >= 0.75 && s.suggested_value)) visible = false;
+                    }
+                    if (filters.missing_mfr_artno && visible) {
+                        const hasMfr = !!(r.manufacturer);
+                        const fa = (r.field_analyses || []).find(f => f.field_name === 'Produsentens varenummer');
+                        const hasArtno = fa && fa.current_value && fa.current_value.trim();
+                        if (!hasMfr || hasArtno) visible = false;
+                    }
+                }
+
+                // Also respect threshold filter
+                const threshEnabled = document.getElementById('thresholdEnabled').checked;
+                if (threshEnabled && visible) {
+                    const threshold = parseInt(document.getElementById('thresholdValue').value) || 70;
+                    const areaScore = r.ai_score?.area_scores?.overall_score;
+                    const effectiveScore = areaScore !== undefined ? areaScore : r.score;
+                    if (effectiveScore >= threshold) visible = false;
+                }
+
+                row.style.display = visible ? '' : 'none';
+                if (details[i]) details[i].style.display = 'none';
+                if (visible) shown++;
+            });
+
+            const countEl = document.getElementById('batchFilterCount');
+            if (hasFilters) {
+                countEl.textContent = `${shown} av ${rows.length} produkter`;
+                document.getElementById('filteredExportCount').textContent = shown;
+            } else {
+                countEl.textContent = '';
+            }
+            // Update threshold count too
+            if (!hasFilters) applyThresholdFilter();
+        }
+
+        // Attach listeners to all filter controls
+        Object.values(batchFilterEls).forEach(el => {
+            el.addEventListener('change', applyBatchFilters);
+        });
+
+        clearFiltersBtn.addEventListener('click', () => {
+            batchFilterEls.webshop.value = '';
+            batchFilterEls.priority.value = '';
+            batchFilterEls.field.value = '';
+            batchFilterEls.imageProblem.checked = false;
+            batchFilterEls.quickWins.checked = false;
+            batchFilterEls.highConf.checked = false;
+            batchFilterEls.missingArtno.checked = false;
+            applyBatchFilters();
+        });
+
+        // Filtered export button
+        downloadFilteredBtn.addEventListener('click', async () => {
+            const filters = getActiveFilters();
+            if (!Object.keys(filters).length) return;
+            try {
+                const params = new URLSearchParams(filters).toString();
+                const resp = await fetch(`${API_BASE}/api/download/${currentJobId}/filtered?${params}`);
+                if (!resp.ok) {
+                    const err = await resp.json().catch(() => ({}));
+                    alert(err.detail || 'Eksport feilet');
+                    return;
+                }
+                const blob = await resp.blob();
+                const url = URL.createObjectURL(blob);
+                const a = document.createElement('a');
+                a.href = url;
+                const filterTag = Object.keys(filters).join('_');
+                a.download = `masterdata_${filterTag}_${currentJobId}.xlsx`;
+                document.body.appendChild(a);
+                a.click();
+                document.body.removeChild(a);
+                URL.revokeObjectURL(url);
+            } catch (e) {
+                alert('Eksportfeil: ' + e.message);
+            }
+        });
+
         function setQaSource(mode) {
             qaSourceMode = mode;
             document.querySelectorAll('.qa-source-btn').forEach(b => {
@@ -2450,16 +2633,24 @@
                         aiDetailHtml += '</div>';
                     }
 
-                    // Priority badge
+                    // Webshop status badge
+                    const wsColors = {'Klar':'#16a34a','Delvis klar':'#d97706','Ikke klar':'#dc2626'};
+                    const wsBg = {'Klar':'#f0fdf4','Delvis klar':'#fffbeb','Ikke klar':'#fef2f2'};
+                    const ws = r.webshop_status || '';
+                    const wsBadge = ws ? `<span style="display:inline-block;padding:0.15rem 0.5rem;border-radius:4px;font-size:0.72rem;font-weight:600;color:${wsColors[ws]||'#64748b'};background:${wsBg[ws]||'#f1f5f9'}" title="${escapeHtml(r.webshop_missing || '')}">${escapeHtml(ws)}</span>` : '-';
+
+                    // Priority badge — use priority_label from our scoring if available, else AI priority_level
                     const priorityColors = {'Kritisk':'#dc2626','Høy':'#ea580c','Middels':'#d97706','Lav':'#16a34a'};
                     const priorityBg = {'Kritisk':'#fef2f2','Høy':'#fff7ed','Middels':'#fffbeb','Lav':'#f0fdf4'};
-                    const pl = r.priority_level || '';
-                    const priorityBadge = pl ? `<span style="display:inline-block;padding:0.15rem 0.5rem;border-radius:4px;font-size:0.75rem;font-weight:600;color:${priorityColors[pl]||'#64748b'};background:${priorityBg[pl]||'#f1f5f9'}">${escapeHtml(pl)}</span>` : '-';
+                    const pl = r.priority_label || r.priority_level || '';
+                    const prioScoreText = r.priority_score !== null && r.priority_score !== undefined ? ` (${r.priority_score})` : '';
+                    const priorityBadge = pl ? `<span style="display:inline-block;padding:0.15rem 0.5rem;border-radius:4px;font-size:0.72rem;font-weight:600;color:${priorityColors[pl]||'#64748b'};background:${priorityBg[pl]||'#f1f5f9'}" title="${escapeHtml(r.priority_reasons || '')}">${escapeHtml(pl)}${prioScoreText}</span>` : '-';
 
                     return `
                         <tr class="expandable" data-idx="${idx}" onclick="toggleDetail(${idx})">
                             <td>${escapeHtml(r.article_number)}</td>
                             <td title="${escapeHtml(r.product_name || '')}">${escapeHtml(r.product_name || '-')}</td>
+                            <td>${wsBadge}</td>
                             <td>${priorityBadge}</td>
                             <td>${r.score}%</td>
                             <td>${aiScore !== null ? `<span class="status-badge ${aiScoreClass}">${aiScoreDisplay}</span>` : '<span style="color:var(--text-muted)">-</span>'}</td>
@@ -2468,7 +2659,7 @@
                             <td title="${escapeHtml(r.why_low || r.comment || '')}" style="max-width:250px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;font-size:0.8rem;color:${r.why_low ? '#dc2626' : 'var(--text-muted)'}">${escapeHtml(r.why_low || r.comment || '-')}</td>
                         </tr>
                         <tr class="detail-row" id="detail-${idx}">
-                            <td colspan="8">
+                            <td colspan="9">
                                 <div class="detail-content">
                                     <h4>Feltanalyse for ${escapeHtml(r.article_number)}</h4>
                                     <div class="field-grid">
