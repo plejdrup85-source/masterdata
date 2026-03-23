@@ -152,6 +152,10 @@ def create_output_excel(
         ws_overview = wb.create_sheet("Oversikt")
         _create_overview_sheet(ws_overview, results)
 
+        # Human-readable explanation sheet
+        ws_explain = wb.create_sheet("Forklaring")
+        _create_explanation_sheet(ws_explain, results)
+
         ws_detail = wb.create_sheet("Feltanalyse")
         _create_detail_sheet(ws_detail, results)
 
@@ -297,6 +301,7 @@ def _create_overview_sheet(ws, results: list[ProductAnalysis]) -> None:
         "Krever produsentkontakt",
         "Produkt-URL",
         "PDF-URL",
+        "Forklaring",
     ]
 
     for col, header in enumerate(headers, 1):
@@ -404,12 +409,73 @@ def _create_overview_sheet(ws, results: list[ProductAnalysis]) -> None:
         ws.cell(row=row_idx, column=27, value="Ja" if result.requires_manufacturer_contact else "Nei")
         ws.cell(row=row_idx, column=28, value=pd.product_url or "")
         ws.cell(row=row_idx, column=29, value=result.pdf_url or "")
+        ws.cell(row=row_idx, column=30, value=result.human_summary or "").alignment = Alignment(wrap_text=True)
 
     for col in range(1, len(headers) + 1):
         ws.column_dimensions[get_column_letter(col)].width = max(15, len(headers[col - 1]) + 5)
 
     ws.freeze_panes = "A2"
     ws.auto_filter.ref = f"A1:{get_column_letter(len(headers))}{len(results) + 1}"
+
+
+def _create_explanation_sheet(ws, results: list[ProductAnalysis]) -> None:
+    """Create human-readable explanation sheet — plain language product summaries.
+
+    Each row is one product with columns:
+    Artikkelnummer | Produktnavn | Helhetsvurdering | Hva er bra | Hva er problemet |
+    Hva vi foreslår | Trenger manuell vurdering | Neste steg | Tillitsnivå
+    """
+    from backend.human_explainer import explain_product_like_a_human
+
+    headers = [
+        "Artikkelnummer",
+        "Produktnavn",
+        "Helhetsvurdering",
+        "Hva er bra",
+        "Hva er problemet",
+        "Hva vi foreslår",
+        "Trenger manuell vurdering",
+        "Neste steg",
+        "Tillitsnivå",
+    ]
+    top_align = Alignment(vertical="top", wrap_text=True)
+
+    for col_idx, header in enumerate(headers, 1):
+        cell = ws.cell(row=1, column=col_idx, value=header)
+        _style_header(cell)
+
+    # Sort by priority (highest first)
+    sorted_results = sorted(results, key=lambda r: -(r.priority_score or 0))
+
+    for row_idx, result in enumerate(sorted_results, 2):
+        explanation = explain_product_like_a_human(result)
+
+        _write_id_cell(ws, row_idx, 1, result.article_number, alignment=top_align)
+        ws.cell(row=row_idx, column=2, value=explanation.product_name).alignment = top_align
+        ws.cell(row=row_idx, column=3, value=explanation.overall_verdict).alignment = top_align
+        ws.cell(row=row_idx, column=4, value="\n".join(explanation.whats_good) if explanation.whats_good else "—").alignment = top_align
+        ws.cell(row=row_idx, column=5, value="\n".join(explanation.whats_wrong) if explanation.whats_wrong else "—").alignment = top_align
+        ws.cell(row=row_idx, column=6, value="\n".join(explanation.suggestions) if explanation.suggestions else "—").alignment = top_align
+        ws.cell(row=row_idx, column=7, value="\n".join(explanation.needs_manual_review) if explanation.needs_manual_review else "—").alignment = top_align
+        ws.cell(row=row_idx, column=8, value="\n".join(explanation.next_steps) if explanation.next_steps else "—").alignment = top_align
+        ws.cell(row=row_idx, column=9, value=explanation.confidence_note or "—").alignment = top_align
+
+        # Color the verdict cell based on priority
+        verdict_cell = ws.cell(row=row_idx, column=3)
+        if result.priority_label == "Høy":
+            verdict_cell.fill = PatternFill(start_color="FFC7CE", end_color="FFC7CE", fill_type="solid")
+        elif result.priority_label == "Middels":
+            verdict_cell.fill = PatternFill(start_color="FFEB9C", end_color="FFEB9C", fill_type="solid")
+        elif result.webshop_status == "Klar":
+            verdict_cell.fill = PatternFill(start_color="C6EFCE", end_color="C6EFCE", fill_type="solid")
+
+    # Column widths
+    col_widths = [16, 30, 40, 35, 35, 40, 35, 35, 30]
+    for col_idx, width in enumerate(col_widths, 1):
+        ws.column_dimensions[get_column_letter(col_idx)].width = width
+
+    ws.freeze_panes = "A2"
+    ws.auto_filter.ref = f"A1:{get_column_letter(len(headers))}{len(sorted_results) + 1}"
 
 
 def _create_detail_sheet(ws, results: list[ProductAnalysis]) -> None:

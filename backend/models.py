@@ -307,6 +307,8 @@ class ProductAnalysis(BaseModel):
     category_status: Optional[str] = None           # OK / SHOULD_SIMPLIFY / ATTRIBUTE_AS_CATEGORY / etc.
     category_suggestion: Optional[str] = None       # Suggested simplified category path
     category_summary: Optional[str] = None          # Norwegian summary
+    # Human-readable explanation (populated by human_explainer module)
+    human_summary: Optional[str] = None             # Plain-language one-line summary
     # Priority scoring (populated by priority_scoring module)
     priority_score: Optional[int] = None            # 0-100, higher = fix sooner
     priority_label: Optional[str] = None            # "Høy" / "Middels" / "Lav"

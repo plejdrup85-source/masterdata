@@ -1158,6 +1158,37 @@ async def get_low_quality_patterns():
     return {"patterns": patterns}
 
 
+@app.get("/api/results/{job_id}/explain/{article_number}")
+async def explain_product(job_id: str, article_number: str):
+    """Get a detailed human-readable explanation for a single product.
+
+    Returns plain-language summary of what's good, what's wrong,
+    suggestions, manual review needs, and recommended next steps.
+    """
+    job = jobs.get(job_id)
+    if not job or job.status != JobStatus.COMPLETED:
+        raise HTTPException(404, "Jobb ikke funnet eller ikke fullført")
+
+    from backend.human_explainer import explain_product_like_a_human
+
+    for r in job.results:
+        if r.article_number == article_number:
+            explanation = explain_product_like_a_human(r)
+            return {
+                "article_number": explanation.article_number,
+                "product_name": explanation.product_name,
+                "overall_verdict": explanation.overall_verdict,
+                "confidence_note": explanation.confidence_note,
+                "whats_good": explanation.whats_good,
+                "whats_wrong": explanation.whats_wrong,
+                "suggestions": explanation.suggestions,
+                "needs_manual_review": explanation.needs_manual_review,
+                "next_steps": explanation.next_steps,
+            }
+
+    raise HTTPException(404, f"Produkt {article_number} ikke funnet")
+
+
 @app.get("/api/results/{job_id}/category-analysis")
 async def get_category_analysis(job_id: str):
     """Get aggregate category structure analysis for a completed job.
@@ -1519,6 +1550,8 @@ async def get_results(job_id: str):
                 "category_status": r.category_status,
                 "category_suggestion": r.category_suggestion,
                 "category_summary": r.category_summary,
+                # Human-readable explanation
+                "human_summary": r.human_summary,
             }
             for r in job.results
         ],
@@ -3361,6 +3394,10 @@ async def _run_analysis(
                     analysis.priority_score = priority.score
                     analysis.priority_label = priority.label
                     analysis.priority_reasons = "; ".join(priority.reasons) if priority.reasons else ""
+
+                    # Generate human-readable summary
+                    from backend.human_explainer import build_human_readable_summary
+                    analysis.human_summary = build_human_readable_summary(analysis)
 
                     # Stamp analysis timestamp
                     analysis.analyzed_at = datetime.now().isoformat()
