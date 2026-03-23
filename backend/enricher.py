@@ -269,6 +269,22 @@ def enrich_product(
                     )
                     continue
 
+            # ── Feedback learning: adjust confidence from past approvals ──
+            from backend.feedback_learning import adjust_confidence_from_feedback
+            pre_feedback_conf = suggestion.confidence
+            suggestion.confidence = adjust_confidence_from_feedback(
+                suggestion.confidence,
+                field_name=field_label,
+                source=suggestion.source or "",
+            )
+            if suggestion.confidence < MIN_CONFIDENCE_AUTO and not suggestion.review_required:
+                suggestion.review_required = True
+            if abs(suggestion.confidence - pre_feedback_conf) > 0.01:
+                logger.debug(
+                    f"{tag} {field_label}: feedback adj "
+                    f"{pre_feedback_conf:.2f}→{suggestion.confidence:.2f}"
+                )
+
             suggestions.append(suggestion)
             logger.debug(
                 f"{tag} {field_label}: ENRICHED → "

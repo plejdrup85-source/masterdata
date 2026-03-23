@@ -1034,6 +1034,31 @@ async def approve_suggestion(
     if not success:
         raise HTTPException(400, "Kunne ikke oppdatere godkjenningsstatus")
 
+    # Log feedback for learning loop
+    from backend.feedback_learning import log_suggestion_feedback
+    from backend.models import ApprovalStatus
+    for r in job.results:
+        if r.article_number == article_number:
+            if 0 <= suggestion_index < len(r.enrichment_suggestions):
+                es = r.enrichment_suggestions[suggestion_index]
+                outcome_map = {
+                    ApprovalStatus.APPROVED.value: "approved",
+                    ApprovalStatus.REJECTED.value: "rejected",
+                    ApprovalStatus.NEEDS_REVIEW.value: "modified",
+                }
+                outcome = outcome_map.get(status, "modified")
+                log_suggestion_feedback(
+                    article_number=article_number,
+                    field_name=es.field_name,
+                    source=es.source or "ukjent",
+                    confidence=es.confidence,
+                    outcome=outcome,
+                    comment=comment,
+                    was_auto_approved=es.approval_status == ApprovalStatus.AUTO_APPROVED,
+                    reviewer=reviewer,
+                )
+            break
+
     return {"message": "Godkjenningsstatus oppdatert", "article_number": article_number, "index": suggestion_index, "status": status}
 
 
@@ -1052,10 +1077,47 @@ async def approve_product_suggestions(
         raise HTTPException(404, "Jobb ikke funnet eller ikke fullført")
 
     from backend.approval import bulk_set_approval
+    from backend.models import ApprovalStatus
     status = data.get("status", "")
-    count = bulk_set_approval(job.results, article_number, status, data.get("comment", ""), data.get("reviewer", ""))
+    comment = data.get("comment", "")
+    reviewer = data.get("reviewer", "")
+
+    # Capture pre-approval state for feedback logging
+    pre_states = {}
+    for r in job.results:
+        if r.article_number == article_number:
+            for i, es in enumerate(r.enrichment_suggestions):
+                if es.suggested_value:
+                    pre_states[i] = es.approval_status == ApprovalStatus.AUTO_APPROVED
+            break
+
+    count = bulk_set_approval(job.results, article_number, status, comment, reviewer)
     if count == 0:
         raise HTTPException(400, "Ingen forslag funnet for dette produktet")
+
+    # Log feedback for all affected suggestions
+    from backend.feedback_learning import log_suggestion_feedback
+    outcome_map = {
+        ApprovalStatus.APPROVED.value: "approved",
+        ApprovalStatus.REJECTED.value: "rejected",
+        ApprovalStatus.NEEDS_REVIEW.value: "modified",
+    }
+    outcome = outcome_map.get(status, "modified")
+    for r in job.results:
+        if r.article_number == article_number:
+            for i, es in enumerate(r.enrichment_suggestions):
+                if es.suggested_value:
+                    log_suggestion_feedback(
+                        article_number=article_number,
+                        field_name=es.field_name,
+                        source=es.source or "ukjent",
+                        confidence=es.confidence,
+                        outcome=outcome,
+                        comment=comment,
+                        was_auto_approved=pre_states.get(i, False),
+                        reviewer=reviewer,
+                    )
+            break
 
     return {"message": f"{count} forslag oppdatert", "article_number": article_number, "status": status, "count": count}
 
@@ -1069,6 +1131,31 @@ async def get_approval_summary_endpoint(job_id: str):
 
     from backend.approval import get_approval_summary
     return get_approval_summary(job.results)
+
+
+@app.get("/api/feedback/summary")
+async def get_feedback_summary_endpoint():
+    """Get aggregate feedback statistics and learning status.
+
+    Shows acceptance/rejection rates by field and source,
+    detected low-quality patterns, and whether confidence
+    adjustments are active.
+    """
+    from backend.feedback_learning import get_feedback_summary
+    return get_feedback_summary()
+
+
+@app.get("/api/feedback/low-quality-patterns")
+async def get_low_quality_patterns():
+    """Get field+source combinations with high rejection rates.
+
+    These are patterns where the system consistently produces
+    suggestions that users reject — candidates for confidence
+    reduction or deactivation.
+    """
+    from backend.feedback_learning import identify_low_quality_patterns
+    patterns = identify_low_quality_patterns()
+    return {"patterns": patterns}
 
 
 @app.get("/api/results/{job_id}/category-analysis")

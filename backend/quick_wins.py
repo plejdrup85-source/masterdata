@@ -44,8 +44,10 @@ def is_quick_win(
     if not suggestion.suggested_value or not suggestion.suggested_value.strip():
         return False
 
-    # Rule 1: High confidence
-    if suggestion.confidence < QUICK_WIN_MIN_CONFIDENCE:
+    # Rule 1: High confidence (threshold adjusts from feedback learning)
+    from backend.feedback_learning import get_auto_approval_threshold
+    threshold = get_auto_approval_threshold(suggestion.field_name)
+    if suggestion.confidence < threshold:
         return False
 
     # Rule 2: Not medically sensitive
