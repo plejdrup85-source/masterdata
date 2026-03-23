@@ -262,6 +262,7 @@ class ImageSuggestion(BaseModel):
 class ProductAnalysis(BaseModel):
     """Complete analysis result for a single product."""
     article_number: str
+    analyzed_at: Optional[str] = None  # ISO 8601 timestamp when this product was analyzed
     product_data: ProductData
     jeeves_data: Optional[JeevesData] = None
     manufacturer_lookup: ManufacturerLookup = ManufacturerLookup()

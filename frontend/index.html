@@ -3369,11 +3369,13 @@
                 html += '<th style="padding:0.5rem">Modus</th>';
                 html += '<th style="padding:0.5rem;text-align:center">Produkter</th>';
                 html += '<th style="padding:0.5rem;text-align:center">Snitt</th>';
-                html += '<th style="padding:0.5rem;text-align:center">Kritisk</th>';
+                html += '<th style="padding:0.5rem;text-align:center">Nettbutikk</th>';
+                html += '<th style="padding:0.5rem;text-align:center">Prioritet</th>';
                 html += '<th style="padding:0.5rem"></th>';
                 html += '</tr></thead><tbody>';
 
-                for (const e of data.entries) {
+                for (let i = 0; i < data.entries.length; i++) {
+                    const e = data.entries[i];
                     const d = new Date(e.timestamp);
                     const dateStr = d.toLocaleDateString('nb-NO', {day:'2-digit',month:'2-digit',year:'numeric'})
                         + ' ' + d.toLocaleTimeString('nb-NO', {hour:'2-digit',minute:'2-digit'});
@@ -3381,19 +3383,53 @@
                     const src = e.source_filename || '-';
                     const scoreColor = e.avg_score < 40 ? '#dc2626' : e.avg_score < 70 ? '#d97706' : '#16a34a';
 
+                    // Webshop readiness mini-bar
+                    const wsR = e.webshop_ready || 0;
+                    const wsP = e.webshop_partial || 0;
+                    const wsN = e.webshop_not_ready || 0;
+                    const wsTotal = wsR + wsP + wsN;
+                    const wsBar = wsTotal > 0
+                        ? `<span title="Klar: ${wsR}, Delvis: ${wsP}, Ikke klar: ${wsN}" style="display:inline-flex;gap:2px;font-size:0.72rem">`
+                          + `<span style="color:#16a34a;font-weight:600">${wsR}</span>/`
+                          + `<span style="color:#d97706">${wsP}</span>/`
+                          + `<span style="color:#dc2626">${wsN}</span></span>`
+                        : '-';
+
+                    // Priority mini-bar
+                    const pH = e.priority_high || 0;
+                    const pM = e.priority_medium || 0;
+                    const pL = e.priority_low || 0;
+                    const prioBar = (pH + pM + pL) > 0
+                        ? `<span title="Høy: ${pH}, Middels: ${pM}, Lav: ${pL}" style="display:inline-flex;gap:2px;font-size:0.72rem">`
+                          + `<span style="color:#dc2626;font-weight:600">${pH}</span>/`
+                          + `<span style="color:#d97706">${pM}</span>/`
+                          + `<span style="color:#16a34a">${pL}</span></span>`
+                        : '-';
+
+                    // Compare button — only if there's a previous entry
+                    const prevEntry = i < data.entries.length - 1 ? data.entries[i + 1] : null;
+                    const compareBtn = prevEntry
+                        ? `<button class="btn" style="font-size:0.72rem;padding:0.2rem 0.4rem;margin-left:0.3rem;background:#eff6ff;color:#2563eb;border:1px solid #bfdbfe;cursor:pointer" onclick="compareRuns('${e.job_id}','${prevEntry.job_id}')" title="Sammenlign med forrige kjøring (${new Date(prevEntry.timestamp).toLocaleDateString('nb-NO')})">Δ</button>`
+                        : '';
+
                     html += `<tr style="border-bottom:1px solid var(--border)">`;
                     html += `<td style="padding:0.5rem;white-space:nowrap">${dateStr}</td>`;
-                    html += `<td style="padding:0.5rem;max-width:200px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap" title="${src}">${src}</td>`;
+                    html += `<td style="padding:0.5rem;max-width:180px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap" title="${src}">${src}</td>`;
                     html += `<td style="padding:0.5rem">${mode}</td>`;
                     html += `<td style="padding:0.5rem;text-align:center">${e.product_count}</td>`;
                     html += `<td style="padding:0.5rem;text-align:center;font-weight:600;color:${scoreColor}">${e.avg_score}</td>`;
-                    html += `<td style="padding:0.5rem;text-align:center">${e.critical_count > 0 ? '<span style="color:#dc2626;font-weight:600">' + e.critical_count + '</span>' : '0'}</td>`;
-                    html += `<td style="padding:0.5rem;text-align:right">`;
+                    html += `<td style="padding:0.5rem;text-align:center">${wsBar}</td>`;
+                    html += `<td style="padding:0.5rem;text-align:center">${prioBar}</td>`;
+                    html += `<td style="padding:0.5rem;text-align:right;white-space:nowrap">`;
                     html += `<button class="btn btn-primary" style="font-size:0.75rem;padding:0.25rem 0.6rem" onclick="downloadHistoryFile('${e.job_id}')">Last ned</button>`;
+                    html += compareBtn;
                     html += `<button class="btn" style="font-size:0.75rem;padding:0.25rem 0.5rem;margin-left:0.3rem;background:#fee2e2;color:#dc2626;border:none;cursor:pointer" onclick="deleteHistoryEntry('${e.job_id}')">Slett</button>`;
                     html += `</td></tr>`;
+
                 }
                 html += '</tbody></table>';
+                // Comparison result area
+                html += '<div id="comparisonResult" style="display:none;margin-top:1rem"></div>';
                 container.innerHTML = html;
             } catch (err) {
                 container.innerHTML = `<p style="color:#dc2626">Kunne ikke laste historikk: ${err.message}</p>`;
@@ -3412,6 +3448,72 @@
                 loadHistory();
             } catch (err) {
                 alert('Kunne ikke slette: ' + err.message);
+            }
+        }
+
+        async function compareRuns(currentId, previousId) {
+            const container = document.getElementById('comparisonResult');
+            if (!container) return;
+            container.style.display = '';
+            container.innerHTML = '<p style="color:var(--text-muted)">Sammenligner kjøringer...</p>';
+
+            try {
+                const resp = await fetch(`${API_BASE}/api/history/compare/${currentId}/${previousId}`);
+                if (!resp.ok) {
+                    const err = await resp.json().catch(() => ({}));
+                    container.innerHTML = `<p style="color:#dc2626">${err.detail || 'Sammenligning feilet'}</p>`;
+                    return;
+                }
+                const data = await resp.json();
+
+                let html = '<div style="padding:1rem;background:#f8fafc;border:1px solid var(--border);border-radius:8px">';
+                html += '<h3 style="margin:0 0 0.75rem;font-size:1rem">Sammenligning mellom kjøringer</h3>';
+                html += `<p style="font-size:0.85rem;margin-bottom:0.75rem"><strong>${data.summary}</strong></p>`;
+
+                // Stats grid
+                html += '<div style="display:grid;grid-template-columns:repeat(auto-fit,minmax(120px,1fr));gap:0.5rem;margin-bottom:0.75rem">';
+
+                const scoreChange = data.avg_score_change;
+                const scoreIcon = scoreChange > 0 ? '↑' : scoreChange < 0 ? '↓' : '→';
+                const scoreClr = scoreChange > 0 ? '#16a34a' : scoreChange < 0 ? '#dc2626' : '#64748b';
+                html += `<div style="padding:0.5rem;background:#fff;border-radius:6px;border:1px solid var(--border);text-align:center"><div style="font-size:1.1rem;font-weight:700;color:${scoreClr}">${scoreIcon} ${data.avg_score_after}</div><div style="font-size:0.72rem;color:var(--text-muted)">Snitt (var ${data.avg_score_before})</div></div>`;
+                html += `<div style="padding:0.5rem;background:#fff;border-radius:6px;border:1px solid var(--border);text-align:center"><div style="font-size:1.1rem;font-weight:700;color:#16a34a">${data.improved_count}</div><div style="font-size:0.72rem;color:var(--text-muted)">Forbedret</div></div>`;
+                html += `<div style="padding:0.5rem;background:#fff;border-radius:6px;border:1px solid var(--border);text-align:center"><div style="font-size:1.1rem;font-weight:700;color:#dc2626">${data.regressed_count}</div><div style="font-size:0.72rem;color:var(--text-muted)">Ble dårligere</div></div>`;
+
+                const wsChange = data.webshop_ready_after - data.webshop_ready_before;
+                const wsIcon = wsChange > 0 ? '↑' : wsChange < 0 ? '↓' : '→';
+                const wsClr = wsChange > 0 ? '#16a34a' : wsChange < 0 ? '#dc2626' : '#64748b';
+                html += `<div style="padding:0.5rem;background:#fff;border-radius:6px;border:1px solid var(--border);text-align:center"><div style="font-size:1.1rem;font-weight:700;color:${wsClr}">${wsIcon} ${data.webshop_ready_after}</div><div style="font-size:0.72rem;color:var(--text-muted)">Nettbutikk-klare (var ${data.webshop_ready_before})</div></div>`;
+
+                if (data.new_products) html += `<div style="padding:0.5rem;background:#fff;border-radius:6px;border:1px solid var(--border);text-align:center"><div style="font-size:1.1rem;font-weight:700;color:#2563eb">${data.new_products}</div><div style="font-size:0.72rem;color:var(--text-muted)">Nye produkter</div></div>`;
+                html += '</div>';
+
+                // Delta table (top changes)
+                if (data.deltas && data.deltas.length > 0) {
+                    const showDeltas = data.deltas.slice(0, 20);
+                    html += '<details><summary style="cursor:pointer;font-size:0.85rem;font-weight:600;margin-bottom:0.5rem">Vis endringer per produkt (' + data.deltas.length + ' endringer)</summary>';
+                    html += '<table style="width:100%;border-collapse:collapse;font-size:0.8rem;margin-top:0.5rem"><thead><tr style="border-bottom:1px solid var(--border)">';
+                    html += '<th style="padding:0.3rem;text-align:left">Artikkelnr</th><th style="padding:0.3rem;text-align:left">Navn</th><th style="padding:0.3rem;text-align:center">Score</th><th style="padding:0.3rem;text-align:left">Endring</th>';
+                    html += '</tr></thead><tbody>';
+                    for (const d of showDeltas) {
+                        const changeColor = d.score_change > 0 ? '#16a34a' : d.score_change < 0 ? '#dc2626' : '#64748b';
+                        const changeText = d.is_new ? 'Ny' : d.is_removed ? 'Fjernet' : (d.score_change > 0 ? '+' + d.score_change : d.score_change.toString());
+                        html += `<tr style="border-bottom:1px solid #f1f5f9">`;
+                        html += `<td style="padding:0.3rem">${d.article_number}</td>`;
+                        html += `<td style="padding:0.3rem;max-width:180px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">${d.product_name || '-'}</td>`;
+                        html += `<td style="padding:0.3rem;text-align:center;font-weight:600;color:${changeColor}">${changeText}</td>`;
+                        html += `<td style="padding:0.3rem;font-size:0.75rem;color:var(--text-muted)">${d.summary}</td>`;
+                        html += '</tr>';
+                    }
+                    html += '</tbody></table>';
+                    if (data.deltas.length > 20) html += `<p style="font-size:0.75rem;color:var(--text-muted);margin-top:0.3rem">...og ${data.deltas.length - 20} flere endringer</p>`;
+                    html += '</details>';
+                }
+                html += '<button class="btn" style="font-size:0.75rem;padding:0.2rem 0.5rem;margin-top:0.5rem;background:#f1f5f9;cursor:pointer" onclick="document.getElementById(\'comparisonResult\').style.display=\'none\'">Lukk</button>';
+                html += '</div>';
+                container.innerHTML = html;
+            } catch (err) {
+                container.innerHTML = `<p style="color:#dc2626">Kunne ikke sammenligne: ${err.message}</p>`;
             }
         }
     </script>

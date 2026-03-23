@@ -262,6 +262,16 @@ def _add_to_history(job: "AnalysisJob", source_filename: str = "") -> None:
                 critical_count += 1
         avg_score = round(sum(scores) / len(scores), 1)
 
+    # Webshop readiness distribution
+    ws_ready = sum(1 for r in job.results if r.webshop_status == "Klar")
+    ws_partial = sum(1 for r in job.results if r.webshop_status == "Delvis klar")
+    ws_not_ready = sum(1 for r in job.results if r.webshop_status == "Ikke klar")
+
+    # Priority distribution
+    prio_high = sum(1 for r in job.results if r.priority_label == "Høy")
+    prio_med = sum(1 for r in job.results if r.priority_label == "Middels")
+    prio_low = sum(1 for r in job.results if r.priority_label == "Lav")
+
     entry = {
         "job_id": job.job_id,
         "timestamp": datetime.fromtimestamp(job.created_at).isoformat(),
@@ -274,6 +284,13 @@ def _add_to_history(job: "AnalysisJob", source_filename: str = "") -> None:
         "batch_info": job.batch_info or "",
         "avg_score": avg_score,
         "critical_count": critical_count,
+        # Enhanced traceability — added for history/comparison
+        "webshop_ready": ws_ready,
+        "webshop_partial": ws_partial,
+        "webshop_not_ready": ws_not_ready,
+        "priority_high": prio_high,
+        "priority_medium": prio_med,
+        "priority_low": prio_low,
     }
 
     entries = _load_history()
@@ -1089,6 +1106,7 @@ async def get_results(job_id: str):
         "results": [
             {
                 "article_number": r.article_number,
+                "analyzed_at": r.analyzed_at,
                 "product_name": r.product_data.product_name,
                 "found": r.product_data.found_on_onemed,
                 "score": r.total_score,
@@ -1224,7 +1242,83 @@ async def delete_history_entry(job_id: str):
     entries = [e for e in entries if e["job_id"] != job_id]
     _save_history(entries)
 
+    # Also delete snapshot
+    from backend.run_comparison import delete_snapshot
+    delete_snapshot(job_id)
+
     return {"message": "Historikkoppføring slettet", "job_id": job_id}
+
+
+@app.get("/api/history/compare/{current_job_id}/{previous_job_id}")
+async def compare_runs_endpoint(current_job_id: str, previous_job_id: str):
+    """Compare two analysis runs and return a delta summary.
+
+    Shows what improved, what regressed, and what's new between the runs.
+    """
+    from backend.run_comparison import load_snapshot, compare_runs, list_snapshots
+    from dataclasses import asdict
+
+    # Load previous snapshot
+    prev_snapshot = load_snapshot(previous_job_id)
+    if not prev_snapshot:
+        raise HTTPException(404, f"Ingen snapshot funnet for jobb {previous_job_id}")
+
+    # Current results — from active job or snapshot
+    current_job = jobs.get(current_job_id)
+    if current_job and current_job.status == JobStatus.COMPLETED:
+        comparison = compare_runs(current_job.results, prev_snapshot, current_job_id)
+    else:
+        # Try loading from snapshot
+        curr_snapshot = load_snapshot(current_job_id)
+        if not curr_snapshot:
+            raise HTTPException(404, f"Ingen resultater eller snapshot funnet for jobb {current_job_id}")
+        # Can't compare snapshot-to-snapshot with full ProductAnalysis objects
+        raise HTTPException(400, "Sammenligning krever at minst én jobb er aktiv i minnet")
+
+    return {
+        "current_job_id": comparison.current_job_id,
+        "previous_job_id": comparison.previous_job_id,
+        "current_timestamp": comparison.current_timestamp,
+        "previous_timestamp": comparison.previous_timestamp,
+        "summary": comparison.summary,
+        "total_current": comparison.total_current,
+        "total_previous": comparison.total_previous,
+        "new_products": comparison.new_products,
+        "removed_products": comparison.removed_products,
+        "improved_count": comparison.improved_count,
+        "regressed_count": comparison.regressed_count,
+        "unchanged_count": comparison.unchanged_count,
+        "avg_score_before": comparison.avg_score_before,
+        "avg_score_after": comparison.avg_score_after,
+        "avg_score_change": comparison.avg_score_change,
+        "webshop_ready_before": comparison.webshop_ready_before,
+        "webshop_ready_after": comparison.webshop_ready_after,
+        "deltas": [
+            {
+                "article_number": d.article_number,
+                "product_name": d.product_name,
+                "is_new": d.is_new,
+                "is_removed": d.is_removed,
+                "score_before": d.score_before,
+                "score_after": d.score_after,
+                "score_change": d.score_change,
+                "webshop_before": d.webshop_before,
+                "webshop_after": d.webshop_after,
+                "webshop_changed": d.webshop_changed,
+                "fields_improved": d.fields_improved,
+                "fields_regressed": d.fields_regressed,
+                "summary": d.summary,
+            }
+            for d in comparison.deltas[:200]  # Limit to 200 deltas
+        ],
+    }
+
+
+@app.get("/api/history/snapshots")
+async def list_snapshots_endpoint():
+    """List available run snapshots for comparison."""
+    from backend.run_comparison import list_snapshots
+    return {"snapshots": list_snapshots()}
 
 
 # ── Family / Relationship Analysis API ──
@@ -2916,6 +3010,9 @@ async def _run_analysis(
                     analysis.priority_label = priority.label
                     analysis.priority_reasons = "; ".join(priority.reasons) if priority.reasons else ""
 
+                    # Stamp analysis timestamp
+                    analysis.analyzed_at = datetime.now().isoformat()
+
                 return analysis
 
             except Exception as e:
@@ -3012,6 +3109,13 @@ async def _run_analysis(
 
         # Persist to history for later retrieval
         _add_to_history(job, source_filename=job.source_filename)
+
+        # Save lightweight snapshot for run comparison
+        from backend.run_comparison import save_snapshot
+        save_snapshot(
+            job_id, job.results,
+            timestamp=datetime.fromtimestamp(job.created_at).isoformat(),
+        )
 
         logger.info(f"[{job_id}] Analysis completed. Output: {output_path}")
 
