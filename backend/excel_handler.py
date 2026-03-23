@@ -634,23 +634,166 @@ def _create_quick_wins_sheet(ws, results: list[ProductAnalysis]) -> None:
         ws.auto_filter.ref = f"A1:{get_column_letter(len(headers))}{row_idx - 1}"
 
 
+def _classify_missing_gap(fa_name: str, fa_status, iq: dict = None) -> str:
+    """Classify a missing/weak field into a follow-up category."""
+    if fa_name == "Bildekvalitet":
+        return "Mangler bilde"
+    if fa_name == "Spesifikasjon":
+        return "Mangler teknisk info"
+    if fa_name == "Beskrivelse":
+        return "Mangler produktbeskrivelse"
+    if fa_name == "Produsentens varenummer":
+        return "Mangler produsent art.nr"
+    if fa_name == "Produsent":
+        return "Mangler produsentinfo"
+    if fa_name == "Kategori":
+        return "Mangler kategorisering"
+    if fa_name == "Pakningsinformasjon":
+        return "Mangler pakningsinfo"
+    return f"Mangler: {fa_name}"
+
+
+def _sources_checked_for_product(result: "ProductAnalysis") -> list[str]:
+    """List which sources were already checked for a product."""
+    checked = []
+    pd = result.product_data
+    if pd.found_on_onemed:
+        checked.append("onemed.no nettside")
+    if result.pdf_available:
+        checked.append(f"PDF datablad ({result.pdf_url or 'tilgjengelig'})")
+    mfr = result.manufacturer_lookup
+    if mfr and mfr.searched:
+        if mfr.found:
+            checked.append(f"Produsentens nettside ({mfr.source_url or 'funnet'})")
+        else:
+            checked.append("Produsentens nettside (ikke funnet)")
+    if result.norengros_lookup and getattr(result.norengros_lookup, 'searched', False):
+        checked.append("Norengros (sekundærkilde)")
+    if result.jeeves_data:
+        checked.append("Jeeves produktkatalog")
+    if not checked:
+        checked.append("Ingen kilder sjekket")
+    return checked
+
+
+def _build_email_draft(
+    manufacturer: str,
+    products: list["ProductAnalysis"],
+) -> str:
+    """Build a ready-to-send email draft for a manufacturer."""
+    lines = [
+        f"Emne: Forespørsel om produktinformasjon — {len(products)} produkt(er)",
+        "",
+        f"Hei {manufacturer},",
+        "",
+        "Vi holder på med en kvalitetsgjennomgang av produktdataene i nettbutikken vår",
+        "og mangler informasjon for følgende produkter fra dere:",
+        "",
+    ]
+
+    for result in products:
+        producer, producer_artnr = get_best_producer_info(
+            result.product_data, result.jeeves_data, result.manufacturer_lookup
+        )
+        name = result.product_data.product_name or result.article_number
+        artnr_display = f" (deres art.nr: {producer_artnr})" if producer_artnr else ""
+
+        # Categorize gaps
+        gaps = {}
+        for fa in result.field_analyses:
+            if fa.status in (QualityStatus.MISSING, QualityStatus.REQUIRES_MANUFACTURER,
+                             QualityStatus.WEAK, QualityStatus.NO_RELIABLE_SOURCE):
+                category = _classify_missing_gap(fa.field_name, fa.status)
+                gaps[category] = gaps.get(category, [])
+                gaps[category].append(fa.field_name)
+
+        # Check image separately
+        iq = result.image_quality or {}
+        img_status = iq.get("image_quality_status", "")
+        if img_status in ("MISSING", "FAIL"):
+            gaps["Mangler bilde"] = gaps.get("Mangler bilde", ["Bildekvalitet"])
+
+        if not gaps:
+            continue
+
+        lines.append(f"  Produkt: {name}{artnr_display}")
+        lines.append(f"  Vårt art.nr: {result.article_number}")
+        for gap_category in sorted(gaps.keys()):
+            lines.append(f"    → {gap_category}")
+        lines.append("")
+
+    lines.extend([
+        "Vi ville satt stor pris på om dere kunne sende oss:",
+        "",
+    ])
+
+    # Aggregate what's needed across all products
+    all_gap_categories = set()
+    for result in products:
+        for fa in result.field_analyses:
+            if fa.status in (QualityStatus.MISSING, QualityStatus.REQUIRES_MANUFACTURER,
+                             QualityStatus.WEAK, QualityStatus.NO_RELIABLE_SOURCE):
+                all_gap_categories.add(_classify_missing_gap(fa.field_name, fa.status))
+        iq = result.image_quality or {}
+        if iq.get("image_quality_status", "") in ("MISSING", "FAIL"):
+            all_gap_categories.add("Mangler bilde")
+
+    request_map = {
+        "Mangler teknisk info": "Teknisk datablad / spesifikasjoner (materiale, størrelse, sterilitet, etc.)",
+        "Mangler bilde": "Produktbilder i høy oppløsning (min. 800x800px, hvit bakgrunn)",
+        "Mangler produsent art.nr": "Deres artikkelnummer for produktet",
+        "Mangler produktbeskrivelse": "Produktbeskrivelse egnet for nettbutikk (norsk)",
+        "Mangler produsentinfo": "Bekreftelse av produsentnavn",
+        "Mangler kategorisering": "Produktkategori / bruksområde",
+        "Mangler pakningsinfo": "Pakningsinformasjon (antall per eske/kartong)",
+    }
+
+    for gap_cat in sorted(all_gap_categories):
+        request_text = request_map.get(gap_cat, gap_cat)
+        lines.append(f"  • {request_text}")
+
+    lines.extend([
+        "",
+        "Format: PDF-datablad, produktbilder som JPG/PNG, eller annet egnet format.",
+        "",
+        "Med vennlig hilsen,",
+        "[Ditt navn]",
+        "OneMed Norge",
+    ])
+
+    return "\n".join(lines)
+
+
 def _create_manufacturer_sheet(ws, results: list[ProductAnalysis]) -> None:
-    """Create manufacturer follow-up sheet, grouped by manufacturer."""
+    """Create manufacturer follow-up sheet — a practical 'send to producer' package.
+
+    Two sections:
+    1. Detail table: one row per product with categorized gaps, sources checked,
+       and what the system attempted to find
+    2. Email drafts: one per manufacturer, ready to copy-paste
+    """
+    # ── Section 1: Detail table ──
     headers = [
         "Produsent",
         "Produsentens varenummer",
         "Artikkelnummer",
         "Produktnavn",
+        "Mangel-kategori",
         "Manglende felt",
+        "Felt med svak verdi",
+        "Kilder allerede sjekket",
+        "Hva systemet forsøkte",
+        "PDF tilgjengelig",
+        "Bilde-status",
+        "Confidence",
         "Status",
-        "Foresl\u00e5tt melding",
     ]
 
     for col, header in enumerate(headers, 1):
         ws.cell(row=1, column=col, value=header)
     _style_header(ws, 1, len(headers))
 
-    # Group by manufacturer — use best producer info
+    # Group by manufacturer
     by_manufacturer: dict[str, list[ProductAnalysis]] = {}
     for result in results:
         if result.requires_manufacturer_contact:
@@ -662,13 +805,16 @@ def _create_manufacturer_sheet(ws, results: list[ProductAnalysis]) -> None:
                 by_manufacturer[mfr] = []
             by_manufacturer[mfr].append(result)
 
+    wrap = Alignment(wrap_text=True, vertical="top")
+    group_fill = PatternFill(start_color="D9E2F3", end_color="D9E2F3", fill_type="solid")
+    group_font = Font(bold=True, size=11)
+
     row_idx = 2
     for manufacturer in sorted(by_manufacturer.keys()):
         products = by_manufacturer[manufacturer]
 
-        group_fill = PatternFill(start_color="D9E2F3", end_color="D9E2F3", fill_type="solid")
-        group_font = Font(bold=True, size=11)
-        cell = ws.cell(row=row_idx, column=1, value=f"{manufacturer} ({len(products)} produkter)")
+        # Group header row
+        cell = ws.cell(row=row_idx, column=1, value=f"{manufacturer} — {len(products)} produkt(er)")
         cell.fill = group_fill
         cell.font = group_font
         for col in range(2, len(headers) + 1):
@@ -679,18 +825,64 @@ def _create_manufacturer_sheet(ws, results: list[ProductAnalysis]) -> None:
             _, producer_artnr = get_best_producer_info(
                 result.product_data, result.jeeves_data, result.manufacturer_lookup
             )
-            missing_fields = [
-                fa.field_name for fa in result.field_analyses
-                if fa.status in (QualityStatus.MISSING, QualityStatus.REQUIRES_MANUFACTURER)
-            ]
+            pd = result.product_data
+            iq = result.image_quality or {}
+
+            # Categorize field gaps
+            missing_fields = []
+            weak_fields = []
+            gap_categories = set()
+            for fa in result.field_analyses:
+                if fa.status in (QualityStatus.MISSING, QualityStatus.REQUIRES_MANUFACTURER,
+                                 QualityStatus.NO_RELIABLE_SOURCE):
+                    missing_fields.append(fa.field_name)
+                    gap_categories.add(_classify_missing_gap(fa.field_name, fa.status))
+                elif fa.status in (QualityStatus.WEAK, QualityStatus.SHOULD_IMPROVE):
+                    weak_fields.append(fa.field_name)
+
+            # Image gap
+            img_status = iq.get("image_quality_status", "MISSING")
+            if img_status in ("MISSING", "FAIL"):
+                gap_categories.add("Mangler bilde")
+
+            # Sources checked
+            sources = _sources_checked_for_product(result)
+
+            # What the system attempted
+            attempts = []
+            if pd.found_on_onemed:
+                attempts.append("Scrapet produktside på onemed.no")
+            if result.pdf_available:
+                attempts.append("Ekstrahert data fra PDF-datablad")
+            mfr_lookup = result.manufacturer_lookup
+            if mfr_lookup and mfr_lookup.searched:
+                attempts.append("Søkt etter produsent-nettside" + (" (funnet)" if mfr_lookup.found else " (ikke funnet)"))
+            if result.enrichment_suggestions:
+                attempts.append(f"Generert {len(result.enrichment_suggestions)} forbedringsforslag")
+            if not attempts:
+                attempts.append("Ingen automatisk berikelse utført")
+
+            # Average confidence for this product
+            confs = [fa.confidence for fa in result.field_analyses if fa.confidence is not None and fa.confidence > 0]
+            avg_conf = round(sum(confs) / len(confs)) if confs else 0
+
+            # Write row
             ws.cell(row=row_idx, column=1, value=manufacturer)
             ws.cell(row=row_idx, column=2, value=producer_artnr or "")
             _write_id_cell(ws, row_idx, 3, result.article_number)
-            ws.cell(row=row_idx, column=4, value=result.product_data.product_name or "")
-            ws.cell(row=row_idx, column=5, value=", ".join(missing_fields))
-            status_cell = ws.cell(row=row_idx, column=6, value=result.overall_status.value)
+            ws.cell(row=row_idx, column=4, value=pd.product_name or "")
+            ws.cell(row=row_idx, column=5, value="\n".join(sorted(gap_categories))).alignment = wrap
+            ws.cell(row=row_idx, column=6, value=", ".join(missing_fields) if missing_fields else "Ingen")
+            ws.cell(row=row_idx, column=7, value=", ".join(weak_fields) if weak_fields else "Ingen")
+            ws.cell(row=row_idx, column=8, value="\n".join(sources)).alignment = wrap
+            ws.cell(row=row_idx, column=9, value="\n".join(attempts)).alignment = wrap
+            ws.cell(row=row_idx, column=10, value="Ja" if result.pdf_available else "Nei")
+            img_cell = ws.cell(row=row_idx, column=11, value=img_status)
+            if img_status in ("MISSING", "FAIL"):
+                img_cell.font = Font(color="9C0006", bold=True)
+            ws.cell(row=row_idx, column=12, value=avg_conf)
+            status_cell = ws.cell(row=row_idx, column=13, value=result.overall_status.value)
             _apply_status_style(status_cell, result.overall_status)
-            ws.cell(row=row_idx, column=7, value=result.suggested_manufacturer_message or "")
             row_idx += 1
 
     if row_idx == 2:
@@ -698,8 +890,51 @@ def _create_manufacturer_sheet(ws, results: list[ProductAnalysis]) -> None:
 
     for col in range(1, len(headers) + 1):
         ws.column_dimensions[get_column_letter(col)].width = max(18, len(headers[col - 1]) + 5)
+    ws.column_dimensions["E"].width = 30  # Mangel-kategori
+    ws.column_dimensions["H"].width = 35  # Kilder sjekket
+    ws.column_dimensions["I"].width = 40  # Hva systemet forsøkte
 
     ws.freeze_panes = "A2"
+    if row_idx > 2:
+        ws.auto_filter.ref = f"A1:{get_column_letter(len(headers))}{row_idx - 1}"
+
+    # ── Section 2: Email drafts per manufacturer ──
+    if not by_manufacturer:
+        return
+
+    email_start = row_idx + 3
+    email_header_fill = PatternFill(start_color="FFF2CC", end_color="FFF2CC", fill_type="solid")
+    email_font = Font(bold=True, size=12)
+
+    ws.cell(row=email_start - 1, column=1, value="E-postutkast per produsent").font = Font(bold=True, size=13, color="1F4E79")
+
+    for manufacturer in sorted(by_manufacturer.keys()):
+        products = by_manufacturer[manufacturer]
+
+        # Manufacturer header
+        header_cell = ws.cell(row=email_start, column=1, value=f"Til: {manufacturer}")
+        header_cell.fill = email_header_fill
+        header_cell.font = email_font
+        for col in range(2, 6):
+            ws.cell(row=email_start, column=col).fill = email_header_fill
+        email_start += 1
+
+        # Build email
+        email_text = _build_email_draft(manufacturer, products)
+
+        # Write email text
+        email_cell = ws.cell(row=email_start, column=1, value=email_text)
+        email_cell.alignment = Alignment(wrap_text=True, vertical="top")
+        # Merge across columns for readability
+        ws.merge_cells(
+            start_row=email_start, start_column=1,
+            end_row=email_start, end_column=len(headers),
+        )
+        # Set row height based on line count
+        line_count = email_text.count("\n") + 1
+        ws.row_dimensions[email_start].height = max(15, min(400, line_count * 14))
+
+        email_start += 2  # Gap between emails
 
 
 def _create_image_detail_sheet(ws, results: list[ProductAnalysis]) -> None:
