@@ -3087,6 +3087,101 @@ def _build_catalog_for_matching(alc_prices: Optional[dict] = None) -> list[dict]
     return catalog
 
 
+# ── Column detection helpers (shared by analyze + start) ──
+
+_COL_NAME_KEYWORDS = {"produktnavn", "produkt", "product", "navn", "name", "varenavn", "beskrivelse"}
+_COL_SPEC_KEYWORDS = {"spesifikasjon", "specification", "spec", "detaljer", "details"}
+_COL_ARTNR_KEYWORDS = {"artikkelnummer", "artikkel", "artikkelnr", "artnr", "art.nr", "sku", "varenr", "varenummer"}
+_COL_ALC_KEYWORDS = {"alc", "alc-pris", "alc pris", "alcpris", "pris", "price", "enhetspris"}
+
+
+def _detect_columns(headers: list[str]) -> dict:
+    """Auto-detect column roles from header names.
+
+    Returns {name_col, spec_col, artnr_col, alc_col} — each is int index or None.
+    """
+    name_col = spec_col = artnr_col = alc_col = None
+    for idx, h in enumerate(headers):
+        h_norm = h.lower().replace(".", "").replace(" ", "").replace("-", "").replace("_", "")
+        if name_col is None and any(kw.replace(".", "").replace(" ", "") in h_norm for kw in _COL_NAME_KEYWORDS):
+            name_col = idx
+        elif spec_col is None and any(kw.replace(".", "").replace(" ", "") in h_norm for kw in _COL_SPEC_KEYWORDS):
+            spec_col = idx
+        elif artnr_col is None and any(kw.replace(".", "").replace(" ", "") in h_norm for kw in _COL_ARTNR_KEYWORDS):
+            artnr_col = idx
+        elif alc_col is None and any(kw.replace(".", "").replace(" ", "") in h_norm for kw in _COL_ALC_KEYWORDS):
+            alc_col = idx
+    return {"name_col": name_col, "spec_col": spec_col, "artnr_col": artnr_col, "alc_col": alc_col}
+
+
+def _classify_columns(headers: list[str], detected: dict) -> list[dict]:
+    """Classify each column with a role and suggested category.
+
+    Categories: 'input' (product text), 'input_spec' (specification),
+    'input_id' (article number), 'output_price' (price/ALC to fill),
+    'skip' (not used).
+    """
+    cols = []
+    for idx, h in enumerate(headers):
+        role = "skip"
+        if idx == detected.get("name_col"):
+            role = "input"
+        elif idx == detected.get("spec_col"):
+            role = "input_spec"
+        elif idx == detected.get("artnr_col"):
+            role = "input_id"
+        elif idx == detected.get("alc_col"):
+            role = "output_price"
+        cols.append({"index": idx, "header": h, "role": role})
+    return cols
+
+
+@app.post("/api/anbud/analyze")
+async def analyze_anbud_file(file: UploadFile = File(...)):
+    """Analyze an uploaded anbud Excel file.
+
+    Returns column headers, auto-detected roles, and preview rows
+    so the user can review/adjust the mapping before starting.
+    """
+    content = await file.read()
+    if len(content) > MAX_FILE_SIZE:
+        raise HTTPException(400, f"Filen er for stor. Maks {MAX_FILE_SIZE / 1024 / 1024:.0f} MB.")
+
+    try:
+        from openpyxl import load_workbook
+        wb = load_workbook(BytesIO(content), read_only=True, data_only=True)
+        ws = wb.active
+        rows = list(ws.iter_rows(max_row=7))
+        if not rows:
+            raise HTTPException(400, "Filen er tom.")
+
+        headers = [str(cell.value or "").strip() for cell in rows[0]]
+        detected = _detect_columns(headers)
+        columns = _classify_columns(headers, detected)
+
+        preview_rows = []
+        data_row_count = 0
+        for row in rows[1:]:
+            preview_rows.append([str(cell.value or "").strip() for cell in row])
+
+        # Count total data rows
+        total_rows = ws.max_row - 1 if ws.max_row else 0
+
+        wb.close()
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(400, f"Kunne ikke lese filen: {e}")
+
+    return {
+        "filename": file.filename or "",
+        "headers": headers,
+        "columns": columns,
+        "preview_rows": preview_rows,
+        "total_data_rows": total_rows,
+    }
+
+
 @app.post("/api/match/start")
 async def start_match_job(
     request: Request,
@@ -3095,11 +3190,14 @@ async def start_match_job(
     job_name: str = Query("", description="Job name"),
     created_by: str = Query("", description="User who created the job"),
     job_type: str = Query("standard", description="Job type: standard or anbud"),
+    col_name: int = Query(-1, description="Column index for product name (-1 = auto)"),
+    col_spec: int = Query(-1, description="Column index for specification (-1 = auto/none)"),
+    col_artnr: int = Query(-1, description="Column index for article number (-1 = auto/none)"),
 ):
     """Start a product matching job.
 
     Upload an Excel file with input products to match against the catalog.
-    Expected columns: product name, specification (optional), article number (optional).
+    Column indices can be passed explicitly (from anbud analyze step) or auto-detected.
     """
     _cleanup_old_jobs()
 
@@ -3132,29 +3230,20 @@ async def start_match_job(
         ws = wb.active
         rows_iter = ws.iter_rows()
         header_row = next(rows_iter)
-        headers = [str(cell.value or "").strip().lower() for cell in header_row]
+        headers = [str(cell.value or "").strip() for cell in header_row]
 
-        # Detect columns
-        name_col = None
-        spec_col = None
-        artnr_col = None
-        alc_col = None
-
-        name_keywords = {"produktnavn", "produkt", "product", "navn", "name", "varenavn", "beskrivelse"}
-        spec_keywords = {"spesifikasjon", "specification", "spec", "detaljer", "details"}
-        artnr_keywords = {"artikkelnummer", "artikkel", "artikkelnr", "artnr", "art.nr", "sku", "varenr", "varenummer"}
-        alc_keywords = {"alc", "alc-pris", "alc pris", "alcpris", "pris", "price", "enhetspris"}
-
-        for idx, h in enumerate(headers):
-            h_normalized = h.replace(".", "").replace(" ", "").replace("-", "").replace("_", "")
-            if name_col is None and any(kw.replace(".", "").replace(" ", "") in h_normalized for kw in name_keywords):
-                name_col = idx
-            elif spec_col is None and any(kw.replace(".", "").replace(" ", "") in h_normalized for kw in spec_keywords):
-                spec_col = idx
-            elif artnr_col is None and any(kw.replace(".", "").replace(" ", "") in h_normalized for kw in artnr_keywords):
-                artnr_col = idx
-            elif alc_col is None and any(kw.replace(".", "").replace(" ", "") in h_normalized for kw in alc_keywords):
-                alc_col = idx
+        # Use explicit column overrides if provided, otherwise auto-detect
+        if col_name >= 0:
+            name_col = col_name
+            spec_col = col_spec if col_spec >= 0 else None
+            artnr_col = col_artnr if col_artnr >= 0 else None
+            alc_col = None
+        else:
+            detected = _detect_columns(headers)
+            name_col = detected["name_col"]
+            spec_col = detected["spec_col"]
+            artnr_col = detected["artnr_col"]
+            alc_col = detected["alc_col"]
 
         # Fallback: first column is product name if no header match
         if name_col is None:
@@ -3177,14 +3266,6 @@ async def start_match_job(
                 "specification": spec,
                 "article_number": artnr,
             })
-
-        # Read ALC prices if column found
-        alc_prices = {}
-        if alc_col is not None:
-            # Re-read to get ALC prices (this is for catalog products, not input)
-            # ALC prices typically come from a separate source; for now we handle
-            # them if present in the uploaded file as a mapping column
-            pass
 
         wb.close()
 
@@ -3217,10 +3298,10 @@ async def start_match_job(
         "source_filename": file.filename or "",
         "input_products": input_products,
         "detected_columns": {
-            "name": headers[name_col] if name_col is not None else None,
-            "specification": headers[spec_col] if spec_col is not None else None,
-            "article_number": headers[artnr_col] if artnr_col is not None else None,
-            "alc_price": headers[alc_col] if alc_col is not None else None,
+            "name": headers[name_col] if name_col is not None and name_col < len(headers) else None,
+            "specification": headers[spec_col] if spec_col is not None and spec_col < len(headers) else None,
+            "article_number": headers[artnr_col] if artnr_col is not None and artnr_col < len(headers) else None,
+            "alc_price": headers[alc_col] if alc_col is not None and alc_col < len(headers) else None,
         },
         "output_file": None,
         "user_selections": {},
@@ -3360,22 +3441,44 @@ async def get_match_results(job_id: str):
     }
 
 
+def _rattr(obj, key, default=""):
+    """Get attribute from MatchResult object or key from dict (disk-loaded)."""
+    if hasattr(obj, key):
+        return getattr(obj, key)
+    if isinstance(obj, dict):
+        return obj.get(key, default)
+    return default
+
+
 def _compute_match_summary(job: dict) -> dict:
     """Compute summary statistics for a matching job."""
     results = job.get("results", [])
     total = len(results)
-    matched = sum(1 for r in results if r.status == "matched")
-    no_match = sum(1 for r in results if r.status == "no_match")
-    multiple = sum(1 for r in results if r.status == "multiple")
-    manual = sum(1 for r in results if r.status == "manual_review")
-    manual_selected = sum(1 for r in results if r.selected_by == "manual")
+    matched = sum(1 for r in results if _rattr(r, "status") == "matched")
+    no_match = sum(1 for r in results if _rattr(r, "status") == "no_match")
+    multiple = sum(1 for r in results if _rattr(r, "status") == "multiple")
+    manual = sum(1 for r in results if _rattr(r, "status") == "manual_review")
+    manual_selected = sum(1 for r in results if _rattr(r, "selected_by") == "manual")
 
     # Price stats (only for selected candidates with prices)
     prices = []
     for r in results:
-        sel = r.get_selected()
-        if sel and sel.alc_price is not None:
-            prices.append(sel.alc_price)
+        sel = None
+        if hasattr(r, "get_selected"):
+            sel = r.get_selected()
+        elif isinstance(r, dict):
+            # Find selected candidate in dict results
+            sel_artnr = r.get("selected_candidate")
+            if sel_artnr:
+                for c in r.get("candidates", []):
+                    c_artnr = c.get("article_number") if isinstance(c, dict) else getattr(c, "article_number", None)
+                    if c_artnr == sel_artnr:
+                        sel = c
+                        break
+        if sel:
+            price = sel.get("alc_price") if isinstance(sel, dict) else getattr(sel, "alc_price", None)
+            if price is not None:
+                prices.append(price)
 
     return {
         "total": total,
@@ -3537,41 +3640,67 @@ def _generate_match_excel(job: dict) -> None:
         cell.font = header_font
         cell.alignment = Alignment(horizontal="center", wrap_text=True)
 
+    def _cattr(c, key, default=None):
+        """Get attribute from MatchCandidate object or key from dict."""
+        return c.get(key, default) if isinstance(c, dict) else getattr(c, key, default)
+
     for row_idx, result in enumerate(results, 2):
-        selected = result.get_selected()
-        is_manual = result.selected_by == "manual"
+        # Handle both MatchResult objects (in-memory) and dicts (from disk)
+        r_status = _rattr(result, "status")
+        r_selected_by = _rattr(result, "selected_by")
+        r_input_row = _rattr(result, "input_row", 0)
+        r_input_name = _rattr(result, "input_product_name")
+        r_input_spec = _rattr(result, "input_specification")
+        r_input_artnr = _rattr(result, "input_article_number")
+        r_comment = _rattr(result, "comment")
+        r_selected_candidate = _rattr(result, "selected_candidate")
+        r_candidates = _rattr(result, "candidates", []) or []
+
+        # Find selected candidate
+        selected = None
+        if hasattr(result, "get_selected"):
+            selected = result.get_selected()
+        elif r_selected_candidate:
+            for c in r_candidates:
+                c_artnr = c.get("article_number") if isinstance(c, dict) else getattr(c, "article_number", None)
+                if c_artnr == r_selected_candidate:
+                    selected = c
+                    break
+
+        is_manual = r_selected_by == "manual"
 
         # Check if this is the cheapest relevant
-        priced_relevant = [c for c in result.candidates if c.is_sufficiently_relevant and c.alc_price is not None]
+
+        priced_relevant = [c for c in r_candidates if _cattr(c, "is_sufficiently_relevant") and _cattr(c, "alc_price") is not None]
         is_cheapest_relevant = False
         if selected and priced_relevant:
-            cheapest = min(priced_relevant, key=lambda c: c.alc_price)
-            is_cheapest_relevant = selected.article_number == cheapest.article_number
+            cheapest = min(priced_relevant, key=lambda c: _cattr(c, "alc_price", float('inf')))
+            is_cheapest_relevant = _cattr(selected, "article_number") == _cattr(cheapest, "article_number")
 
         # Check if standard best match differs from selected
         standard_best_differs = False
-        if selected and result.candidates:
-            best_by_relevance = max(result.candidates, key=lambda c: c.relevance_score)
-            standard_best_differs = best_by_relevance.article_number != selected.article_number
+        if selected and r_candidates:
+            best_by_relevance = max(r_candidates, key=lambda c: _cattr(c, "relevance_score", 0))
+            standard_best_differs = _cattr(best_by_relevance, "article_number") != _cattr(selected, "article_number")
 
         row_data = [
-            result.input_row,
-            result.input_product_name,
-            result.input_specification,
-            result.input_article_number,
+            r_input_row,
+            r_input_name,
+            r_input_spec,
+            r_input_artnr,
             mode_label,
-            result.status,
-            selected.article_number if selected else "",
-            selected.product_name if selected else "",
-            selected.specification if selected else "",
-            selected.alc_price if selected and selected.alc_price else "",
-            selected.supplier if selected else "",
-            round(selected.relevance_score, 1) if selected else "",
+            r_status,
+            _cattr(selected, "article_number", "") if selected else "",
+            _cattr(selected, "product_name", "") if selected else "",
+            _cattr(selected, "specification", "") if selected else "",
+            _cattr(selected, "alc_price") if selected and _cattr(selected, "alc_price") else "",
+            _cattr(selected, "supplier", "") if selected else "",
+            round(_cattr(selected, "relevance_score", 0), 1) if selected else "",
             "Ja" if is_manual else "Nei",
             "Ja" if is_cheapest_relevant else "Nei",
             "Ja" if standard_best_differs else "Nei",
-            len(result.candidates),
-            result.comment,
+            len(r_candidates),
+            r_comment,
         ]
 
         for col, val in enumerate(row_data, 1):
@@ -3580,10 +3709,10 @@ def _generate_match_excel(job: dict) -> None:
                 cell.number_format = '#,##0.00 "kr"'
 
         # Row highlighting
-        if result.status == "no_match":
+        if r_status == "no_match":
             for col in range(1, len(headers) + 1):
                 ws.cell(row=row_idx, column=col).fill = danger_fill
-        elif result.status == "manual_review":
+        elif r_status == "manual_review":
             for col in range(1, len(headers) + 1):
                 ws.cell(row=row_idx, column=col).fill = warning_fill
         elif is_manual:
@@ -3612,22 +3741,30 @@ def _generate_match_excel(job: dict) -> None:
 
     cand_row = 2
     for result in results:
-        for cand in result.candidates:
-            is_selected = cand.article_number == result.selected_candidate
+        r_candidates = _rattr(result, "candidates", []) or []
+        r_selected_candidate = _rattr(result, "selected_candidate")
+        r_input_row = _rattr(result, "input_row", 0)
+        r_input_name = _rattr(result, "input_product_name")
+
+        for cand in r_candidates:
+            c_artnr = _cattr(cand, "article_number", "")
+            is_selected = c_artnr == r_selected_candidate
+            ai_score = _cattr(cand, "ai_relevance_score")
+            tags = _cattr(cand, "tags", []) or []
             cand_data = [
-                result.input_row,
-                result.input_product_name,
-                cand.rank,
-                cand.article_number,
-                cand.product_name,
-                cand.specification,
-                cand.supplier,
-                cand.alc_price if cand.alc_price else "",
-                round(cand.relevance_score, 1),
-                round(cand.ai_relevance_score, 1) if cand.ai_relevance_score is not None else "",
-                "Ja" if cand.is_sufficiently_relevant else "Nei",
-                ", ".join(cand.tags) if cand.tags else "",
-                cand.ai_explanation,
+                r_input_row,
+                r_input_name,
+                _cattr(cand, "rank", 0),
+                c_artnr,
+                _cattr(cand, "product_name", ""),
+                _cattr(cand, "specification", ""),
+                _cattr(cand, "supplier", ""),
+                _cattr(cand, "alc_price") or "",
+                round(_cattr(cand, "relevance_score", 0), 1),
+                round(ai_score, 1) if ai_score is not None else "",
+                "Ja" if _cattr(cand, "is_sufficiently_relevant") else "Nei",
+                ", ".join(tags) if tags else "",
+                _cattr(cand, "ai_explanation", ""),
                 "JA" if is_selected else "",
             ]
             for col, val in enumerate(cand_data, 1):

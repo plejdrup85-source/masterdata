@@ -61,9 +61,9 @@ def _save_examples(examples: list[dict]) -> None:
         tmp.replace(EXAMPLES_FILE)
     except OSError as e:
         logger.error(f"Failed to save learning examples: {e}")
-        raise
         if tmp.exists():
             tmp.unlink(missing_ok=True)
+        raise
 
 
 def add_example(
