@@ -464,6 +464,76 @@ def _tag_candidates(candidates: list[MatchCandidate], match_mode: str) -> None:
                 c.tags.append("eget_merke")
 
 
+# ── Learning-based candidate boosting ──
+
+LEARNING_BOOST_POINTS = 20  # Max boost for a perfectly matched learned example
+LEARNING_MIN_SIMILARITY = 0.3  # Minimum similarity to consider a learning match
+
+
+def _apply_learning_boost(
+    input_name: str,
+    input_spec: str,
+    candidates: list[MatchCandidate],
+) -> None:
+    """Boost candidates that appear in historical learning examples.
+
+    Looks up learned article numbers for similar inputs and adds a bonus
+    to their relevance_score. Also adds tags and explanations.
+    """
+    if not candidates:
+        return
+
+    try:
+        from backend.learning_store import get_learned_articles
+        learned = get_learned_articles(input_name, input_spec, min_similarity=LEARNING_MIN_SIMILARITY)
+    except Exception as e:
+        logger.warning(f"Learning store lookup failed: {e}")
+        return
+
+    if not learned:
+        return
+
+    for c in candidates:
+        info = learned.get(c.article_number)
+        if not info:
+            continue
+
+        # Scale boost by similarity (0.3 → 0.5x boost, 1.0 → 1.0x boost)
+        similarity = info["similarity"]
+        scale = min(1.0, (similarity - LEARNING_MIN_SIMILARITY) / (1.0 - LEARNING_MIN_SIMILARITY) + 0.5)
+        boost = LEARNING_BOOST_POINTS * scale
+
+        c.relevance_score = min(100.0, c.relevance_score + boost)
+        c.final_score = min(100.0, c.final_score + boost)
+
+        # Tag and explain
+        if "learned_match" not in c.tags:
+            c.tags.append("learned_match")
+
+        source_label = {
+            "ui_override": "manuelt valg",
+            "ui_approval": "godkjent match",
+            "historical_import": "tidligere anbud",
+        }.get(info["source"], info["source"])
+
+        count_str = f" ({info['count']}x)" if info["count"] > 1 else ""
+        example = info.get("best_example", {})
+        prev_text = example.get("input_text", "")[:60]
+
+        explanation = f"Basert på {source_label}{count_str}: \"{prev_text}\" → {c.article_number} (likhet: {similarity:.0%})"
+        if c.ai_explanation:
+            c.ai_explanation += f" | {explanation}"
+        else:
+            c.ai_explanation = explanation
+
+    # Re-sort candidates by updated final_score
+    candidates.sort(key=lambda c: c.final_score, reverse=True)
+
+    # Re-rank
+    for i, c in enumerate(candidates, 1):
+        c.rank = i
+
+
 # ── AI-assisted relevance verification ──
 
 AI_MATCH_MODEL = os.environ.get("AI_MATCH_MODEL", "claude-haiku-4-5")
@@ -663,7 +733,10 @@ async def match_product(
             max_verify=min(10, len(candidates)),
         )
 
-    # Step 3: Filter and trim
+    # Step 3: Learning boost — use historical examples to boost candidates
+    _apply_learning_boost(input_name, input_spec, candidates)
+
+    # Step 4: Filter and trim
     # Remove hard mismatches from display
     display_candidates = [c for c in candidates if not c.hard_mismatch]
 
@@ -672,7 +745,7 @@ async def match_product(
 
     result.candidates = display_candidates
 
-    # Step 4: Auto-select best candidate
+    # Step 5: Auto-select best candidate
     if display_candidates:
         best = display_candidates[0]  # Already sorted by final_score
 

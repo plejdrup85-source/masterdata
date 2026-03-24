@@ -3040,6 +3040,10 @@ from backend.job_store import (
     unlock_job as _unlock_persisted_job, verify_job_access as _verify_job_access,
     cleanup_expired_jobs, update_job_activity,
 )
+from backend.learning_store import (
+    add_example as _add_learning_example,
+    verify_learning_admin as _verify_learning_admin,
+)
 
 # In-memory storage for match jobs (also persisted to disk)
 _match_jobs: dict[str, dict] = {}
@@ -3426,6 +3430,12 @@ async def select_match_candidate(
                 job["last_activity_at"] = time.time()
                 _generate_match_excel(job)
                 _persist_job(job)
+
+                # Feed into learning store
+                input_name = result.input_product_name if hasattr(result, "input_product_name") else result.get("input_product_name", "")
+                input_spec = result.input_specification if hasattr(result, "input_specification") else result.get("input_specification", "")
+                _feed_learning_example(input_name, input_spec, article_number, "ui_override", job_id)
+
                 return {
                     "message": "Kandidat valgt",
                     "input_row": input_row,
@@ -3435,6 +3445,29 @@ async def select_match_candidate(
                 raise HTTPException(400, f"Kandidat {article_number} finnes ikke for rad {input_row}")
 
     raise HTTPException(404, f"Rad {input_row} ikke funnet i resultater")
+
+
+def _feed_learning_example(input_name: str, input_spec: str, article_number: str, source: str, job_id: str) -> None:
+    """Feed a learning example from UI action."""
+    if not input_name or not article_number:
+        return
+    try:
+        # Look up product name from catalog
+        product_name = ""
+        if _jeeves_index and _jeeves_index.loaded:
+            jd = _jeeves_index.get(article_number)
+            if jd:
+                product_name = jd.item_description or ""
+        _add_learning_example(
+            input_text=input_name,
+            input_spec=input_spec,
+            matched_article=article_number,
+            matched_product_name=product_name,
+            source=source,
+            source_job_id=job_id,
+        )
+    except Exception as e:
+        logger.warning(f"Failed to feed learning example: {e}")
 
 
 @app.get("/api/match/download/{job_id}")
@@ -3784,7 +3817,26 @@ async def approve_rows(job_id: str, data: dict = Body(...)):
     job["last_activity_at"] = time.time()
     _persist_job(job)
 
+    # Feed approved rows into learning store
+    if action == "approved":
+        _feed_approved_rows_to_learning(job, approvals, job_id)
+
     return {"message": f"{count} rader satt til '{action}'", "row_approvals": approvals}
+
+
+def _feed_approved_rows_to_learning(job: dict, approvals: dict, job_id: str) -> None:
+    """Feed approved rows with selected candidates into learning store."""
+    results = job.get("results", [])
+    for r in results:
+        row_num = str(r.input_row if hasattr(r, "input_row") else r.get("input_row", ""))
+        if approvals.get(row_num) != "approved":
+            continue
+        selected = r.selected_candidate if hasattr(r, "selected_candidate") else r.get("selected_candidate")
+        if not selected:
+            continue
+        input_name = r.input_product_name if hasattr(r, "input_product_name") else r.get("input_product_name", "")
+        input_spec = r.input_specification if hasattr(r, "input_specification") else r.get("input_specification", "")
+        _feed_learning_example(input_name, input_spec, selected, "ui_approval", job_id)
 
 
 @app.post("/api/jobs/{job_id}/lock")
@@ -3987,6 +4039,194 @@ async def select_manual_product(job_id: str, data: dict = Body(...)):
             }
 
     raise HTTPException(404, f"Rad {input_row} ikke funnet i resultater")
+
+
+# ── Learning Module Endpoints ──
+
+from backend.learning_store import (
+    add_examples_batch, get_all_examples, get_stats as get_learning_stats,
+    list_batches as list_learning_batches, delete_batch as delete_learning_batch,
+    register_batch, find_matching_examples, reindex as reindex_learning,
+)
+
+
+@app.post("/api/learning/auth")
+async def learning_auth(data: dict = Body(...)):
+    """Verify admin password for learning module."""
+    password = data.get("password", "")
+    if _verify_learning_admin(password):
+        return {"authenticated": True}
+    raise HTTPException(403, "Feil admin-passord for læringsmodul.")
+
+
+@app.post("/api/learning/preview")
+async def learning_preview(
+    file: UploadFile = File(...),
+    password: str = Query("", description="Admin password"),
+):
+    """Preview Excel columns for mapping. Returns headers and sample rows."""
+    if not _verify_learning_admin(password):
+        raise HTTPException(403, "Feil admin-passord.")
+
+    content = await file.read()
+    if len(content) > MAX_FILE_SIZE:
+        raise HTTPException(400, "Filen er for stor.")
+
+    try:
+        from openpyxl import load_workbook
+        wb = load_workbook(BytesIO(content), read_only=True, data_only=True)
+        ws = wb.active
+
+        rows = list(ws.iter_rows(max_row=6))
+        if not rows:
+            raise HTTPException(400, "Tom fil")
+
+        headers = [str(cell.value or "").strip() for cell in rows[0]]
+        preview_rows = []
+        for row in rows[1:]:
+            preview_rows.append([str(cell.value or "").strip() for cell in row])
+
+        wb.close()
+
+        return {
+            "headers": headers,
+            "preview_rows": preview_rows,
+            "column_count": len(headers),
+            "filename": file.filename,
+        }
+    except Exception as e:
+        raise HTTPException(400, f"Kunne ikke lese filen: {e}")
+
+
+@app.post("/api/learning/import")
+async def learning_import(
+    file: UploadFile = File(...),
+    password: str = Query("", description="Admin password"),
+    batch_name: str = Query("", description="Import batch name"),
+    imported_by: str = Query("", description="Imported by"),
+    input_text_col: int = Query(..., description="Column index for input product text"),
+    input_spec_col: int = Query(-1, description="Column index for input specification (-1 = none)"),
+    output_artnr_col: int = Query(..., description="Column index for matched article number"),
+    output_name_col: int = Query(-1, description="Column index for matched product name (-1 = none)"),
+):
+    """Import historical anbud as learning examples."""
+    if not _verify_learning_admin(password):
+        raise HTTPException(403, "Feil admin-passord.")
+
+    if not batch_name.strip():
+        raise HTTPException(400, "Importnavn er påkrevd.")
+
+    content = await file.read()
+    try:
+        from openpyxl import load_workbook
+        wb = load_workbook(BytesIO(content), read_only=True, data_only=True)
+        ws = wb.active
+
+        rows_iter = ws.iter_rows()
+        header_row = next(rows_iter)  # skip header
+        headers = [str(cell.value or "").strip() for cell in header_row]
+
+        items = []
+        total_rows = 0
+        rejected = 0
+
+        for row in rows_iter:
+            total_rows += 1
+            values = [cell.value for cell in row]
+
+            input_text = str(values[input_text_col] or "").strip() if input_text_col < len(values) else ""
+            input_spec = str(values[input_spec_col] or "").strip() if input_spec_col >= 0 and input_spec_col < len(values) else ""
+            matched_article = str(values[output_artnr_col] or "").strip() if output_artnr_col < len(values) else ""
+            matched_name = str(values[output_name_col] or "").strip() if output_name_col >= 0 and output_name_col < len(values) else ""
+
+            if not input_text or not matched_article:
+                rejected += 1
+                continue
+
+            # Skip if article number looks invalid
+            if len(matched_article) < 2 or matched_article.lower() in ("none", "nan", "-", ""):
+                rejected += 1
+                continue
+
+            items.append({
+                "input_text": input_text,
+                "input_spec": input_spec,
+                "matched_article": matched_article,
+                "matched_product_name": matched_name,
+            })
+
+        wb.close()
+    except Exception as e:
+        raise HTTPException(400, f"Kunne ikke lese filen: {e}")
+
+    if not items:
+        raise HTTPException(400, f"Ingen gyldige rader funnet. {rejected} rader ble forkastet (mangler input eller artikkelnummer).")
+
+    # Generate batch ID and import
+    batch_id = str(uuid.uuid4())[:8]
+    count = add_examples_batch(items, batch_id)
+
+    mapped_fields = {
+        "input_text": headers[input_text_col] if input_text_col < len(headers) else f"col_{input_text_col}",
+        "input_spec": headers[input_spec_col] if input_spec_col >= 0 and input_spec_col < len(headers) else None,
+        "output_artnr": headers[output_artnr_col] if output_artnr_col < len(headers) else f"col_{output_artnr_col}",
+        "output_name": headers[output_name_col] if output_name_col >= 0 and output_name_col < len(headers) else None,
+    }
+
+    batch = register_batch(
+        batch_id=batch_id,
+        name=batch_name.strip(),
+        source_filename=file.filename or "",
+        total_rows=total_rows,
+        valid_examples=count,
+        rejected_rows=rejected,
+        mapped_fields=mapped_fields,
+        imported_by=imported_by.strip(),
+    )
+
+    return {
+        "batch_id": batch_id,
+        "name": batch_name.strip(),
+        "total_rows": total_rows,
+        "valid_examples": count,
+        "rejected_rows": rejected,
+        "mapped_fields": mapped_fields,
+    }
+
+
+@app.get("/api/learning/stats")
+async def learning_stats_endpoint():
+    """Get learning store statistics."""
+    return get_learning_stats()
+
+
+@app.get("/api/learning/batches")
+async def learning_batches_endpoint():
+    """List all import batches."""
+    return {"batches": list_learning_batches()}
+
+
+@app.delete("/api/learning/batches/{batch_id}")
+async def delete_learning_batch_endpoint(batch_id: str, password: str = Query("", description="Admin password")):
+    """Delete an import batch and its examples."""
+    if not _verify_learning_admin(password):
+        raise HTTPException(403, "Feil admin-passord.")
+
+    removed = delete_learning_batch(batch_id)
+    if removed == 0:
+        raise HTTPException(404, "Batch ikke funnet eller allerede slettet.")
+
+    return {"message": f"{removed} læringseksempler slettet", "removed": removed}
+
+
+@app.post("/api/learning/reindex")
+async def learning_reindex_endpoint(data: dict = Body(...)):
+    """Reindex all learning examples (regenerate tokens)."""
+    if not _verify_learning_admin(data.get("password", "")):
+        raise HTTPException(403, "Feil admin-passord.")
+
+    count = reindex_learning()
+    return {"message": f"{count} eksempler reindeksert", "count": count}
 
 
 if __name__ == "__main__":

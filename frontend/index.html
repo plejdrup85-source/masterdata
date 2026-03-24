@@ -734,6 +734,9 @@
             <button class="module-tab" id="tabHistory" onclick="switchModule('history')">
                 Historikk
             </button>
+            <button class="module-tab" id="tabLearning" onclick="switchModule('learning')">
+                L&aelig;r av anbud
+            </button>
         </div>
 
         <!-- ═══════════════════════════════════════════════════════ -->
@@ -1487,6 +1490,119 @@
         </div><!-- /moduleJobs -->
 
         <!-- ═══════════════════════════════════════════════════════ -->
+        <!-- MODULE: LÆR AV TIDLIGERE ANBUD                         -->
+        <!-- ═══════════════════════════════════════════════════════ -->
+        <div id="moduleLearning" style="display:none">
+
+        <!-- Admin Gate -->
+        <div class="card" id="learningAuthCard">
+            <h2>L&aelig;r av tidligere anbud &mdash; Admin-tilgang p&aring;krevd</h2>
+            <p style="color:var(--text-muted);font-size:0.9rem;margin-bottom:1rem">
+                Denne modulen brukes til &aring; importere historiske ferdigkodede anbud som l&aelig;ringsgrunnlag for matchemotoren.
+                Kun administratorer har tilgang.
+            </p>
+            <div style="display:flex;gap:0.5rem;align-items:center;max-width:400px">
+                <input type="password" id="learningAdminPassword" placeholder="Admin-passord" style="flex:1;padding:0.5rem 0.75rem;border:1px solid var(--border);border-radius:6px;font-size:0.9rem" onkeydown="if(event.key==='Enter')verifyLearningAdmin()">
+                <button class="btn btn-primary" onclick="verifyLearningAdmin()">Logg inn</button>
+            </div>
+            <p id="learningAuthError" style="color:#ef4444;font-size:0.82rem;margin-top:0.5rem;display:none"></p>
+        </div>
+
+        <!-- Learning Admin Panel (hidden until authenticated) -->
+        <div id="learningAdminPanel" style="display:none">
+
+            <!-- Stats Card -->
+            <div class="card" id="learningStatsCard">
+                <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:0.75rem">
+                    <h2 style="margin:0">L&aelig;ringsgrunnlag</h2>
+                    <button class="btn" style="font-size:0.78rem;padding:0.2rem 0.6rem" onclick="loadLearningStats()">Oppdater</button>
+                </div>
+                <div class="stats-grid" id="learningStatsGrid" style="margin-bottom:0.5rem"></div>
+                <p style="font-size:0.8rem;color:var(--text-muted)">
+                    L&aelig;ringseksempler kommer fra to kilder: UI-bruk (manuelt valg, godkjenninger) og historisk import.
+                    Begge p&aring;virker matchemotoren likt.
+                </p>
+            </div>
+
+            <!-- Import Card -->
+            <div class="card">
+                <h2>Importer historisk anbud</h2>
+                <p style="color:var(--text-muted);font-size:0.9rem;margin-bottom:1rem">
+                    Last opp et ferdigkodet anbudsprisark. Systemet ekstrahr l&aelig;ringseksempler fra input &rarr; fasit-mapping.
+                </p>
+
+                <div style="margin-bottom:1rem">
+                    <label style="font-size:0.85rem;font-weight:600;display:block;margin-bottom:0.3rem">Importnavn <span style="color:#ef4444">*</span></label>
+                    <input type="text" id="learningImportName" placeholder="F.eks. Anbud Kommune Z - 2025" style="width:100%;max-width:400px;padding:0.5rem 0.75rem;border:1px solid var(--border);border-radius:6px;font-size:0.9rem">
+                </div>
+
+                <div class="upload-area" id="learningUploadArea" style="padding:1.5rem">
+                    <svg class="upload-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" style="width:32px;height:32px">
+                        <path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/>
+                        <polyline points="17 8 12 3 7 8"/>
+                        <line x1="12" y1="3" x2="12" y2="15"/>
+                    </svg>
+                    <p>Dra og slipp ferdigkodet anbud-Excel</p>
+                    <p class="filename hidden" id="learningFileName"></p>
+                    <input type="file" id="learningFileInput" accept=".xlsx" style="position:absolute;inset:0;opacity:0;cursor:pointer">
+                </div>
+
+                <!-- Column Mapping (shown after file upload) -->
+                <div id="learningMappingSection" style="display:none;margin-top:1rem">
+                    <div style="font-size:0.95rem;font-weight:600;margin-bottom:0.75rem;color:#0369a1">Kolonnemapping</div>
+                    <p style="font-size:0.82rem;color:var(--text-muted);margin-bottom:0.75rem">
+                        Velg hvilke kolonner som inneholder input (produktbeskrivelse) og output (v&aring;rt artikkelnummer).
+                    </p>
+
+                    <div style="display:grid;grid-template-columns:1fr 1fr;gap:0.75rem;max-width:700px">
+                        <div>
+                            <label style="font-size:0.82rem;font-weight:600;display:block;margin-bottom:0.25rem;color:#166534">INPUT: Produktbeskrivelse <span style="color:#ef4444">*</span></label>
+                            <select id="learningColInputText" style="width:100%;padding:0.4rem;border:1px solid var(--border);border-radius:6px;font-size:0.85rem"></select>
+                        </div>
+                        <div>
+                            <label style="font-size:0.82rem;font-weight:600;display:block;margin-bottom:0.25rem;color:#166534">INPUT: Spesifikasjon (valgfri)</label>
+                            <select id="learningColInputSpec" style="width:100%;padding:0.4rem;border:1px solid var(--border);border-radius:6px;font-size:0.85rem"></select>
+                        </div>
+                        <div>
+                            <label style="font-size:0.82rem;font-weight:600;display:block;margin-bottom:0.25rem;color:#b45309">OUTPUT: V&aring;rt artikkelnummer <span style="color:#ef4444">*</span></label>
+                            <select id="learningColOutputArtnr" style="width:100%;padding:0.4rem;border:1px solid var(--border);border-radius:6px;font-size:0.85rem"></select>
+                        </div>
+                        <div>
+                            <label style="font-size:0.82rem;font-weight:600;display:block;margin-bottom:0.25rem;color:#b45309">OUTPUT: Produktnavn (valgfri)</label>
+                            <select id="learningColOutputName" style="width:100%;padding:0.4rem;border:1px solid var(--border);border-radius:6px;font-size:0.85rem"></select>
+                        </div>
+                    </div>
+
+                    <!-- Preview Table -->
+                    <div id="learningPreviewTable" style="margin-top:0.75rem;overflow-x:auto;font-size:0.8rem"></div>
+
+                    <div class="actions" style="margin-top:1rem">
+                        <button class="btn btn-primary" id="learningImportBtn" onclick="doLearningImport()">Kj&oslash;r import</button>
+                        <button class="btn" style="background:#e2e8f0;color:#475569" onclick="resetLearningImport()">Avbryt</button>
+                    </div>
+                </div>
+
+                <!-- Import Result -->
+                <div id="learningImportResult" style="display:none;margin-top:1rem;padding:1rem;background:#f0fdf4;border:1px solid #bbf7d0;border-radius:8px"></div>
+            </div>
+
+            <!-- Batch History Card -->
+            <div class="card">
+                <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:0.75rem">
+                    <h2 style="margin:0">Tidligere importer</h2>
+                    <div style="display:flex;gap:0.5rem">
+                        <button class="btn" style="font-size:0.78rem;padding:0.2rem 0.6rem" onclick="loadLearningBatches()">Oppdater</button>
+                        <button class="btn" style="font-size:0.78rem;padding:0.2rem 0.6rem;background:#fef3c7;color:#92400e" onclick="doReindexLearning()">Reindekser</button>
+                    </div>
+                </div>
+                <div id="learningBatchList" style="font-size:0.85rem;color:var(--text-muted)">Laster...</div>
+            </div>
+
+        </div><!-- /learningAdminPanel -->
+
+        </div><!-- /moduleLearning -->
+
+        <!-- ═══════════════════════════════════════════════════════ -->
         <!-- MODULE: HISTORIKK                                       -->
         <!-- ═══════════════════════════════════════════════════════ -->
         <div id="moduleHistory" style="display:none">
@@ -1612,13 +1728,13 @@
         let currentModule = 'masterdata';
         function switchModule(mod) {
             currentModule = mod;
-            const modules = ['moduleMasterdata', 'moduleMatching', 'moduleAnbud', 'moduleJobs', 'moduleRelations', 'moduleHistory'];
-            const modMap = {masterdata: 'moduleMasterdata', matching: 'moduleMatching', anbud: 'moduleAnbud', jobs: 'moduleJobs', relations: 'moduleRelations', history: 'moduleHistory'};
+            const modules = ['moduleMasterdata', 'moduleMatching', 'moduleAnbud', 'moduleJobs', 'moduleRelations', 'moduleHistory', 'moduleLearning'];
+            const modMap = {masterdata: 'moduleMasterdata', matching: 'moduleMatching', anbud: 'moduleAnbud', jobs: 'moduleJobs', relations: 'moduleRelations', history: 'moduleHistory', learning: 'moduleLearning'};
             modules.forEach(m => { const el = document.getElementById(m); if (el) el.style.display = 'none'; });
             const target = document.getElementById(modMap[mod]);
             if (target) target.style.display = '';
             document.querySelectorAll('.module-tab').forEach(t => t.classList.remove('active'));
-            const tabMap = {masterdata: 'tabMasterdata', matching: 'tabMatching', anbud: 'tabAnbud', jobs: 'tabJobs', relations: 'tabRelations', history: 'tabHistory'};
+            const tabMap = {masterdata: 'tabMasterdata', matching: 'tabMatching', anbud: 'tabAnbud', jobs: 'tabJobs', relations: 'tabRelations', history: 'tabHistory', learning: 'tabLearning'};
             document.getElementById(tabMap[mod])?.classList.add('active');
             if (mod === 'relations') initRelModule();
             if (mod === 'history') loadHistory();
@@ -3880,6 +3996,7 @@
             'anbefalt_hardcore': {bg:'#fef3c7',color:'#92400e',label:'Anbefalt'},
             'eget_merke': {bg:'#ecfdf5',color:'#047857',label:'Eget merke'},
             'manuelt_valgt': {bg:'#e0e7ff',color:'#3730a3',label:'Manuelt valgt'},
+            'learned_match': {bg:'#fdf4ff',color:'#86198f',label:'L\u00e6rt fra historikk'},
         };
 
         function getFilteredResults() {
@@ -4486,6 +4603,272 @@
                     }
                 }
             } catch (e) { console.error('Anbud poll error:', e); }
+        }
+
+        // ═══════════════════════════════════════════════════════
+        // LEARNING MODULE (Lær av tidligere anbud)
+        // ═══════════════════════════════════════════════════════
+
+        let learningAuthenticated = false;
+        let learningAdminPw = '';
+        let learningFile = null;
+        let learningPreviewData = null;
+
+        async function verifyLearningAdmin() {
+            const pw = document.getElementById('learningAdminPassword').value;
+            const errEl = document.getElementById('learningAuthError');
+            try {
+                const resp = await fetch(`${API_BASE}/api/learning/auth`, {
+                    method: 'POST',
+                    headers: {'Content-Type': 'application/json'},
+                    body: JSON.stringify({password: pw}),
+                });
+                if (resp.ok) {
+                    learningAuthenticated = true;
+                    learningAdminPw = pw;
+                    document.getElementById('learningAuthCard').style.display = 'none';
+                    document.getElementById('learningAdminPanel').style.display = '';
+                    errEl.style.display = 'none';
+                    loadLearningStats();
+                    loadLearningBatches();
+                } else {
+                    errEl.textContent = 'Feil passord. Kontakt administrator.';
+                    errEl.style.display = '';
+                }
+            } catch(e) {
+                errEl.textContent = 'Nettverksfeil: ' + e.message;
+                errEl.style.display = '';
+            }
+        }
+
+        async function loadLearningStats() {
+            try {
+                const resp = await fetch(`${API_BASE}/api/learning/stats`);
+                const data = await resp.json();
+                const bySource = data.by_source || {};
+                document.getElementById('learningStatsGrid').innerHTML = `
+                    <div class="stat-card"><div class="value">${data.total_examples || 0}</div><div class="label">Totalt eksempler</div></div>
+                    <div class="stat-card"><div class="value">${bySource.ui_override || 0}</div><div class="label">Fra manuelt valg</div></div>
+                    <div class="stat-card"><div class="value">${bySource.ui_approval || 0}</div><div class="label">Fra godkjenninger</div></div>
+                    <div class="stat-card" style="background:#fdf4ff"><div class="value">${bySource.historical_import || 0}</div><div class="label">Fra historisk import</div></div>
+                    <div class="stat-card"><div class="value">${data.unique_articles || 0}</div><div class="label">Unike artikler</div></div>
+                    <div class="stat-card"><div class="value">${data.batches || 0}</div><div class="label">Importbatcher</div></div>
+                `;
+            } catch(e) { console.error('Learning stats error:', e); }
+        }
+
+        // File handling
+        const learningFileInput = document.getElementById('learningFileInput');
+        const learningUploadArea = document.getElementById('learningUploadArea');
+        if (learningFileInput) {
+            learningFileInput.addEventListener('change', (e) => { const f = e.target.files[0]; if (f) selectLearningFile(f); });
+        }
+        if (learningUploadArea) {
+            learningUploadArea.addEventListener('dragover', (e) => { e.preventDefault(); learningUploadArea.classList.add('dragover'); });
+            learningUploadArea.addEventListener('dragleave', () => learningUploadArea.classList.remove('dragover'));
+            learningUploadArea.addEventListener('drop', (e) => {
+                e.preventDefault(); learningUploadArea.classList.remove('dragover');
+                const f = e.dataTransfer.files[0]; if (f) selectLearningFile(f);
+            });
+        }
+
+        async function selectLearningFile(file) {
+            if (!file.name.endsWith('.xlsx')) { alert('Kun .xlsx-filer.'); return; }
+            learningFile = file;
+            document.getElementById('learningFileName').textContent = file.name;
+            document.getElementById('learningFileName').classList.remove('hidden');
+
+            // Preview columns
+            const formData = new FormData();
+            formData.append('file', file);
+            try {
+                const resp = await fetch(`${API_BASE}/api/learning/preview?password=${encodeURIComponent(learningAdminPw)}`, {
+                    method: 'POST', body: formData,
+                });
+                if (!resp.ok) { alert('Kunne ikke lese filen.'); return; }
+                learningPreviewData = await resp.json();
+                showLearningMapping();
+            } catch(e) { alert('Feil: ' + e.message); }
+        }
+
+        function showLearningMapping() {
+            const data = learningPreviewData;
+            if (!data) return;
+            const headers = data.headers || [];
+
+            // Build dropdown options
+            const optNone = '<option value="-1">-- Ikke valgt --</option>';
+            const opts = headers.map((h, i) => `<option value="${i}">${escapeHtml(h || '(kolonne ' + (i+1) + ')')}</option>`).join('');
+            const optsReq = headers.map((h, i) => `<option value="${i}">${escapeHtml(h || '(kolonne ' + (i+1) + ')')}</option>`).join('');
+
+            document.getElementById('learningColInputText').innerHTML = optsReq;
+            document.getElementById('learningColInputSpec').innerHTML = optNone + opts;
+            document.getElementById('learningColOutputArtnr').innerHTML = optsReq;
+            document.getElementById('learningColOutputName').innerHTML = optNone + opts;
+
+            // Auto-detect columns
+            for (let i = 0; i < headers.length; i++) {
+                const h = (headers[i] || '').toLowerCase().replace(/[.\-_ ]/g, '');
+                if (/produktnavn|produkt|product|beskrivelse|varenavn/.test(h)) {
+                    document.getElementById('learningColInputText').value = i;
+                }
+                if (/spesifikasjon|spec|detaljer/.test(h)) {
+                    document.getElementById('learningColInputSpec').value = i;
+                }
+                if (/artikkelnummer|artikkelnr|artnr|sku|varenr/.test(h)) {
+                    document.getElementById('learningColOutputArtnr').value = i;
+                }
+            }
+
+            // Preview table
+            let html = '<table style="width:100%;border-collapse:collapse;font-size:0.78rem"><thead><tr style="border-bottom:2px solid var(--border)">';
+            for (const h of headers) html += `<th style="padding:0.3rem;text-align:left">${escapeHtml(h || '-')}</th>`;
+            html += '</tr></thead><tbody>';
+            for (const row of (data.preview_rows || [])) {
+                html += '<tr style="border-bottom:1px solid #f1f5f9">';
+                for (const v of row) html += `<td style="padding:0.3rem;max-width:200px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap" title="${escapeHtml(v)}">${escapeHtml(v)}</td>`;
+                html += '</tr>';
+            }
+            html += '</tbody></table>';
+            document.getElementById('learningPreviewTable').innerHTML = html;
+
+            document.getElementById('learningMappingSection').style.display = '';
+        }
+
+        async function doLearningImport() {
+            const importName = document.getElementById('learningImportName').value.trim();
+            if (!importName) { alert('Importnavn er p\u00e5krevd.'); return; }
+            if (!learningFile) { alert('Last opp en fil f\u00f8rst.'); return; }
+
+            const inputTextCol = document.getElementById('learningColInputText').value;
+            const inputSpecCol = document.getElementById('learningColInputSpec').value;
+            const outputArtnrCol = document.getElementById('learningColOutputArtnr').value;
+            const outputNameCol = document.getElementById('learningColOutputName').value;
+
+            if (inputTextCol === '-1') { alert('Velg kolonne for produktbeskrivelse.'); return; }
+            if (outputArtnrCol === '-1') { alert('Velg kolonne for artikkelnummer.'); return; }
+
+            const btn = document.getElementById('learningImportBtn');
+            btn.disabled = true;
+            btn.innerHTML = '<span class="spinner"></span> Importerer...';
+
+            try {
+                const formData = new FormData();
+                formData.append('file', learningFile);
+                const params = new URLSearchParams({
+                    password: learningAdminPw,
+                    batch_name: importName,
+                    imported_by: localStorage.getItem('masterdata_username') || '',
+                    input_text_col: inputTextCol,
+                    input_spec_col: inputSpecCol,
+                    output_artnr_col: outputArtnrCol,
+                    output_name_col: outputNameCol,
+                });
+                const resp = await fetch(`${API_BASE}/api/learning/import?${params}`, {
+                    method: 'POST', body: formData,
+                });
+                if (!resp.ok) {
+                    const err = await resp.json();
+                    alert(err.detail || 'Import feilet');
+                    btn.disabled = false; btn.textContent = 'Kj\u00f8r import'; return;
+                }
+                const data = await resp.json();
+
+                document.getElementById('learningImportResult').style.display = '';
+                document.getElementById('learningImportResult').innerHTML = `
+                    <div style="font-weight:700;color:#166534;margin-bottom:0.5rem">Import fullf\u00f8rt!</div>
+                    <div style="font-size:0.85rem">
+                        <p><strong>Batch:</strong> ${escapeHtml(data.name)} (${data.batch_id})</p>
+                        <p><strong>Totalt rader:</strong> ${data.total_rows}</p>
+                        <p style="color:#166534"><strong>Gyldige eksempler importert:</strong> ${data.valid_examples}</p>
+                        <p style="color:#991b1b"><strong>Forkastede rader:</strong> ${data.rejected_rows}</p>
+                        <p><strong>Mapping:</strong> ${Object.entries(data.mapped_fields || {}).filter(([k,v]) => v).map(([k,v]) => `${k}: "${v}"`).join(', ')}</p>
+                    </div>
+                `;
+
+                loadLearningStats();
+                loadLearningBatches();
+                btn.disabled = false; btn.textContent = 'Kj\u00f8r import';
+            } catch(e) {
+                alert('Feil: ' + e.message);
+                btn.disabled = false; btn.textContent = 'Kj\u00f8r import';
+            }
+        }
+
+        function resetLearningImport() {
+            learningFile = null;
+            learningPreviewData = null;
+            document.getElementById('learningFileName').classList.add('hidden');
+            document.getElementById('learningMappingSection').style.display = 'none';
+            document.getElementById('learningImportResult').style.display = 'none';
+            document.getElementById('learningFileInput').value = '';
+        }
+
+        async function loadLearningBatches() {
+            const container = document.getElementById('learningBatchList');
+            try {
+                const resp = await fetch(`${API_BASE}/api/learning/batches`);
+                const data = await resp.json();
+                const batches = data.batches || [];
+                if (!batches.length) {
+                    container.innerHTML = '<p>Ingen importer enn\u00e5.</p>';
+                    return;
+                }
+                let html = '<table style="width:100%;border-collapse:collapse"><thead><tr style="border-bottom:2px solid var(--border);text-align:left">';
+                html += '<th style="padding:0.5rem">Navn</th>';
+                html += '<th style="padding:0.5rem">Fil</th>';
+                html += '<th style="padding:0.5rem">Importert av</th>';
+                html += '<th style="padding:0.5rem">Dato</th>';
+                html += '<th style="padding:0.5rem">Rader</th>';
+                html += '<th style="padding:0.5rem">Gyldige</th>';
+                html += '<th style="padding:0.5rem">Forkastet</th>';
+                html += '<th style="padding:0.5rem"></th>';
+                html += '</tr></thead><tbody>';
+                for (const b of batches) {
+                    const date = b.created_at ? new Date(b.created_at * 1000).toLocaleString('nb-NO') : '-';
+                    html += `<tr style="border-bottom:1px solid #f1f5f9">`;
+                    html += `<td style="padding:0.5rem;font-weight:600">${escapeHtml(b.name || b.batch_id)}</td>`;
+                    html += `<td style="padding:0.5rem;font-size:0.82rem">${escapeHtml(b.source_filename || '-')}</td>`;
+                    html += `<td style="padding:0.5rem">${escapeHtml(b.imported_by || '-')}</td>`;
+                    html += `<td style="padding:0.5rem;font-size:0.82rem">${date}</td>`;
+                    html += `<td style="padding:0.5rem">${b.total_rows || 0}</td>`;
+                    html += `<td style="padding:0.5rem;color:#166534;font-weight:600">${b.valid_examples || 0}</td>`;
+                    html += `<td style="padding:0.5rem;color:#991b1b">${b.rejected_rows || 0}</td>`;
+                    html += `<td style="padding:0.5rem"><button class="btn" style="font-size:0.72rem;padding:0.2rem 0.5rem;background:#fef2f2;color:#991b1b;border:1px solid #fecaca" onclick="deleteLearningBatch('${b.batch_id}')">Slett</button></td>`;
+                    html += `</tr>`;
+                }
+                html += '</tbody></table>';
+                container.innerHTML = html;
+            } catch(e) {
+                container.innerHTML = `<p style="color:#ef4444">Feil: ${e.message}</p>`;
+            }
+        }
+
+        async function deleteLearningBatch(batchId) {
+            if (!confirm('Slette denne importbatchen og alle dens l\u00e6ringseksempler?')) return;
+            try {
+                const resp = await fetch(`${API_BASE}/api/learning/batches/${batchId}?password=${encodeURIComponent(learningAdminPw)}`, {method: 'DELETE'});
+                if (!resp.ok) { const e = await resp.json(); alert(e.detail || 'Feil'); return; }
+                const data = await resp.json();
+                alert(data.message);
+                loadLearningStats();
+                loadLearningBatches();
+            } catch(e) { alert('Feil: ' + e.message); }
+        }
+
+        async function doReindexLearning() {
+            if (!confirm('Reindeksere alle l\u00e6ringseksempler?')) return;
+            try {
+                const resp = await fetch(`${API_BASE}/api/learning/reindex`, {
+                    method: 'POST',
+                    headers: {'Content-Type': 'application/json'},
+                    body: JSON.stringify({password: learningAdminPw}),
+                });
+                if (!resp.ok) { const e = await resp.json(); alert(e.detail || 'Feil'); return; }
+                const data = await resp.json();
+                alert(data.message);
+                loadLearningStats();
+            } catch(e) { alert('Feil: ' + e.message); }
         }
 
         // ═══════════════════════════════════════════════════════
