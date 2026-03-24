@@ -3637,9 +3637,14 @@
                         let tagsHtml = '';
                         if (c.tags && c.tags.length > 0) {
                             for (const tag of c.tags) {
-                                if (tag === 'billigst') tagsHtml += '<span style="background:#dcfce7;color:#166534;padding:0.1rem 0.4rem;border-radius:10px;font-size:0.72rem;font-weight:600;margin-right:0.2rem">Billigst</span>';
-                                else if (tag === 'best_match') tagsHtml += '<span style="background:#dbeafe;color:#1e40af;padding:0.1rem 0.4rem;border-radius:10px;font-size:0.72rem;font-weight:600;margin-right:0.2rem">Best match</span>';
-                                else if (tag === 'anbefalt_hardcore') tagsHtml += '<span style="background:#fef3c7;color:#92400e;padding:0.1rem 0.4rem;border-radius:10px;font-size:0.72rem;font-weight:600;margin-right:0.2rem">Anbefalt</span>';
+                                const tagStyles = {
+                                    'billigst': {bg:'#dcfce7',color:'#166534',label:'Billigst'},
+                                    'best_match': {bg:'#dbeafe',color:'#1e40af',label:'Best match'},
+                                    'anbefalt_hardcore': {bg:'#fef3c7',color:'#92400e',label:'Anbefalt'},
+                                    'eget_merke': {bg:'#ecfdf5',color:'#047857',label:'Eget merke'},
+                                };
+                                const ts = tagStyles[tag];
+                                if (ts) tagsHtml += `<span style="background:${ts.bg};color:${ts.color};padding:0.1rem 0.4rem;border-radius:10px;font-size:0.72rem;font-weight:600;margin-right:0.2rem">${ts.label}</span>`;
                             }
                         }
 

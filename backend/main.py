@@ -3235,7 +3235,12 @@ async def start_match_job(
     _background_tasks.add(task)
     task.add_done_callback(_background_tasks.discard)
 
-    mode_label = "Hardcore Pris Prioritet" if match_mode == MatchMode.HARDCORE_PRICE.value else "Standard"
+    mode_label = {
+        MatchMode.STANDARD.value: "Standard",
+        MatchMode.HARDCORE_PRICE.value: "Hardcore Pris Prioritet",
+        MatchMode.OWN_BRAND.value: "Egne merkevarer",
+        MatchMode.STRICT_QUALITY.value: "Streng kvalitet",
+    }.get(match_mode, "Standard")
 
     return {
         "job_id": job_id,
