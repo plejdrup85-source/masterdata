@@ -3087,8 +3087,9 @@ async def start_match_job(
     if not _jeeves_index or not _jeeves_index.loaded:
         raise HTTPException(400, "Jeeves-katalog er ikke lastet. Kan ikke kjøre matching.")
 
-    if match_mode not in [MatchMode.STANDARD.value, MatchMode.HARDCORE_PRICE.value]:
-        raise HTTPException(400, f"Ugyldig matchmodus: {match_mode}. Bruk 'standard' eller 'hardcore_price'.")
+    valid_modes = [m.value for m in MatchMode]
+    if match_mode not in valid_modes:
+        raise HTTPException(400, f"Ugyldig matchmodus: {match_mode}. Gyldige: {', '.join(valid_modes)}")
 
     content = await file.read()
     if len(content) > MAX_FILE_SIZE:
@@ -3278,7 +3279,12 @@ async def get_match_results(job_id: str):
         "job_id": job["job_id"],
         "status": job["status"],
         "match_mode": job["match_mode"],
-        "mode_label": "Hardcore Pris Prioritet" if job["match_mode"] == MatchMode.HARDCORE_PRICE.value else "Standard",
+        "mode_label": {
+            MatchMode.STANDARD.value: "Standard",
+            MatchMode.HARDCORE_PRICE.value: "Hardcore Pris Prioritet",
+            MatchMode.OWN_BRAND.value: "Egne merkevarer",
+            MatchMode.STRICT_QUALITY.value: "Streng kvalitet",
+        }.get(job["match_mode"], "Standard"),
         "total": job["total"],
         "processed": job["processed"],
         "source_filename": job.get("source_filename", ""),
@@ -3371,7 +3377,12 @@ async def download_match_result(job_id: str):
     if not output_file or not Path(output_file).exists():
         raise HTTPException(404, "Resultatfilen finnes ikke")
 
-    mode_suffix = "hardcore_pris" if job["match_mode"] == MatchMode.HARDCORE_PRICE.value else "standard"
+    mode_suffix = {
+        MatchMode.STANDARD.value: "standard",
+        MatchMode.HARDCORE_PRICE.value: "hardcore_pris",
+        MatchMode.OWN_BRAND.value: "egne_merker",
+        MatchMode.STRICT_QUALITY.value: "streng_kvalitet",
+    }.get(job["match_mode"], "standard")
     return FileResponse(
         output_file,
         filename=f"matching_{mode_suffix}_{job_id}.xlsx",
@@ -3388,7 +3399,12 @@ def _generate_match_excel(job: dict) -> None:
     results = job.get("results", [])
     match_mode = job.get("match_mode", MatchMode.STANDARD.value)
     is_hardcore = match_mode == MatchMode.HARDCORE_PRICE.value
-    mode_label = "Hardcore Pris Prioritet" if is_hardcore else "Standard"
+    mode_label = {
+        MatchMode.STANDARD.value: "Standard",
+        MatchMode.HARDCORE_PRICE.value: "Hardcore Pris Prioritet",
+        MatchMode.OWN_BRAND.value: "Egne merkevarer",
+        MatchMode.STRICT_QUALITY.value: "Streng kvalitet",
+    }.get(match_mode, "Standard")
 
     # ── Sheet 1: Matching-resultater (main results) ──
     ws = wb.active

@@ -31,6 +31,8 @@ logger = logging.getLogger(__name__)
 class MatchMode(str, Enum):
     STANDARD = "standard"
     HARDCORE_PRICE = "hardcore_price"
+    OWN_BRAND = "own_brand"
+    STRICT_QUALITY = "strict_quality"
 
 
 # ── Data structures ──
@@ -131,6 +133,15 @@ STANDARD_TOP_CANDIDATES = 5  # Show top N candidates
 HARDCORE_MIN_RELEVANCE = 50  # Lower threshold — more candidates pass
 HARDCORE_SUFFICIENT_RELEVANCE = 55  # "Tilstrekkelig relevant" threshold
 HARDCORE_TOP_CANDIDATES = 8  # Show more candidates for user choice
+
+# Own Brand (Egne merkevarer): prefer OneMed/house brands
+OWN_BRAND_MIN_RELEVANCE = 60
+OWN_BRAND_TOP_CANDIDATES = 6
+OWN_BRAND_BRANDS = {"onemed", "selefa", "mediline", "abena"}  # Known house/own brands
+
+# Strict Quality: highest relevance threshold, only precise matches
+STRICT_QUALITY_MIN_RELEVANCE = 80
+STRICT_QUALITY_TOP_CANDIDATES = 3
 
 # Hard mismatch detection keywords — product types that must NOT be swapped
 PRODUCT_TYPE_GROUPS = [
@@ -274,8 +285,12 @@ def generate_candidates(
         List of MatchCandidate sorted by final_score descending
     """
     is_hardcore = match_mode == MatchMode.HARDCORE_PRICE.value
-    min_relevance = HARDCORE_MIN_RELEVANCE if is_hardcore else STANDARD_MIN_RELEVANCE
-    sufficient_threshold = HARDCORE_SUFFICIENT_RELEVANCE if is_hardcore else STANDARD_MIN_RELEVANCE
+    min_relevance = {
+        MatchMode.HARDCORE_PRICE.value: HARDCORE_MIN_RELEVANCE,
+        MatchMode.OWN_BRAND.value: OWN_BRAND_MIN_RELEVANCE,
+        MatchMode.STRICT_QUALITY.value: STRICT_QUALITY_MIN_RELEVANCE,
+    }.get(match_mode, STANDARD_MIN_RELEVANCE)
+    sufficient_threshold = HARDCORE_SUFFICIENT_RELEVANCE if is_hardcore else min_relevance
 
     input_text = _combined_text(input_name, input_spec)
     if not input_text.strip():
@@ -348,59 +363,73 @@ def _compute_final_scores(candidates: list[MatchCandidate], match_mode: str) -> 
 
     Standard mode: final_score = relevance_score (price is tie-breaker only)
     Hardcore Pris Prioritet: final_score heavily weights price among sufficiently relevant candidates
+    Own Brand: boosts own/house brand candidates
+    Strict Quality: only allows high-relevance matches
     """
-    is_hardcore = match_mode == MatchMode.HARDCORE_PRICE.value
-
     if not candidates:
         return
 
-    if not is_hardcore:
+    is_hardcore = match_mode == MatchMode.HARDCORE_PRICE.value
+    is_own_brand = match_mode == MatchMode.OWN_BRAND.value
+    is_strict = match_mode == MatchMode.STRICT_QUALITY.value
+
+    if is_hardcore:
+        # Hardcore Pris Prioritet mode — price dominates
+        prices = [c.alc_price for c in candidates if c.alc_price is not None and not c.hard_mismatch]
+        if prices:
+            min_price = min(prices)
+            max_price = max(prices)
+            price_range = max_price - min_price if max_price > min_price else 1.0
+        else:
+            min_price = 0
+            price_range = 1.0
+
+        for c in candidates:
+            if c.hard_mismatch:
+                c.final_score = 0.0
+                continue
+            if not c.is_sufficiently_relevant:
+                c.final_score = c.relevance_score * 0.3
+                continue
+            relevance_component = c.relevance_score
+            if c.alc_price is not None and prices:
+                price_score = (1.0 - (c.alc_price - min_price) / price_range) * 100 if price_range > 0 else 100.0
+                c.final_score = relevance_component * 0.30 + price_score * 0.70
+            else:
+                c.final_score = relevance_component * 0.50
+
+    elif is_own_brand:
+        # Own Brand mode — boost own/house brands
+        for c in candidates:
+            if c.hard_mismatch:
+                c.final_score = 0.0
+                continue
+            base = c.relevance_score
+            # Boost if supplier or brand matches known own brands
+            brand_text = (c.supplier + " " + c.product_brand).lower()
+            is_own = any(b in brand_text for b in OWN_BRAND_BRANDS)
+            if is_own:
+                c.final_score = base * 1.0 + 15.0  # +15 point bonus for own brands
+            else:
+                c.final_score = base * 0.85  # 15% penalty for external brands
+
+    elif is_strict:
+        # Strict Quality mode — only high-relevance matches
+        for c in candidates:
+            if c.hard_mismatch:
+                c.final_score = 0.0
+            elif c.relevance_score < STRICT_QUALITY_MIN_RELEVANCE:
+                c.final_score = c.relevance_score * 0.3  # Heavy penalty below threshold
+            else:
+                c.final_score = c.relevance_score
+
+    else:
         # Standard mode: relevance drives ranking
         for c in candidates:
             if c.hard_mismatch:
                 c.final_score = 0.0
             else:
                 c.final_score = c.relevance_score
-        candidates.sort(key=lambda c: c.final_score, reverse=True)
-        return
-
-    # Hardcore Pris Prioritet mode
-    # Step 1: Filter out hard mismatches
-    # Step 2: Among sufficiently relevant candidates, rank by ALC price (lowest wins)
-    # Step 3: Candidates without price go after those with price
-
-    # Find price range for normalization
-    prices = [c.alc_price for c in candidates if c.alc_price is not None and not c.hard_mismatch]
-    if prices:
-        min_price = min(prices)
-        max_price = max(prices)
-        price_range = max_price - min_price if max_price > min_price else 1.0
-    else:
-        min_price = 0
-        price_range = 1.0
-
-    for c in candidates:
-        if c.hard_mismatch:
-            c.final_score = 0.0
-            continue
-
-        if not c.is_sufficiently_relevant:
-            # Below threshold — keep low score but don't discard entirely
-            c.final_score = c.relevance_score * 0.3
-            continue
-
-        # For sufficiently relevant candidates: price dominates
-        # Higher final_score = better (we want lowest price to get highest score)
-        relevance_component = c.relevance_score  # 0-100
-
-        if c.alc_price is not None and prices:
-            # Invert price: lowest price gets highest price_score
-            price_score = (1.0 - (c.alc_price - min_price) / price_range) * 100 if price_range > 0 else 100.0
-            # Hardcore weighting: 30% relevance, 70% price
-            c.final_score = relevance_component * 0.30 + price_score * 0.70
-        else:
-            # No price: relevance only, but penalized for missing price
-            c.final_score = relevance_component * 0.50  # 50% penalty for missing price
 
     candidates.sort(key=lambda c: c.final_score, reverse=True)
 
@@ -411,6 +440,7 @@ def _tag_candidates(candidates: list[MatchCandidate], match_mode: str) -> None:
         return
 
     is_hardcore = match_mode == MatchMode.HARDCORE_PRICE.value
+    is_own_brand = match_mode == MatchMode.OWN_BRAND.value
 
     # Find best match (highest relevance among non-mismatches)
     valid = [c for c in candidates if not c.hard_mismatch]
@@ -425,6 +455,13 @@ def _tag_candidates(candidates: list[MatchCandidate], match_mode: str) -> None:
         cheapest.tags.append("billigst")
         if is_hardcore:
             cheapest.tags.append("anbefalt_hardcore")
+
+    # Tag own brand candidates
+    if is_own_brand:
+        for c in valid:
+            brand_text = (c.supplier + " " + c.product_brand).lower()
+            if any(b in brand_text for b in OWN_BRAND_BRANDS):
+                c.tags.append("eget_merke")
 
 
 # ── AI-assisted relevance verification ──
@@ -592,7 +629,11 @@ async def match_product(
     Returns a MatchResult with ranked candidates.
     """
     is_hardcore = match_mode == MatchMode.HARDCORE_PRICE.value
-    top_n = HARDCORE_TOP_CANDIDATES if is_hardcore else STANDARD_TOP_CANDIDATES
+    top_n = {
+        MatchMode.HARDCORE_PRICE.value: HARDCORE_TOP_CANDIDATES,
+        MatchMode.OWN_BRAND.value: OWN_BRAND_TOP_CANDIDATES,
+        MatchMode.STRICT_QUALITY.value: STRICT_QUALITY_TOP_CANDIDATES,
+    }.get(match_mode, STANDARD_TOP_CANDIDATES)
 
     result = MatchResult(
         input_row=input_row,

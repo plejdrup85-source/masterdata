@@ -1031,8 +1031,8 @@
             <!-- Match Mode Selection -->
             <div style="margin-bottom:1.25rem;padding:1rem;background:#f0f9ff;border-radius:8px;border:1px solid #bae6fd">
                 <div style="font-size:0.95rem;font-weight:600;margin-bottom:0.75rem;color:#0369a1">Matchmodus</div>
-                <div style="display:flex;gap:0.75rem;flex-wrap:wrap">
-                    <label id="matchModeStandardLabel" style="display:flex;align-items:flex-start;gap:0.5rem;cursor:pointer;background:#fff;padding:0.75rem 1rem;border-radius:8px;border:2px solid var(--primary);flex:1;min-width:240px" onclick="setMatchMode('standard')">
+                <div style="display:flex;gap:0.75rem;flex-wrap:wrap" id="matchModeContainer">
+                    <label class="match-mode-label active" data-mode="standard" onclick="setMatchMode('standard')" style="display:flex;align-items:flex-start;gap:0.5rem;cursor:pointer;background:#fff;padding:0.75rem 1rem;border-radius:8px;border:2px solid var(--primary);flex:1;min-width:220px">
                         <input type="radio" name="matchMode" value="standard" checked style="margin-top:3px">
                         <div>
                             <div style="font-weight:600;font-size:0.9rem">Standard</div>
@@ -1041,13 +1041,30 @@
                             </div>
                         </div>
                     </label>
-                    <label id="matchModeHardcoreLabel" style="display:flex;align-items:flex-start;gap:0.5rem;cursor:pointer;background:#fff;padding:0.75rem 1rem;border-radius:8px;border:2px solid var(--border);flex:1;min-width:240px" onclick="setMatchMode('hardcore_price')">
+                    <label class="match-mode-label" data-mode="hardcore_price" onclick="setMatchMode('hardcore_price')" style="display:flex;align-items:flex-start;gap:0.5rem;cursor:pointer;background:#fff;padding:0.75rem 1rem;border-radius:8px;border:2px solid var(--border);flex:1;min-width:220px">
                         <input type="radio" name="matchMode" value="hardcore_price" style="margin-top:3px">
                         <div>
                             <div style="font-weight:600;font-size:0.9rem;color:#b45309">Hardcore Pris Prioritet</div>
                             <div style="font-size:0.78rem;color:var(--text-muted);margin-top:0.2rem">
                                 Velger billigste relevante alternativ fremfor mest presise match.
-                                Egnet n&aring;r pris skal prioriteres h&oslash;yere enn perfekt spesifikasjonsmatch.
+                            </div>
+                        </div>
+                    </label>
+                    <label class="match-mode-label" data-mode="own_brand" onclick="setMatchMode('own_brand')" style="display:flex;align-items:flex-start;gap:0.5rem;cursor:pointer;background:#fff;padding:0.75rem 1rem;border-radius:8px;border:2px solid var(--border);flex:1;min-width:220px">
+                        <input type="radio" name="matchMode" value="own_brand" style="margin-top:3px">
+                        <div>
+                            <div style="font-weight:600;font-size:0.9rem;color:#047857">Egne merkevarer</div>
+                            <div style="font-size:0.78rem;color:var(--text-muted);margin-top:0.2rem">
+                                Prioriterer OneMed egne merker og husmerkevarer n&aring;r mulig.
+                            </div>
+                        </div>
+                    </label>
+                    <label class="match-mode-label" data-mode="strict_quality" onclick="setMatchMode('strict_quality')" style="display:flex;align-items:flex-start;gap:0.5rem;cursor:pointer;background:#fff;padding:0.75rem 1rem;border-radius:8px;border:2px solid var(--border);flex:1;min-width:220px">
+                        <input type="radio" name="matchMode" value="strict_quality" style="margin-top:3px">
+                        <div>
+                            <div style="font-weight:600;font-size:0.9rem;color:#7c3aed">Streng kvalitet</div>
+                            <div style="font-size:0.78rem;color:var(--text-muted);margin-top:0.2rem">
+                                Kun h&oslash;y-relevante matcher aksepteres. Strengere krav.
                             </div>
                         </div>
                     </label>
@@ -3374,19 +3391,32 @@
         let matchMode = 'standard';
         let matchResultsData = [];
 
+        const MATCH_MODE_STYLES = {
+            standard: { color: 'var(--primary)', bg: '#fff' },
+            hardcore_price: { color: '#b45309', bg: '#fffbeb' },
+            own_brand: { color: '#047857', bg: '#ecfdf5' },
+            strict_quality: { color: '#7c3aed', bg: '#f5f3ff' },
+        };
+        const MATCH_MODE_LABELS = {
+            standard: 'Standard',
+            hardcore_price: 'Hardcore Pris Prioritet',
+            own_brand: 'Egne merkevarer',
+            strict_quality: 'Streng kvalitet',
+        };
+
         function setMatchMode(mode) {
             matchMode = mode;
-            const stdLabel = document.getElementById('matchModeStandardLabel');
-            const hcLabel = document.getElementById('matchModeHardcoreLabel');
-            if (mode === 'standard') {
-                stdLabel.style.border = '2px solid var(--primary)';
-                hcLabel.style.border = '2px solid var(--border)';
-            } else {
-                stdLabel.style.border = '2px solid var(--border)';
-                hcLabel.style.border = '2px solid #b45309';
-                hcLabel.style.background = '#fffbeb';
-            }
-            document.querySelector(`input[name="matchMode"][value="${mode}"]`).checked = true;
+            // Update all mode labels
+            document.querySelectorAll('.match-mode-label').forEach(label => {
+                const labelMode = label.dataset.mode;
+                const isActive = labelMode === mode;
+                const style = MATCH_MODE_STYLES[labelMode] || MATCH_MODE_STYLES.standard;
+                label.style.border = isActive ? `2px solid ${style.color}` : '2px solid var(--border)';
+                label.style.background = isActive ? style.bg : '#fff';
+                label.classList.toggle('active', isActive);
+            });
+            const radio = document.querySelector(`input[name="matchMode"][value="${mode}"]`);
+            if (radio) radio.checked = true;
         }
 
         // File handling
@@ -3510,13 +3540,14 @@
                 matchResultsData = data.results || [];
 
                 const isHardcore = data.match_mode === 'hardcore_price';
-                const modeLabel = data.mode_label;
+                const modeLabel = data.mode_label || MATCH_MODE_LABELS[data.match_mode] || 'Standard';
 
                 // Mode badge
                 const badge = document.getElementById('matchModeBadge');
                 badge.textContent = modeLabel;
-                badge.style.background = isHardcore ? '#fef3c7' : '#dbeafe';
-                badge.style.color = isHardcore ? '#92400e' : '#1e40af';
+                const modeStyle = MATCH_MODE_STYLES[data.match_mode] || MATCH_MODE_STYLES.standard;
+                badge.style.background = modeStyle.bg;
+                badge.style.color = modeStyle.color;
 
                 // Stats
                 const summary = data.summary || {};
