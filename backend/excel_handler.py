@@ -104,6 +104,8 @@ def create_output_excel(
     output_path: str,
     analysis_mode: str = "full_enrichment",
     focus_areas: list[str] | None = None,
+    excluded_products: list[dict] | None = None,
+    suggestion_reviews: dict | None = None,
 ) -> None:
     """Create a structured Excel output file with analysis results.
 
@@ -121,7 +123,8 @@ def create_output_excel(
     # Sheet 1: Summary (always included)
     ws_summary = wb.active
     ws_summary.title = "Summary"
-    _create_summary_sheet(ws_summary, results, analysis_mode=analysis_mode, focus_areas=focus_areas)
+    _create_summary_sheet(ws_summary, results, analysis_mode=analysis_mode, focus_areas=focus_areas,
+                          excluded_products=excluded_products)
 
     # Sheet 2: Area Scores (audit and focused modes)
     if is_audit or is_focused:
@@ -146,7 +149,7 @@ def create_output_excel(
         _create_improvements_sheet(ws_improvements, results)
 
         ws_inriver = wb.create_sheet("Inriver Import")
-        _create_inriver_import_sheet(ws_inriver, results)
+        _create_inriver_import_sheet(ws_inriver, results, suggestion_reviews=suggestion_reviews)
 
         # Produsentoppfølging: only include if there are actual manufacturer-contact items
         mfr_contact_results = [
@@ -597,9 +600,24 @@ def _create_image_detail_sheet(ws, results: list[ProductAnalysis]) -> None:
     # Skip a row then add suggestion header
     sugg_start = row_idx + 2
     sugg_headers = [
-        "Artikkelnummer", "Nåværende bilde-URL", "Nåværende status",
-        "Foreslått bilde-URL", "Bildekilde", "Kilde-URL",
-        "Konfidensgrad", "Begrunnelse",
+        "Artikkelnummer",
+        "GID",
+        "Produktnavn",
+        "Spesifikasjon",
+        "Produsent",
+        "Produsent art.nr",
+        "Nåværende bilde-URL",
+        "Nåværende status",
+        "Foreslått bilde-URL",
+        "Kildedomain",
+        "Kildetype",
+        "Kilde-URL",
+        "Identitetsscore",
+        "Forbedringsscore",
+        "Konfidensgrad",
+        "Status",
+        "Begrunnelse",
+        "Verifiseringssignaler",
     ]
     for col, h in enumerate(sugg_headers, 1):
         ws.cell(row=sugg_start, column=col, value=h)
@@ -610,14 +628,26 @@ def _create_image_detail_sheet(ws, results: list[ProductAnalysis]) -> None:
         img_sugg = result.image_suggestion
         if not img_sugg:
             continue
+        pd = result.product_data
+        jd = result.jeeves_data
         _write_id_cell(ws, sugg_row, 1, result.article_number)
-        ws.cell(row=sugg_row, column=2, value=img_sugg.current_image_url or "")
-        ws.cell(row=sugg_row, column=3, value=img_sugg.current_image_status or "")
-        ws.cell(row=sugg_row, column=4, value=img_sugg.suggested_image_url or "")
-        ws.cell(row=sugg_row, column=5, value=img_sugg.suggested_source or "")
-        ws.cell(row=sugg_row, column=6, value=img_sugg.suggested_source_url or "")
-        ws.cell(row=sugg_row, column=7, value=img_sugg.confidence if img_sugg.confidence else 0)
-        ws.cell(row=sugg_row, column=8, value=img_sugg.reason or "")
+        ws.cell(row=sugg_row, column=2, value=(jd.gid if jd else "") or "")
+        ws.cell(row=sugg_row, column=3, value=pd.product_name or (jd.item_description if jd else "") or "")
+        ws.cell(row=sugg_row, column=4, value=pd.specification or (jd.specification if jd else "") or "")
+        ws.cell(row=sugg_row, column=5, value=pd.manufacturer or (jd.supplier if jd else "") or "")
+        ws.cell(row=sugg_row, column=6, value=pd.manufacturer_article_number or (jd.supplier_item_no if jd else "") or "")
+        ws.cell(row=sugg_row, column=7, value=img_sugg.current_image_url or "")
+        ws.cell(row=sugg_row, column=8, value=img_sugg.current_image_status or "")
+        ws.cell(row=sugg_row, column=9, value=img_sugg.suggested_image_url or "")
+        ws.cell(row=sugg_row, column=10, value=img_sugg.suggested_source_domain or img_sugg.suggested_source or "")
+        ws.cell(row=sugg_row, column=11, value=img_sugg.suggested_source_type or img_sugg.suggested_source or "")
+        ws.cell(row=sugg_row, column=12, value=img_sugg.suggested_source_url or "")
+        ws.cell(row=sugg_row, column=13, value=round(img_sugg.identity_score, 2) if img_sugg.identity_score else 0)
+        ws.cell(row=sugg_row, column=14, value=round(img_sugg.improvement_score, 2) if img_sugg.improvement_score else 0)
+        ws.cell(row=sugg_row, column=15, value=round(img_sugg.confidence, 2) if img_sugg.confidence else 0)
+        ws.cell(row=sugg_row, column=16, value=img_sugg.confidence_label or "")
+        ws.cell(row=sugg_row, column=17, value=img_sugg.reason or "")
+        ws.cell(row=sugg_row, column=18, value=", ".join(img_sugg.verification_signals) if img_sugg.verification_signals else "")
         sugg_row += 1
 
 
@@ -1000,7 +1030,8 @@ def _create_conflicts_sheet(ws, results: list[ProductAnalysis]) -> None:
 
 def _create_summary_sheet(ws, results: list[ProductAnalysis],
                           analysis_mode: str = "full_enrichment",
-                          focus_areas: list[str] | None = None) -> None:
+                          focus_areas: list[str] | None = None,
+                          excluded_products: list[dict] | None = None) -> None:
     """Create the Summary sheet with high-level two-source metrics."""
     title_font = Font(bold=True, size=14)
     section_font = Font(bold=True, size=12, color="4472C4")
@@ -1077,7 +1108,8 @@ def _create_summary_sheet(ws, results: list[ProductAnalysis],
         ("KJØREMETADATA", "", 0),
         ("Analysemodus", mode_titles.get(analysis_mode, analysis_mode), 1),
         ("Dato/tid", datetime.now().strftime('%Y-%m-%d %H:%M'), 1),
-        ("Totalt antall produkter", total, 1),
+        ("Totalt antall produkter (i output)", total, 1),
+        ("Ekskludert (ikke funnet på nettsiden)", len(excluded_products) if excluded_products else 0, 1),
         ("Produkter i Jeeves", has_jeeves, 1),
         ("Gjennomsnittlig kvalitetsscore", f"{avg_score:.1f}%", 1),
         ("", "", 0),
@@ -1106,10 +1138,11 @@ def _create_summary_sheet(ws, results: list[ProductAnalysis],
     rows.append(("Mangler pakningsinformasjon", total - web_pkg, 1))
     rows.append(("", "", 0))
 
-    # Website coverage
+    # Website coverage — all products in output are verified on website
     rows.append(("NETTSIDE-DEKNING", "", 0))
-    rows.append(("Funnet på onemed.no", found, 1))
-    rows.append(("Ikke funnet på onemed.no", not_found, 1))
+    rows.append(("Alle produkter i rapporten er verifisert på onemed.no", "Ja", 1))
+    if excluded_products:
+        rows.append(("Ekskluderte artikler (ikke på nettsiden)", ", ".join(e["article_number"] for e in excluded_products), 1))
     rows.append(("", "", 0))
 
     if analysis_mode == "full_enrichment":
@@ -1652,18 +1685,21 @@ def _is_material_change(current: str | None, suggested: str | None) -> bool:
     return True
 
 
-def _create_inriver_import_sheet(ws, results: list[ProductAnalysis]) -> None:
+def _create_inriver_import_sheet(ws, results: list[ProductAnalysis], suggestion_reviews: dict | None = None) -> None:
     """Create the Inriver Import staging sheet.
 
     Only includes rows where at least one field has a genuine improvement.
-    Each field has an approval column (Godkjent/Ikke godkjent).
+    Each field has an approval column (Godkjent/Ikke godkjent/Avslått).
     Export logic: a value is included in the import only if:
     1. There is a suggested improvement
     2. The suggestion is materially different from the current value
     3. The approval column is set to 'Godkjent'
 
-    Unchanged values and empty placeholders are NOT exported.
+    When suggestion_reviews are provided (from the frontend review UI),
+    the approval column reflects the user's decision instead of defaulting
+    to 'Ikke godkjent'.
     """
+    reviews = suggestion_reviews or {}
     # Field definitions for the import sheet
     import_fields = [
         ("Produktnavn", lambda r: r.product_data.product_name or ""),
@@ -1733,6 +1769,7 @@ def _create_inriver_import_sheet(ws, results: list[ProductAnalysis]) -> None:
         # Check each field for material changes
         has_any_change = False
         field_data = []
+        artnr_reviews = reviews.get(result.article_number, {})
         for field_name, current_fn in import_fields:
             current_val = current_fn(result)
             suggested_val = _get_suggestion_for_field(result, field_name) or ""
@@ -1745,7 +1782,17 @@ def _create_inriver_import_sheet(ws, results: list[ProductAnalysis]) -> None:
             is_material = _is_material_change(current_val, suggested_val)
             # Only include the suggestion if it's a material change
             display_suggestion = suggested_val if is_material else ""
-            approval_default = "Ikke godkjent"  # Conservative default
+
+            # Determine approval status from saved reviews
+            field_review = artnr_reviews.get(field_name, {})
+            review_status = field_review.get("status", "")
+            if review_status == "accepted":
+                approval_default = "Godkjent"
+            elif review_status == "rejected":
+                approval_default = "Avslått"
+            else:
+                approval_default = "Ikke godkjent"  # Conservative default
+
             if is_material:
                 has_any_change = True
             field_data.append((current_val, display_suggestion, approval_default))

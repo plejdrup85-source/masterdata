@@ -621,6 +621,33 @@
         .review-btn.active-accept { background: #dcfce7; border-color: #86efac; color: #166534; }
         .review-btn.active-reject { background: #fecaca; border-color: #fca5a5; color: #991b1b; }
         .review-btn.active-needs_review { background: #fef3c7; border-color: #fde68a; color: #92400e; }
+        /* Suggestion review panel styles */
+        .review-filter-btn { background: #fff; border: 1px solid var(--border); cursor: pointer; }
+        .review-filter-btn:hover { background: #f1f5f9; }
+        .review-filter-btn.active { background: var(--primary); color: #fff; border-color: var(--primary); }
+        .suggestion-row { transition: background 0.15s; }
+        .suggestion-row:hover { background: #f8fafc; }
+        .suggestion-row.status-accepted { background: #f0fdf4; }
+        .suggestion-row.status-rejected { background: #fef2f2; }
+        .suggestion-row.status-pending { background: #fff; }
+        .suggestion-action-btn {
+            padding: 0.2rem 0.5rem;
+            border: 1px solid var(--border);
+            border-radius: 4px;
+            font-size: 0.75rem;
+            cursor: pointer;
+            background: #fff;
+            font-weight: 500;
+            transition: all 0.15s;
+        }
+        .suggestion-action-btn:hover { opacity: 0.85; }
+        .suggestion-action-btn.active-accepted { background: #dcfce7; border-color: #86efac; color: #166534; }
+        .suggestion-action-btn.active-rejected { background: #fecaca; border-color: #fca5a5; color: #991b1b; }
+        .suggestion-action-btn.active-pending { background: #f1f5f9; border-color: #cbd5e1; color: #64748b; }
+        .suggestion-diff-old { background: #fecaca; padding: 0.1rem 0.2rem; border-radius: 2px; text-decoration: line-through; color: #991b1b; }
+        .suggestion-diff-new { background: #dcfce7; padding: 0.1rem 0.2rem; border-radius: 2px; color: #166534; }
+        .suggestion-val-cell { max-width: 300px; overflow: hidden; white-space: pre-wrap; word-break: break-word; font-size: 0.8rem; line-height: 1.4; }
+        .review-saving { opacity: 0.5; pointer-events: none; }
         .review-comment {
             flex: 1;
             min-width: 150px;
@@ -692,11 +719,23 @@
             <button class="module-tab active" id="tabMasterdata" onclick="switchModule('masterdata')">
                 Kvalitetsanalyse
             </button>
+            <button class="module-tab" id="tabMatching" onclick="switchModule('matching')">
+                Produktmatching
+            </button>
+            <button class="module-tab" id="tabAnbud" onclick="switchModule('anbud')">
+                Anbudsprisark
+            </button>
+            <button class="module-tab" id="tabJobs" onclick="switchModule('jobs')">
+                Jobber
+            </button>
             <button class="module-tab" id="tabRelations" onclick="switchModule('relations')">
                 Produktfamilier
             </button>
             <button class="module-tab" id="tabHistory" onclick="switchModule('history')">
                 Historikk
+            </button>
+            <button class="module-tab" id="tabLearning" onclick="switchModule('learning')">
+                L&aelig;r av anbud
             </button>
         </div>
 
@@ -899,7 +938,49 @@
                 <div class="actions">
                     <button class="btn btn-success" id="downloadBtn">Last ned Excel-rapport</button>
                     <button class="btn btn-primary" id="newAnalysisBtn">Ny analyse</button>
+                    <button class="btn" id="reviewSuggestionsBtn" style="background:#7c3aed;color:#fff;font-size:0.85rem">Vurder berikelsesforslag</button>
                     <button class="btn" id="handoffToFamilyBtn" style="background:#7c3aed;color:#fff;font-size:0.85rem" onclick="handoffToRelationshipModule()">Analyser produktfamilier for disse artiklene</button>
+                </div>
+            </div>
+
+            <!-- Suggestion Review Panel -->
+            <div class="card hidden" id="suggestionReviewCard">
+                <div style="display:flex;align-items:center;justify-content:space-between;flex-wrap:wrap;gap:0.5rem;margin-bottom:1rem">
+                    <h2 style="margin:0">Vurder berikelsesforslag <span id="reviewCountBadge" style="font-weight:400;font-size:0.85rem;color:var(--text-muted)"></span></h2>
+                    <button class="btn" onclick="document.getElementById('suggestionReviewCard').classList.add('hidden')" style="font-size:0.8rem;padding:0.3rem 0.8rem">Lukk</button>
+                </div>
+                <p style="color:var(--text-muted);font-size:0.85rem;margin-bottom:1rem">
+                    Gå gjennom foreslåtte endringer og aksepter eller avslå hver enkelt. Valget lagres automatisk og påvirker Excel-eksporten.
+                </p>
+                <!-- Filter bar -->
+                <div style="display:flex;align-items:center;gap:0.5rem;margin-bottom:0.75rem;padding:0.5rem 0.75rem;background:var(--bg);border-radius:6px;border:1px solid var(--border);flex-wrap:wrap">
+                    <span style="font-size:0.82rem;font-weight:500">Filter:</span>
+                    <button class="btn review-filter-btn active" data-filter="all" onclick="filterReviewSuggestions('all')" style="font-size:0.78rem;padding:0.2rem 0.6rem;border-radius:4px">Alle</button>
+                    <button class="btn review-filter-btn" data-filter="pending" onclick="filterReviewSuggestions('pending')" style="font-size:0.78rem;padding:0.2rem 0.6rem;border-radius:4px">Ikke vurdert</button>
+                    <button class="btn review-filter-btn" data-filter="accepted" onclick="filterReviewSuggestions('accepted')" style="font-size:0.78rem;padding:0.2rem 0.6rem;border-radius:4px">Aksepterte</button>
+                    <button class="btn review-filter-btn" data-filter="rejected" onclick="filterReviewSuggestions('rejected')" style="font-size:0.78rem;padding:0.2rem 0.6rem;border-radius:4px">Avslåtte</button>
+                    <span style="margin-left:0.5rem;font-size:0.78rem;color:var(--text-muted)">|</span>
+                    <input type="text" id="reviewSearchInput" placeholder="Søk artikkelnr / felt..." oninput="filterReviewSuggestions()" style="font-size:0.8rem;padding:0.25rem 0.5rem;border:1px solid var(--border);border-radius:4px;min-width:160px">
+                    <span style="flex:1"></span>
+                    <span id="reviewStats" style="font-size:0.78rem;color:var(--text-muted)"></span>
+                    <button class="btn btn-success" onclick="bulkReviewSuggestions('accepted')" style="font-size:0.78rem;padding:0.25rem 0.6rem">Godkjenn alle synlige</button>
+                    <button class="btn btn-danger" onclick="bulkReviewSuggestions('rejected')" style="font-size:0.78rem;padding:0.25rem 0.6rem">Avslå alle synlige</button>
+                </div>
+                <div style="overflow-x:auto;max-height:70vh;overflow-y:auto">
+                    <table class="results-table" id="reviewTable" style="font-size:0.82rem">
+                        <thead style="position:sticky;top:0;z-index:1">
+                            <tr>
+                                <th style="width:110px">Artikkelnr</th>
+                                <th style="width:120px">Felt</th>
+                                <th style="min-width:200px">Nåværende verdi</th>
+                                <th style="min-width:200px">Foreslått verdi</th>
+                                <th style="width:120px">Kilde</th>
+                                <th style="width:60px">Konf.</th>
+                                <th style="width:190px">Handling</th>
+                            </tr>
+                        </thead>
+                        <tbody id="reviewTableBody"></tbody>
+                    </table>
                 </div>
             </div>
 
@@ -942,6 +1023,193 @@
         </div>
 
         </div><!-- /moduleMasterdata -->
+
+        <!-- ═══════════════════════════════════════════════════════ -->
+        <!-- MODULE: PRODUKTMATCHING                                 -->
+        <!-- ═══════════════════════════════════════════════════════ -->
+        <div id="moduleMatching" style="display:none">
+
+        <!-- Match Config Card -->
+        <div class="card" id="matchConfigCard">
+            <h2>Produktmatching &mdash; Finn beste produktmatch i katalogen</h2>
+            <p style="color:var(--text-muted);font-size:0.9rem;margin-bottom:1.25rem">
+                Last opp en Excel-fil med produkter du vil matche mot OneMed-katalogen.
+                Velg matchmodus for &aring; styre hvordan kandidater rangeres.
+            </p>
+
+            <!-- Match Mode Selection -->
+            <div style="margin-bottom:1.25rem;padding:1rem;background:#f0f9ff;border-radius:8px;border:1px solid #bae6fd">
+                <div style="font-size:0.95rem;font-weight:600;margin-bottom:0.75rem;color:#0369a1">Matchmodus</div>
+                <div style="display:flex;gap:0.75rem;flex-wrap:wrap" id="matchModeContainer">
+                    <label class="match-mode-label active" data-mode="standard" onclick="setMatchMode('standard')" style="display:flex;align-items:flex-start;gap:0.5rem;cursor:pointer;background:#fff;padding:0.75rem 1rem;border-radius:8px;border:2px solid var(--primary);flex:1;min-width:220px">
+                        <input type="radio" name="matchMode" value="standard" checked style="margin-top:3px">
+                        <div>
+                            <div style="font-weight:600;font-size:0.9rem">Standard</div>
+                            <div style="font-size:0.78rem;color:var(--text-muted);margin-top:0.2rem">
+                                Beste semantiske match vinner. Pris er sekund&aelig;rt.
+                            </div>
+                        </div>
+                    </label>
+                    <label class="match-mode-label" data-mode="hardcore_price" onclick="setMatchMode('hardcore_price')" style="display:flex;align-items:flex-start;gap:0.5rem;cursor:pointer;background:#fff;padding:0.75rem 1rem;border-radius:8px;border:2px solid var(--border);flex:1;min-width:220px">
+                        <input type="radio" name="matchMode" value="hardcore_price" style="margin-top:3px">
+                        <div>
+                            <div style="font-weight:600;font-size:0.9rem;color:#b45309">Hardcore Pris Prioritet</div>
+                            <div style="font-size:0.78rem;color:var(--text-muted);margin-top:0.2rem">
+                                Velger billigste relevante alternativ fremfor mest presise match.
+                            </div>
+                        </div>
+                    </label>
+                    <label class="match-mode-label" data-mode="own_brand" onclick="setMatchMode('own_brand')" style="display:flex;align-items:flex-start;gap:0.5rem;cursor:pointer;background:#fff;padding:0.75rem 1rem;border-radius:8px;border:2px solid var(--border);flex:1;min-width:220px">
+                        <input type="radio" name="matchMode" value="own_brand" style="margin-top:3px">
+                        <div>
+                            <div style="font-weight:600;font-size:0.9rem;color:#047857">Egne merkevarer</div>
+                            <div style="font-size:0.78rem;color:var(--text-muted);margin-top:0.2rem">
+                                Prioriterer OneMed egne merker og husmerkevarer n&aring;r mulig.
+                            </div>
+                        </div>
+                    </label>
+                    <label class="match-mode-label" data-mode="strict_quality" onclick="setMatchMode('strict_quality')" style="display:flex;align-items:flex-start;gap:0.5rem;cursor:pointer;background:#fff;padding:0.75rem 1rem;border-radius:8px;border:2px solid var(--border);flex:1;min-width:220px">
+                        <input type="radio" name="matchMode" value="strict_quality" style="margin-top:3px">
+                        <div>
+                            <div style="font-weight:600;font-size:0.9rem;color:#7c3aed">Streng kvalitet</div>
+                            <div style="font-size:0.78rem;color:var(--text-muted);margin-top:0.2rem">
+                                Kun h&oslash;y-relevante matcher aksepteres. Strengere krav.
+                            </div>
+                        </div>
+                    </label>
+                </div>
+            </div>
+
+            <!-- Job Identity -->
+            <div style="margin-bottom:1.25rem;display:grid;grid-template-columns:1fr 1fr;gap:0.75rem">
+                <div>
+                    <label style="font-size:0.85rem;font-weight:600;display:block;margin-bottom:0.3rem">Jobbnavn <span style="color:#ef4444">*</span></label>
+                    <input type="text" id="matchJobName" placeholder="F.eks. Kommune X - mars 2026" required
+                        style="width:100%;padding:0.5rem 0.75rem;border:1px solid var(--border);border-radius:6px;font-size:0.9rem"
+                        oninput="updateMatchStartBtn()">
+                </div>
+                <div>
+                    <label style="font-size:0.85rem;font-weight:600;display:block;margin-bottom:0.3rem">Ditt navn <span style="color:#ef4444">*</span></label>
+                    <input type="text" id="matchCreatedBy" placeholder="Fornavn Etternavn" required
+                        style="width:100%;padding:0.5rem 0.75rem;border:1px solid var(--border);border-radius:6px;font-size:0.9rem"
+                        oninput="updateMatchStartBtn()">
+                </div>
+            </div>
+
+            <!-- File Upload -->
+            <div class="upload-area" id="matchUploadArea" style="padding:2rem">
+                <svg class="upload-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" style="width:36px;height:36px">
+                    <path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/>
+                    <polyline points="17 8 12 3 7 8"/>
+                    <line x1="12" y1="3" x2="12" y2="15"/>
+                </svg>
+                <p>Dra og slipp Excel-fil med produkter som skal matches</p>
+                <p style="font-size:0.78rem;color:#94a3b8;margin-top:0.3rem">
+                    Forventede kolonner: Produktnavn, Spesifikasjon (valgfri), Artikkelnr (valgfri), ALC-pris (valgfri)
+                </p>
+                <p class="filename hidden" id="matchFileName"></p>
+                <input type="file" id="matchFileInput" accept=".xlsx" style="position:absolute;inset:0;opacity:0;cursor:pointer">
+            </div>
+
+            <div class="column-info hidden" id="matchColumnInfo"></div>
+
+            <div class="actions">
+                <button class="btn btn-primary" id="matchStartBtn" disabled>Start matching</button>
+                <span id="matchFileInfo" style="color:var(--text-muted);font-size:0.9rem"></span>
+            </div>
+        </div>
+
+        <!-- Match Progress -->
+        <div class="card progress-section" id="matchProgressSection">
+            <h2 id="matchProgressTitle">Matching p&aring;g&aring;r...</h2>
+            <div class="progress-bar-container">
+                <div class="progress-bar" id="matchProgressBar"></div>
+            </div>
+            <div class="progress-info">
+                <span id="matchProgressText">0 / 0 produkter</span>
+                <span id="matchProgressPercent">0%</span>
+            </div>
+            <div class="progress-detail" id="matchProgressDetail">Starter...</div>
+        </div>
+
+        <!-- Match Results -->
+        <div class="results-section" id="matchResultsSection">
+            <!-- Job Info Banner -->
+            <div class="card" id="matchJobInfoBanner" style="background:#f0f9ff;border:1px solid #bae6fd">
+                <div style="display:flex;align-items:center;justify-content:space-between;flex-wrap:wrap;gap:0.5rem">
+                    <div>
+                        <span style="font-weight:700;font-size:1rem" id="matchJobNameDisplay"></span>
+                        <span style="color:var(--text-muted);font-size:0.82rem;margin-left:0.75rem">av <span id="matchCreatedByDisplay"></span></span>
+                        <span id="matchJobTypeBadge" style="margin-left:0.5rem;padding:0.15rem 0.5rem;border-radius:10px;font-size:0.72rem;font-weight:600"></span>
+                    </div>
+                    <div style="display:flex;gap:0.5rem;align-items:center">
+                        <span id="matchLockBadge" style="display:none;padding:0.2rem 0.5rem;border-radius:10px;font-size:0.72rem;font-weight:600;background:#fef2f2;color:#991b1b">L&aring;st</span>
+                        <button class="btn" style="font-size:0.75rem;padding:0.25rem 0.6rem" onclick="showLockDialog()">L&aring;s jobb</button>
+                    </div>
+                </div>
+            </div>
+
+            <div class="card">
+                <div style="display:flex;align-items:center;justify-content:space-between;flex-wrap:wrap;gap:0.75rem">
+                    <h2 style="margin:0">Matching-resultater</h2>
+                    <div id="matchModeBadge" style="padding:0.3rem 0.8rem;border-radius:20px;font-size:0.8rem;font-weight:600"></div>
+                </div>
+                <div class="stats-grid" id="matchStatsGrid" style="margin-top:1rem"></div>
+                <div class="actions" style="flex-wrap:wrap">
+                    <button class="btn btn-success" id="matchDownloadBtn">Last ned Excel-rapport</button>
+                    <button class="btn btn-primary" id="matchNewBtn" onclick="resetMatchModule()">Ny matching</button>
+                </div>
+            </div>
+
+            <!-- Filters and Batch Actions -->
+            <div class="card" style="padding:0.75rem 1rem">
+                <div style="display:flex;align-items:center;gap:0.5rem;flex-wrap:wrap">
+                    <span style="font-size:0.85rem;font-weight:600;margin-right:0.25rem">Filtrer:</span>
+                    <button class="btn match-filter-btn active" data-filter="all" onclick="setMatchFilter('all')" style="font-size:0.78rem;padding:0.2rem 0.6rem">Alle</button>
+                    <button class="btn match-filter-btn" data-filter="matched" onclick="setMatchFilter('matched')" style="font-size:0.78rem;padding:0.2rem 0.6rem">Matchet</button>
+                    <button class="btn match-filter-btn" data-filter="no_match" onclick="setMatchFilter('no_match')" style="font-size:0.78rem;padding:0.2rem 0.6rem">Ingen match</button>
+                    <button class="btn match-filter-btn" data-filter="manual_review" onclick="setMatchFilter('manual_review')" style="font-size:0.78rem;padding:0.2rem 0.6rem">Manuell vurdering</button>
+                    <button class="btn match-filter-btn" data-filter="approved" onclick="setMatchFilter('approved')" style="font-size:0.78rem;padding:0.2rem 0.6rem;background:#dcfce7;color:#166534">Godkjent</button>
+                    <button class="btn match-filter-btn" data-filter="rejected" onclick="setMatchFilter('rejected')" style="font-size:0.78rem;padding:0.2rem 0.6rem;background:#fef2f2;color:#991b1b">Avsl&aring;tt</button>
+                    <div style="flex:1"></div>
+                    <span style="font-size:0.85rem;font-weight:600;margin-right:0.25rem">Batch:</span>
+                    <button class="btn" style="font-size:0.75rem;padding:0.2rem 0.5rem;background:#dcfce7;color:#166534;border:1px solid #bbf7d0" onclick="batchApproveVisible('approved')">Godkjenn synlige</button>
+                    <button class="btn" style="font-size:0.75rem;padding:0.2rem 0.5rem;background:#fef2f2;color:#991b1b;border:1px solid #fecaca" onclick="batchApproveVisible('rejected')">Avsl&aring; synlige</button>
+                    <button class="btn" style="font-size:0.75rem;padding:0.2rem 0.5rem;background:#dbeafe;color:#1e40af;border:1px solid #bfdbfe" onclick="batchApproveAll('approved')">Godkjenn alle</button>
+                </div>
+                <div style="margin-top:0.5rem;display:flex;gap:0.5rem;align-items:center">
+                    <label style="font-size:0.8rem">Min. relevans:</label>
+                    <input type="range" id="matchRelevanceFilter" min="0" max="100" value="0" style="width:120px" oninput="applyMatchFilters()">
+                    <span id="matchRelevanceFilterVal" style="font-size:0.8rem;color:var(--text-muted)">0%</span>
+                    <span id="matchFilterCount" style="font-size:0.8rem;color:var(--text-muted);margin-left:auto"></span>
+                </div>
+            </div>
+
+            <!-- Match Results Table with Candidate Review -->
+            <div class="card">
+                <h2>Produktoversikt <span style="font-weight:400;font-size:0.85rem;color:var(--text-muted)">(klikk rad for &aring; se og velge kandidater)</span></h2>
+                <div style="overflow-x:auto">
+                    <table class="results-table">
+                        <thead>
+                            <tr>
+                                <th style="width:30px"></th>
+                                <th>Rad</th>
+                                <th>Innprodukt</th>
+                                <th>Status</th>
+                                <th>Godkjenning</th>
+                                <th>Valgt kandidat</th>
+                                <th>ALC-pris</th>
+                                <th>Relevans</th>
+                                <th>Kandidater</th>
+                            </tr>
+                        </thead>
+                        <tbody id="matchResultsBody"></tbody>
+                    </table>
+                </div>
+            </div>
+        </div>
+
+        </div><!-- /moduleMatching -->
 
         <!-- ═══════════════════════════════════════════════════════ -->
         <!-- MODULE: PRODUKTFAMILIER / RELASJONER                   -->
@@ -1100,6 +1368,241 @@
         </div><!-- /moduleRelations -->
 
         <!-- ═══════════════════════════════════════════════════════ -->
+        <!-- MODULE: ANBUDSPRISARK                                    -->
+        <!-- ═══════════════════════════════════════════════════════ -->
+        <div id="moduleAnbud" style="display:none">
+
+        <div class="card" id="anbudConfigCard">
+            <h2>Fyll ut anbudsprisark &mdash; Match kommunens produkter mot katalogen</h2>
+            <p style="color:var(--text-muted);font-size:0.9rem;margin-bottom:1.25rem">
+                Last opp anbudsprisarket (Excel). Systemet matcher produktene mot OneMed-katalogen og fyller ut priser.
+                Samme matchinglogikk og profiler som standard produktmatching.
+            </p>
+
+            <!-- Match Mode Selection (shared styling) -->
+            <div style="margin-bottom:1.25rem;padding:1rem;background:#f0f9ff;border-radius:8px;border:1px solid #bae6fd">
+                <div style="font-size:0.95rem;font-weight:600;margin-bottom:0.75rem;color:#0369a1">Matchmodus</div>
+                <div style="display:flex;gap:0.75rem;flex-wrap:wrap" id="anbudModeContainer">
+                    <label class="anbud-mode-label active" data-mode="standard" onclick="setAnbudMode('standard')" style="display:flex;align-items:flex-start;gap:0.5rem;cursor:pointer;background:#fff;padding:0.75rem 1rem;border-radius:8px;border:2px solid var(--primary);flex:1;min-width:220px">
+                        <input type="radio" name="anbudMode" value="standard" checked style="margin-top:3px">
+                        <div>
+                            <div style="font-weight:600;font-size:0.9rem">Standard</div>
+                            <div style="font-size:0.78rem;color:var(--text-muted);margin-top:0.2rem">Beste semantiske match vinner.</div>
+                        </div>
+                    </label>
+                    <label class="anbud-mode-label" data-mode="hardcore_price" onclick="setAnbudMode('hardcore_price')" style="display:flex;align-items:flex-start;gap:0.5rem;cursor:pointer;background:#fff;padding:0.75rem 1rem;border-radius:8px;border:2px solid var(--border);flex:1;min-width:220px">
+                        <input type="radio" name="anbudMode" value="hardcore_price" style="margin-top:3px">
+                        <div>
+                            <div style="font-weight:600;font-size:0.9rem;color:#b45309">Hardcore Pris Prioritet</div>
+                            <div style="font-size:0.78rem;color:var(--text-muted);margin-top:0.2rem">Billigste relevante alternativ.</div>
+                        </div>
+                    </label>
+                    <label class="anbud-mode-label" data-mode="own_brand" onclick="setAnbudMode('own_brand')" style="display:flex;align-items:flex-start;gap:0.5rem;cursor:pointer;background:#fff;padding:0.75rem 1rem;border-radius:8px;border:2px solid var(--border);flex:1;min-width:220px">
+                        <input type="radio" name="anbudMode" value="own_brand" style="margin-top:3px">
+                        <div>
+                            <div style="font-weight:600;font-size:0.9rem;color:#047857">Egne merkevarer</div>
+                            <div style="font-size:0.78rem;color:var(--text-muted);margin-top:0.2rem">Prioriterer husmerkevarer.</div>
+                        </div>
+                    </label>
+                    <label class="anbud-mode-label" data-mode="strict_quality" onclick="setAnbudMode('strict_quality')" style="display:flex;align-items:flex-start;gap:0.5rem;cursor:pointer;background:#fff;padding:0.75rem 1rem;border-radius:8px;border:2px solid var(--border);flex:1;min-width:220px">
+                        <input type="radio" name="anbudMode" value="strict_quality" style="margin-top:3px">
+                        <div>
+                            <div style="font-weight:600;font-size:0.9rem;color:#7c3aed">Streng kvalitet</div>
+                            <div style="font-size:0.78rem;color:var(--text-muted);margin-top:0.2rem">Kun h&oslash;y-relevante matcher.</div>
+                        </div>
+                    </label>
+                </div>
+            </div>
+
+            <!-- Job Identity -->
+            <div style="margin-bottom:1.25rem;display:grid;grid-template-columns:1fr 1fr;gap:0.75rem">
+                <div>
+                    <label style="font-size:0.85rem;font-weight:600;display:block;margin-bottom:0.3rem">Jobbnavn <span style="color:#ef4444">*</span></label>
+                    <input type="text" id="anbudJobName" placeholder="F.eks. Anbud Kommune Y - Q2 2026" required
+                        style="width:100%;padding:0.5rem 0.75rem;border:1px solid var(--border);border-radius:6px;font-size:0.9rem"
+                        oninput="updateAnbudStartBtn()">
+                </div>
+                <div>
+                    <label style="font-size:0.85rem;font-weight:600;display:block;margin-bottom:0.3rem">Ditt navn <span style="color:#ef4444">*</span></label>
+                    <input type="text" id="anbudCreatedBy" placeholder="Fornavn Etternavn" required
+                        style="width:100%;padding:0.5rem 0.75rem;border:1px solid var(--border);border-radius:6px;font-size:0.9rem"
+                        oninput="updateAnbudStartBtn()">
+                </div>
+            </div>
+
+            <!-- File Upload -->
+            <div class="upload-area" id="anbudUploadArea" style="padding:2rem">
+                <svg class="upload-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" style="width:36px;height:36px">
+                    <path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/>
+                    <polyline points="17 8 12 3 7 8"/>
+                    <line x1="12" y1="3" x2="12" y2="15"/>
+                </svg>
+                <p>Dra og slipp anbudsprisark (Excel)</p>
+                <p style="font-size:0.78rem;color:#94a3b8;margin-top:0.3rem">
+                    Forventede kolonner: Produktnavn, Spesifikasjon (valgfri), Artikkelnr (valgfri)
+                </p>
+                <p class="filename hidden" id="anbudFileName"></p>
+                <input type="file" id="anbudFileInput" accept=".xlsx" style="position:absolute;inset:0;opacity:0;cursor:pointer">
+            </div>
+
+            <div class="column-info hidden" id="anbudColumnInfo"></div>
+
+            <div class="actions">
+                <button class="btn btn-primary" id="anbudStartBtn" disabled>Start matching</button>
+                <span id="anbudFileInfo" style="color:var(--text-muted);font-size:0.9rem"></span>
+            </div>
+        </div>
+
+        <!-- Anbud Progress (reuses matching progress display) -->
+        <div class="card progress-section" id="anbudProgressSection">
+            <h2 id="anbudProgressTitle">Matching p&aring;g&aring;r...</h2>
+            <div class="progress-bar-container">
+                <div class="progress-bar" id="anbudProgressBar"></div>
+            </div>
+            <div class="progress-info">
+                <span id="anbudProgressText">0 / 0 produkter</span>
+                <span id="anbudProgressPercent">0%</span>
+            </div>
+            <div class="progress-detail" id="anbudProgressDetail">Starter...</div>
+        </div>
+
+        <!-- Anbud Results (displayed in matching results UI) -->
+        <div class="results-section" id="anbudResultsSection">
+            <div id="anbudResultsContainer"></div>
+        </div>
+
+        </div><!-- /moduleAnbud -->
+
+        <!-- ═══════════════════════════════════════════════════════ -->
+        <!-- MODULE: JOBBER (JOBBLISTE)                             -->
+        <!-- ═══════════════════════════════════════════════════════ -->
+        <div id="moduleJobs" style="display:none">
+            <div class="card">
+                <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:1rem">
+                    <h2 style="margin:0">P&aring;g&aring;ende og fullf&oslash;rte jobber</h2>
+                    <button class="btn btn-primary" style="font-size:0.8rem;padding:0.3rem 0.8rem" onclick="loadJobList()">Oppdater</button>
+                </div>
+                <p style="color:var(--text-muted);font-size:0.85rem;margin-bottom:1rem">
+                    Alle matching- og anbudsjobber. Klikk for &aring; &aring;pne og fortsette. Jobber beholdes i 90 dager.
+                </p>
+                <div id="jobListContainer" style="font-size:0.85rem;color:var(--text-muted)">Laster jobber...</div>
+            </div>
+        </div><!-- /moduleJobs -->
+
+        <!-- ═══════════════════════════════════════════════════════ -->
+        <!-- MODULE: LÆR AV TIDLIGERE ANBUD                         -->
+        <!-- ═══════════════════════════════════════════════════════ -->
+        <div id="moduleLearning" style="display:none">
+
+        <!-- Admin Gate -->
+        <div class="card" id="learningAuthCard">
+            <h2>L&aelig;r av tidligere anbud &mdash; Admin-tilgang p&aring;krevd</h2>
+            <p style="color:var(--text-muted);font-size:0.9rem;margin-bottom:1rem">
+                Denne modulen brukes til &aring; importere historiske ferdigkodede anbud som l&aelig;ringsgrunnlag for matchemotoren.
+                Kun administratorer har tilgang.
+            </p>
+            <div style="display:flex;gap:0.5rem;align-items:center;max-width:400px">
+                <input type="password" id="learningAdminPassword" placeholder="Admin-passord" style="flex:1;padding:0.5rem 0.75rem;border:1px solid var(--border);border-radius:6px;font-size:0.9rem" onkeydown="if(event.key==='Enter')verifyLearningAdmin()">
+                <button class="btn btn-primary" onclick="verifyLearningAdmin()">Logg inn</button>
+            </div>
+            <p id="learningAuthError" style="color:#ef4444;font-size:0.82rem;margin-top:0.5rem;display:none"></p>
+        </div>
+
+        <!-- Learning Admin Panel (hidden until authenticated) -->
+        <div id="learningAdminPanel" style="display:none">
+
+            <!-- Stats Card -->
+            <div class="card" id="learningStatsCard">
+                <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:0.75rem">
+                    <h2 style="margin:0">L&aelig;ringsgrunnlag</h2>
+                    <button class="btn" style="font-size:0.78rem;padding:0.2rem 0.6rem" onclick="loadLearningStats()">Oppdater</button>
+                </div>
+                <div class="stats-grid" id="learningStatsGrid" style="margin-bottom:0.5rem"></div>
+                <p style="font-size:0.8rem;color:var(--text-muted)">
+                    L&aelig;ringseksempler kommer fra to kilder: UI-bruk (manuelt valg, godkjenninger) og historisk import.
+                    Begge p&aring;virker matchemotoren likt.
+                </p>
+            </div>
+
+            <!-- Import Card -->
+            <div class="card">
+                <h2>Importer historisk anbud</h2>
+                <p style="color:var(--text-muted);font-size:0.9rem;margin-bottom:1rem">
+                    Last opp et ferdigkodet anbudsprisark. Systemet ekstrahr l&aelig;ringseksempler fra input &rarr; fasit-mapping.
+                </p>
+
+                <div style="margin-bottom:1rem">
+                    <label style="font-size:0.85rem;font-weight:600;display:block;margin-bottom:0.3rem">Importnavn <span style="color:#ef4444">*</span></label>
+                    <input type="text" id="learningImportName" placeholder="F.eks. Anbud Kommune Z - 2025" style="width:100%;max-width:400px;padding:0.5rem 0.75rem;border:1px solid var(--border);border-radius:6px;font-size:0.9rem">
+                </div>
+
+                <div class="upload-area" id="learningUploadArea" style="padding:1.5rem">
+                    <svg class="upload-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" style="width:32px;height:32px">
+                        <path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/>
+                        <polyline points="17 8 12 3 7 8"/>
+                        <line x1="12" y1="3" x2="12" y2="15"/>
+                    </svg>
+                    <p>Dra og slipp ferdigkodet anbud-Excel</p>
+                    <p class="filename hidden" id="learningFileName"></p>
+                    <input type="file" id="learningFileInput" accept=".xlsx" style="position:absolute;inset:0;opacity:0;cursor:pointer">
+                </div>
+
+                <!-- Column Mapping (shown after file upload) -->
+                <div id="learningMappingSection" style="display:none;margin-top:1rem">
+                    <div style="font-size:0.95rem;font-weight:600;margin-bottom:0.75rem;color:#0369a1">Kolonnemapping</div>
+                    <p style="font-size:0.82rem;color:var(--text-muted);margin-bottom:0.75rem">
+                        Velg hvilke kolonner som inneholder input (produktbeskrivelse) og output (v&aring;rt artikkelnummer).
+                    </p>
+
+                    <div style="display:grid;grid-template-columns:1fr 1fr;gap:0.75rem;max-width:700px">
+                        <div>
+                            <label style="font-size:0.82rem;font-weight:600;display:block;margin-bottom:0.25rem;color:#166534">INPUT: Produktbeskrivelse <span style="color:#ef4444">*</span></label>
+                            <select id="learningColInputText" style="width:100%;padding:0.4rem;border:1px solid var(--border);border-radius:6px;font-size:0.85rem"></select>
+                        </div>
+                        <div>
+                            <label style="font-size:0.82rem;font-weight:600;display:block;margin-bottom:0.25rem;color:#166534">INPUT: Spesifikasjon (valgfri)</label>
+                            <select id="learningColInputSpec" style="width:100%;padding:0.4rem;border:1px solid var(--border);border-radius:6px;font-size:0.85rem"></select>
+                        </div>
+                        <div>
+                            <label style="font-size:0.82rem;font-weight:600;display:block;margin-bottom:0.25rem;color:#b45309">OUTPUT: V&aring;rt artikkelnummer <span style="color:#ef4444">*</span></label>
+                            <select id="learningColOutputArtnr" style="width:100%;padding:0.4rem;border:1px solid var(--border);border-radius:6px;font-size:0.85rem"></select>
+                        </div>
+                        <div>
+                            <label style="font-size:0.82rem;font-weight:600;display:block;margin-bottom:0.25rem;color:#b45309">OUTPUT: Produktnavn (valgfri)</label>
+                            <select id="learningColOutputName" style="width:100%;padding:0.4rem;border:1px solid var(--border);border-radius:6px;font-size:0.85rem"></select>
+                        </div>
+                    </div>
+
+                    <!-- Preview Table -->
+                    <div id="learningPreviewTable" style="margin-top:0.75rem;overflow-x:auto;font-size:0.8rem"></div>
+
+                    <div class="actions" style="margin-top:1rem">
+                        <button class="btn btn-primary" id="learningImportBtn" onclick="doLearningImport()">Kj&oslash;r import</button>
+                        <button class="btn" style="background:#e2e8f0;color:#475569" onclick="resetLearningImport()">Avbryt</button>
+                    </div>
+                </div>
+
+                <!-- Import Result -->
+                <div id="learningImportResult" style="display:none;margin-top:1rem;padding:1rem;background:#f0fdf4;border:1px solid #bbf7d0;border-radius:8px"></div>
+            </div>
+
+            <!-- Batch History Card -->
+            <div class="card">
+                <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:0.75rem">
+                    <h2 style="margin:0">Tidligere importer</h2>
+                    <div style="display:flex;gap:0.5rem">
+                        <button class="btn" style="font-size:0.78rem;padding:0.2rem 0.6rem" onclick="loadLearningBatches()">Oppdater</button>
+                        <button class="btn" style="font-size:0.78rem;padding:0.2rem 0.6rem;background:#fef3c7;color:#92400e" onclick="doReindexLearning()">Reindekser</button>
+                    </div>
+                </div>
+                <div id="learningBatchList" style="font-size:0.85rem;color:var(--text-muted)">Laster...</div>
+            </div>
+
+        </div><!-- /learningAdminPanel -->
+
+        </div><!-- /moduleLearning -->
+
+        <!-- ═══════════════════════════════════════════════════════ -->
         <!-- MODULE: HISTORIKK                                       -->
         <!-- ═══════════════════════════════════════════════════════ -->
         <div id="moduleHistory" style="display:none">
@@ -1166,6 +1669,52 @@
         </div>
     </div>
 
+    <!-- Lock Job Modal -->
+    <div id="lockModal" style="display:none;position:fixed;inset:0;background:rgba(0,0,0,0.4);z-index:1000;align-items:center;justify-content:center">
+        <div style="background:#fff;border-radius:12px;padding:1.5rem;max-width:400px;width:90%;box-shadow:0 8px 32px rgba(0,0,0,0.2)">
+            <h3 style="margin:0 0 0.75rem;font-size:1rem" id="lockModalTitle">L&aring;s jobb</h3>
+            <p style="font-size:0.85rem;color:var(--text-muted);margin:0 0 1rem">Sett et passord for &aring; beskytte denne jobben.</p>
+            <input type="password" id="lockPasswordInput" placeholder="Passord (minst 4 tegn)" style="width:100%;padding:0.5rem;border:1px solid var(--border);border-radius:6px;font-size:0.9rem;margin-bottom:0.75rem">
+            <div style="display:flex;gap:0.5rem;justify-content:flex-end">
+                <button class="btn" style="background:#e2e8f0;color:#475569;font-size:0.85rem;padding:0.4rem 1rem" onclick="closeLockModal()">Avbryt</button>
+                <button class="btn btn-primary" style="font-size:0.85rem;padding:0.4rem 1rem" onclick="doLockJob()">L&aring;s</button>
+            </div>
+        </div>
+    </div>
+
+    <!-- Unlock Job Modal -->
+    <div id="unlockModal" style="display:none;position:fixed;inset:0;background:rgba(0,0,0,0.4);z-index:1000;align-items:center;justify-content:center">
+        <div style="background:#fff;border-radius:12px;padding:1.5rem;max-width:400px;width:90%;box-shadow:0 8px 32px rgba(0,0,0,0.2)">
+            <h3 style="margin:0 0 0.75rem;font-size:1rem">L&aring;s opp jobb</h3>
+            <p style="font-size:0.85rem;color:var(--text-muted);margin:0 0 1rem">Skriv inn passord for &aring; l&aring;se opp jobben.</p>
+            <input type="password" id="unlockPasswordInput" placeholder="Passord" style="width:100%;padding:0.5rem;border:1px solid var(--border);border-radius:6px;font-size:0.9rem;margin-bottom:0.75rem">
+            <div style="display:flex;gap:0.5rem;justify-content:flex-end">
+                <button class="btn" style="background:#e2e8f0;color:#475569;font-size:0.85rem;padding:0.4rem 1rem" onclick="closeUnlockModal()">Avbryt</button>
+                <button class="btn btn-primary" style="font-size:0.85rem;padding:0.4rem 1rem" onclick="doUnlockJob()">L&aring;s opp</button>
+            </div>
+        </div>
+    </div>
+
+    <!-- Manual Product Search Modal -->
+    <div id="manualSearchModal" style="display:none;position:fixed;inset:0;background:rgba(0,0,0,0.4);z-index:1000;align-items:center;justify-content:center">
+        <div style="background:#fff;border-radius:12px;padding:1.5rem;max-width:700px;width:95%;box-shadow:0 8px 32px rgba(0,0,0,0.2);max-height:80vh;overflow-y:auto">
+            <h3 style="margin:0 0 0.75rem;font-size:1rem">S&oslash;k i katalog &mdash; manuelt produktvalg</h3>
+            <p style="font-size:0.82rem;color:var(--text-muted);margin:0 0 0.75rem">Rad: <span id="manualSearchRow"></span></p>
+            <div style="display:flex;gap:0.5rem;margin-bottom:0.75rem">
+                <input type="text" id="manualSearchInput" placeholder="S&oslash;k p&aring; produktnavn, spesifikasjon eller artikkelnr..." style="flex:1;padding:0.5rem;border:1px solid var(--border);border-radius:6px;font-size:0.9rem" onkeydown="if(event.key==='Enter')doManualSearch()">
+                <button class="btn btn-primary" style="font-size:0.85rem;padding:0.4rem 0.8rem" onclick="doManualSearch()">S&oslash;k</button>
+            </div>
+            <div style="display:flex;gap:0.5rem;margin-bottom:0.75rem">
+                <input type="text" id="manualArtnrInput" placeholder="Eller skriv inn artikkelnummer direkte..." style="flex:1;padding:0.5rem;border:1px solid var(--border);border-radius:6px;font-size:0.9rem;font-family:monospace" onkeydown="if(event.key==='Enter')doManualArtnrSelect()">
+                <button class="btn" style="font-size:0.85rem;padding:0.4rem 0.8rem;background:#dcfce7;color:#166534;border:1px solid #bbf7d0" onclick="doManualArtnrSelect()">Velg art.nr</button>
+            </div>
+            <div id="manualSearchResults" style="font-size:0.82rem;color:var(--text-muted)"></div>
+            <div style="display:flex;gap:0.5rem;justify-content:flex-end;margin-top:0.75rem">
+                <button class="btn" style="background:#e2e8f0;color:#475569;font-size:0.85rem;padding:0.4rem 1rem" onclick="closeManualSearchModal()">Lukk</button>
+            </div>
+        </div>
+    </div>
+
     <script>
         const API_BASE = '';
         let currentJobId = null;
@@ -1179,14 +1728,17 @@
         let currentModule = 'masterdata';
         function switchModule(mod) {
             currentModule = mod;
-            document.getElementById('moduleMasterdata').style.display = mod === 'masterdata' ? '' : 'none';
-            document.getElementById('moduleRelations').style.display = mod === 'relations' ? '' : 'none';
-            document.getElementById('moduleHistory').style.display = mod === 'history' ? '' : 'none';
+            const modules = ['moduleMasterdata', 'moduleMatching', 'moduleAnbud', 'moduleJobs', 'moduleRelations', 'moduleHistory', 'moduleLearning'];
+            const modMap = {masterdata: 'moduleMasterdata', matching: 'moduleMatching', anbud: 'moduleAnbud', jobs: 'moduleJobs', relations: 'moduleRelations', history: 'moduleHistory', learning: 'moduleLearning'};
+            modules.forEach(m => { const el = document.getElementById(m); if (el) el.style.display = 'none'; });
+            const target = document.getElementById(modMap[mod]);
+            if (target) target.style.display = '';
             document.querySelectorAll('.module-tab').forEach(t => t.classList.remove('active'));
-            const tabMap = {masterdata: 'tabMasterdata', relations: 'tabRelations', history: 'tabHistory'};
+            const tabMap = {masterdata: 'tabMasterdata', matching: 'tabMatching', anbud: 'tabAnbud', jobs: 'tabJobs', relations: 'tabRelations', history: 'tabHistory', learning: 'tabLearning'};
             document.getElementById(tabMap[mod])?.classList.add('active');
             if (mod === 'relations') initRelModule();
             if (mod === 'history') loadHistory();
+            if (mod === 'jobs') loadJobList();
         }
 
         // ── Cross-module handoff (Task 3: uses data model, not DOM) ──
@@ -2109,17 +2661,30 @@
                     cancelBtn.classList.add('hidden');
 
                     if (data.status === 'completed') {
-                        progressTitle.textContent = 'Analyse fullf\u00f8rt!';
-                        progressDetail.textContent = 'Laster resultater...';
+                        progressTitle.textContent = 'Analyse fullført!';
+                        let detailMsg = 'Laster resultater...';
+                        if (data.excluded_products && data.excluded_products.length > 0) {
+                            detailMsg = `${data.excluded_products.length} produkt(er) ekskludert fra output (ikke funnet på nettsiden). Laster resultater...`;
+                        }
+                        progressDetail.textContent = detailMsg;
                         await loadResults();
                     } else {
                         progressTitle.textContent = 'Analyse feilet';
                         progressDetail.textContent = 'Analysen feilet. Sjekk feilloggen nedenfor.';
                     }
 
+                    // Show excluded products as informational messages
+                    if (data.excluded_products && data.excluded_products.length > 0) {
+                        errorsCard.classList.remove('hidden');
+                        const excludedHtml = data.excluded_products.map(e =>
+                            `<div style="color:#b45309">⚠ Ekskludert: ${escapeHtml(e.article_number)} — ${escapeHtml(e.reason)}</div>`
+                        ).join('');
+                        errorLog.innerHTML = excludedHtml + (errorLog.innerHTML || '');
+                    }
+
                     if (data.errors && data.errors.length > 0) {
                         errorsCard.classList.remove('hidden');
-                        errorLog.innerHTML = data.errors.map(e =>
+                        errorLog.innerHTML += data.errors.map(e =>
                             `<div>${escapeHtml(e)}</div>`
                         ).join('');
                     }
@@ -3109,6 +3674,8 @@
                     full_enrichment: 'Full berikelse',
                     audit_only: 'Kvalitetsrevisjon',
                     focused_scan: 'Fokusert sjekk',
+                    matching_standard: 'Matching (Standard)',
+                    matching_hardcore_price: 'Matching (Hardcore Pris)',
                 };
 
                 let html = '<table style="width:100%;border-collapse:collapse;font-size:0.85rem">';
@@ -3163,6 +3730,1420 @@
                 alert('Kunne ikke slette: ' + err.message);
             }
         }
+        // ══════════════════════════════════════════════════════════════
+        // MATCHING MODULE
+        // ══════════════════════════════════════════════════════════════
+
+        let matchFile = null;
+        let matchJobId = null;
+        let matchPollInterval = null;
+        let matchMode = 'standard';
+        let matchResultsData = [];
+        let matchRowApprovals = {};  // {input_row: "approved"|"rejected"|"pending"}
+        let matchFilter = 'all';
+        let matchMinRelevance = 0;
+        let matchJobMeta = {};  // {job_name, created_by, job_type, locked}
+
+        // Anbud module state
+        let anbudFile = null;
+        let anbudJobId = null;
+        let anbudPollInterval = null;
+        let anbudMode = 'standard';
+
+        // Persisted username (convenience)
+        try {
+            const savedUser = localStorage.getItem('masterdata_username');
+            if (savedUser) {
+                document.addEventListener('DOMContentLoaded', () => {
+                    const el1 = document.getElementById('matchCreatedBy');
+                    const el2 = document.getElementById('anbudCreatedBy');
+                    if (el1 && !el1.value) el1.value = savedUser;
+                    if (el2 && !el2.value) el2.value = savedUser;
+                });
+            }
+        } catch(e) {}
+
+        const MATCH_MODE_STYLES = {
+            standard: { color: 'var(--primary)', bg: '#fff' },
+            hardcore_price: { color: '#b45309', bg: '#fffbeb' },
+            own_brand: { color: '#047857', bg: '#ecfdf5' },
+            strict_quality: { color: '#7c3aed', bg: '#f5f3ff' },
+        };
+        const MATCH_MODE_LABELS = {
+            standard: 'Standard',
+            hardcore_price: 'Hardcore Pris Prioritet',
+            own_brand: 'Egne merkevarer',
+            strict_quality: 'Streng kvalitet',
+        };
+
+        function setMatchMode(mode) {
+            matchMode = mode;
+            // Update all mode labels
+            document.querySelectorAll('.match-mode-label').forEach(label => {
+                const labelMode = label.dataset.mode;
+                const isActive = labelMode === mode;
+                const style = MATCH_MODE_STYLES[labelMode] || MATCH_MODE_STYLES.standard;
+                label.style.border = isActive ? `2px solid ${style.color}` : '2px solid var(--border)';
+                label.style.background = isActive ? style.bg : '#fff';
+                label.classList.toggle('active', isActive);
+            });
+            const radio = document.querySelector(`input[name="matchMode"][value="${mode}"]`);
+            if (radio) radio.checked = true;
+        }
+
+        // File handling
+        const matchFileInput = document.getElementById('matchFileInput');
+        const matchUploadArea = document.getElementById('matchUploadArea');
+
+        matchFileInput.addEventListener('change', (e) => {
+            const f = e.target.files[0];
+            if (f) selectMatchFile(f);
+        });
+
+        matchUploadArea.addEventListener('dragover', (e) => { e.preventDefault(); matchUploadArea.classList.add('dragover'); });
+        matchUploadArea.addEventListener('dragleave', () => matchUploadArea.classList.remove('dragover'));
+        matchUploadArea.addEventListener('drop', (e) => {
+            e.preventDefault();
+            matchUploadArea.classList.remove('dragover');
+            const f = e.dataTransfer.files[0];
+            if (f) selectMatchFile(f);
+        });
+
+        function updateMatchStartBtn() {
+            const name = document.getElementById('matchJobName').value.trim();
+            const user = document.getElementById('matchCreatedBy').value.trim();
+            document.getElementById('matchStartBtn').disabled = !(matchFile && name && user);
+        }
+
+        function selectMatchFile(file) {
+            if (!file.name.endsWith('.xlsx')) {
+                alert('Kun .xlsx-filer st\u00f8ttes.');
+                return;
+            }
+            matchFile = file;
+            document.getElementById('matchFileName').textContent = file.name;
+            document.getElementById('matchFileName').classList.remove('hidden');
+            document.getElementById('matchFileInfo').textContent = `${(file.size / 1024).toFixed(1)} KB`;
+            updateMatchStartBtn();
+        }
+
+        // Start matching
+        document.getElementById('matchStartBtn').addEventListener('click', async () => {
+            if (!matchFile) return;
+            const jobName = document.getElementById('matchJobName').value.trim();
+            const createdBy = document.getElementById('matchCreatedBy').value.trim();
+            if (!jobName || !createdBy) {
+                alert('Jobbnavn og ditt navn er p\u00e5krevd.');
+                return;
+            }
+            // Save username for convenience
+            try { localStorage.setItem('masterdata_username', createdBy); } catch(e) {}
+
+            const btn = document.getElementById('matchStartBtn');
+            btn.disabled = true;
+            btn.innerHTML = '<span class="spinner"></span> Starter...';
+
+            try {
+                const formData = new FormData();
+                formData.append('file', matchFile);
+                const params = new URLSearchParams({match_mode: matchMode, job_name: jobName, created_by: createdBy, job_type: 'standard'});
+                const url = `${API_BASE}/api/match/start?${params}`;
+                const resp = await fetch(url, { method: 'POST', body: formData });
+
+                if (!resp.ok) {
+                    const err = await resp.json();
+                    alert(`Feil: ${err.detail || 'Ukjent feil'}`);
+                    btn.disabled = false;
+                    btn.textContent = 'Start matching';
+                    return;
+                }
+
+                const data = await resp.json();
+                matchJobId = data.job_id;
+
+                // Show column info
+                if (data.detected_columns) {
+                    const cols = data.detected_columns;
+                    const parts = [];
+                    if (cols.name) parts.push(`Produktnavn: "${cols.name}"`);
+                    if (cols.specification) parts.push(`Spesifikasjon: "${cols.specification}"`);
+                    if (cols.article_number) parts.push(`Art.nr: "${cols.article_number}"`);
+                    if (cols.alc_price) parts.push(`ALC-pris: "${cols.alc_price}"`);
+                    if (parts.length) {
+                        const colInfo = document.getElementById('matchColumnInfo');
+                        colInfo.textContent = 'Detekterte kolonner: ' + parts.join(', ');
+                        colInfo.classList.remove('hidden');
+                    }
+                }
+
+                // Show progress
+                btn.textContent = 'Start matching';
+                document.getElementById('matchProgressSection').classList.add('active');
+                document.getElementById('matchResultsSection').classList.remove('active');
+                document.getElementById('matchProgressTitle').textContent = `Matching p\u00e5g\u00e5r (${data.mode_label})...`;
+                document.getElementById('matchProgressDetail').textContent = data.message || 'Starter...';
+
+                matchPollInterval = setInterval(pollMatchStatus, 2000);
+                pollMatchStatus();
+
+            } catch (e) {
+                alert(`Nettverksfeil: ${e.message}`);
+                btn.disabled = false;
+                btn.textContent = 'Start matching';
+            }
+        });
+
+        async function pollMatchStatus() {
+            if (!matchJobId) return;
+            try {
+                const resp = await fetch(`${API_BASE}/api/match/status/${matchJobId}`);
+                const data = await resp.json();
+
+                document.getElementById('matchProgressBar').style.width = `${data.progress_percent}%`;
+                document.getElementById('matchProgressText').textContent = `${data.processed} / ${data.total} produkter`;
+                document.getElementById('matchProgressPercent').textContent = `${data.progress_percent}%`;
+
+                if (data.status === 'completed' || data.status === 'failed') {
+                    clearInterval(matchPollInterval);
+                    matchPollInterval = null;
+
+                    if (data.status === 'completed') {
+                        document.getElementById('matchProgressTitle').textContent = 'Matching fullf\u00f8rt!';
+                        await loadMatchResults();
+                    } else {
+                        document.getElementById('matchProgressTitle').textContent = 'Matching feilet';
+                        document.getElementById('matchProgressDetail').textContent = data.error || 'Ukjent feil';
+                    }
+                }
+            } catch (e) {
+                console.error('Match poll error:', e);
+            }
+        }
+
+        async function loadMatchResults() {
+            try {
+                const resp = await fetch(`${API_BASE}/api/match/results/${matchJobId}`);
+                const data = await resp.json();
+                matchResultsData = data.results || [];
+                matchRowApprovals = data.row_approvals || {};
+                matchJobMeta = {
+                    job_name: data.job_name || '',
+                    created_by: data.created_by || '',
+                    job_type: data.job_type || 'standard',
+                    locked: data.locked || false,
+                };
+
+                // Job info banner
+                document.getElementById('matchJobNameDisplay').textContent = matchJobMeta.job_name || matchJobId;
+                document.getElementById('matchCreatedByDisplay').textContent = matchJobMeta.created_by || 'Ukjent';
+                const typeBadge = document.getElementById('matchJobTypeBadge');
+                if (matchJobMeta.job_type === 'anbud') {
+                    typeBadge.textContent = 'Anbud';
+                    typeBadge.style.background = '#fef3c7';
+                    typeBadge.style.color = '#92400e';
+                } else {
+                    typeBadge.textContent = 'Standard';
+                    typeBadge.style.background = '#dbeafe';
+                    typeBadge.style.color = '#1e40af';
+                }
+                const lockBadge = document.getElementById('matchLockBadge');
+                lockBadge.style.display = matchJobMeta.locked ? '' : 'none';
+
+                const isHardcore = data.match_mode === 'hardcore_price';
+                const modeLabel = data.mode_label || MATCH_MODE_LABELS[data.match_mode] || 'Standard';
+
+                // Mode badge
+                const badge = document.getElementById('matchModeBadge');
+                badge.textContent = modeLabel;
+                const modeStyle = MATCH_MODE_STYLES[data.match_mode] || MATCH_MODE_STYLES.standard;
+                badge.style.background = modeStyle.bg;
+                badge.style.color = modeStyle.color;
+
+                // Stats
+                const summary = data.summary || {};
+                const statsHtml = `
+                    <div class="stat-card"><div class="value">${summary.total || 0}</div><div class="label">Totalt</div></div>
+                    <div class="stat-card success"><div class="value">${summary.matched || 0}</div><div class="label">Matchet</div></div>
+                    <div class="stat-card danger"><div class="value">${summary.no_match || 0}</div><div class="label">Ingen match</div></div>
+                    <div class="stat-card warning"><div class="value">${summary.multiple_candidates || 0}</div><div class="label">Flere alternativer</div></div>
+                    <div class="stat-card"><div class="value">${summary.manual_review_needed || 0}</div><div class="label">Manuell vurdering</div></div>
+                    <div class="stat-card"><div class="value">${summary.manual_selections || 0}</div><div class="label">Manuelt valgt</div></div>
+                    ${summary.avg_price ? `<div class="stat-card"><div class="value">kr ${summary.avg_price.toFixed(0)}</div><div class="label">Snitt ALC-pris</div></div>` : ''}
+                    ${summary.products_with_price ? `<div class="stat-card"><div class="value">${summary.products_with_price}</div><div class="label">Med ALC-pris</div></div>` : ''}
+                `;
+                document.getElementById('matchStatsGrid').innerHTML = statsHtml;
+
+                // Results table
+                renderMatchResults(matchResultsData, isHardcore);
+
+                // Download button
+                document.getElementById('matchDownloadBtn').onclick = () => {
+                    window.location.href = `${API_BASE}/api/match/download/${matchJobId}`;
+                };
+
+                // Show results
+                document.getElementById('matchResultsSection').classList.add('active');
+
+            } catch (e) {
+                console.error('Failed to load match results:', e);
+                document.getElementById('matchProgressDetail').textContent = `Kunne ikke laste resultater: ${e.message}`;
+            }
+        }
+
+        const TAG_STYLES = {
+            'billigst': {bg:'#dcfce7',color:'#166534',label:'Billigst'},
+            'best_match': {bg:'#dbeafe',color:'#1e40af',label:'Best match'},
+            'anbefalt_hardcore': {bg:'#fef3c7',color:'#92400e',label:'Anbefalt'},
+            'eget_merke': {bg:'#ecfdf5',color:'#047857',label:'Eget merke'},
+            'manuelt_valgt': {bg:'#e0e7ff',color:'#3730a3',label:'Manuelt valgt'},
+            'learned_match': {bg:'#fdf4ff',color:'#86198f',label:'L\u00e6rt fra historikk'},
+        };
+
+        function getFilteredResults() {
+            let filtered = matchResultsData;
+            if (matchFilter === 'approved') {
+                filtered = filtered.filter(r => matchRowApprovals[String(r.input_row)] === 'approved');
+            } else if (matchFilter === 'rejected') {
+                filtered = filtered.filter(r => matchRowApprovals[String(r.input_row)] === 'rejected');
+            } else if (matchFilter !== 'all') {
+                filtered = filtered.filter(r => r.status === matchFilter);
+            }
+            if (matchMinRelevance > 0) {
+                filtered = filtered.filter(r => (r.selected_relevance_score || 0) >= matchMinRelevance);
+            }
+            return filtered;
+        }
+
+        function setMatchFilter(f) {
+            matchFilter = f;
+            document.querySelectorAll('.match-filter-btn').forEach(b => {
+                b.classList.toggle('active', b.dataset.filter === f);
+                if (b.dataset.filter === f) {
+                    b.style.border = '2px solid var(--primary)';
+                    b.style.fontWeight = '700';
+                } else {
+                    b.style.border = '1px solid var(--border)';
+                    b.style.fontWeight = '';
+                }
+            });
+            applyMatchFilters();
+        }
+
+        function applyMatchFilters() {
+            matchMinRelevance = parseInt(document.getElementById('matchRelevanceFilter').value) || 0;
+            document.getElementById('matchRelevanceFilterVal').textContent = matchMinRelevance + '%';
+            const filtered = getFilteredResults();
+            document.getElementById('matchFilterCount').textContent = `Viser ${filtered.length} av ${matchResultsData.length}`;
+            renderMatchResults(filtered, matchMode === 'hardcore_price');
+        }
+
+        function renderMatchResults(results, isHardcore) {
+            const tbody = document.getElementById('matchResultsBody');
+            let html = '';
+            const isLocked = matchJobMeta.locked;
+
+            for (const r of results) {
+                const statusBadge = getMatchStatusBadge(r.status);
+                const selectedName = r.selected_product_name || '-';
+                const alcDisplay = r.selected_alc_price != null
+                    ? `kr ${Number(r.selected_alc_price).toFixed(2)}`
+                    : '<span style="color:#94a3b8">Mangler</span>';
+                const relevanceDisplay = r.selected_relevance_score != null
+                    ? `${r.selected_relevance_score}%`
+                    : '-';
+
+                // Approval status
+                const approval = matchRowApprovals[String(r.input_row)] || 'pending';
+                let approvalBadge = '';
+                if (approval === 'approved') approvalBadge = '<span style="background:#dcfce7;color:#166534;padding:0.15rem 0.4rem;border-radius:10px;font-size:0.72rem;font-weight:600">Godkjent</span>';
+                else if (approval === 'rejected') approvalBadge = '<span style="background:#fef2f2;color:#991b1b;padding:0.15rem 0.4rem;border-radius:10px;font-size:0.72rem;font-weight:600">Avsl\u00e5tt</span>';
+                else approvalBadge = '<span style="background:#f1f5f9;color:#64748b;padding:0.15rem 0.4rem;border-radius:10px;font-size:0.72rem">Venter</span>';
+
+                // Main row
+                html += `<tr class="expandable" onclick="toggleMatchDetail(this, ${r.input_row})">`;
+                html += `<td style="text-align:center"><input type="checkbox" class="match-row-check" data-row="${r.input_row}" onclick="event.stopPropagation()"></td>`;
+                html += `<td>${r.input_row}</td>`;
+                html += `<td title="${escapeHtml(r.input_specification || '')}">${escapeHtml(r.input_product_name || '')}</td>`;
+                html += `<td>${statusBadge}</td>`;
+                html += `<td>${approvalBadge}</td>`;
+                html += `<td title="${r.selected_candidate || ''}">${escapeHtml(selectedName.substring(0, 40))}</td>`;
+                html += `<td style="font-weight:600">${alcDisplay}</td>`;
+                html += `<td>${relevanceDisplay}</td>`;
+                html += `<td>${r.candidate_count || (r.candidates ? r.candidates.length : 0)}</td>`;
+                html += `</tr>`;
+
+                // Detail row with candidates
+                html += `<tr class="detail-row" id="matchDetail_${r.input_row}"><td colspan="9"><div class="detail-content">`;
+                html += `<div style="margin-bottom:0.5rem;display:flex;align-items:center;justify-content:space-between;flex-wrap:wrap;gap:0.5rem">`;
+                html += `<div><strong>Innprodukt:</strong> ${escapeHtml(r.input_product_name || '')}`;
+                if (r.input_specification) html += ` &mdash; <em>${escapeHtml(r.input_specification)}</em>`;
+                html += `</div>`;
+                // Action buttons for this row
+                if (!isLocked) {
+                    html += `<div style="display:flex;gap:0.3rem">`;
+                    html += `<button class="btn" style="font-size:0.72rem;padding:0.2rem 0.5rem;background:#dcfce7;color:#166534;border:1px solid #bbf7d0" onclick="event.stopPropagation();approveRow(${r.input_row},'approved')">Godkjenn</button>`;
+                    html += `<button class="btn" style="font-size:0.72rem;padding:0.2rem 0.5rem;background:#fef2f2;color:#991b1b;border:1px solid #fecaca" onclick="event.stopPropagation();approveRow(${r.input_row},'rejected')">Avsl\u00e5</button>`;
+                    html += `<button class="btn" style="font-size:0.72rem;padding:0.2rem 0.5rem;background:#e0e7ff;color:#3730a3;border:1px solid #c7d2fe" onclick="event.stopPropagation();openManualSearch(${r.input_row})">S\u00f8k produkt</button>`;
+                    html += `</div>`;
+                }
+                html += `</div>`;
+                if (r.comment) html += `<div style="color:var(--text-muted);font-size:0.8rem;margin-bottom:0.3rem">${escapeHtml(r.comment)}</div>`;
+
+                if (r.candidates && r.candidates.length > 0) {
+                    html += `<table style="width:100%;border-collapse:collapse;font-size:0.82rem;margin-top:0.5rem">`;
+                    html += `<thead><tr style="border-bottom:2px solid var(--border);text-align:left">`;
+                    html += `<th style="padding:0.4rem;width:30px"></th>`;
+                    html += `<th style="padding:0.4rem">#</th>`;
+                    html += `<th style="padding:0.4rem">Art.nr</th>`;
+                    html += `<th style="padding:0.4rem">Produktnavn</th>`;
+                    html += `<th style="padding:0.4rem">Spesifikasjon</th>`;
+                    html += `<th style="padding:0.4rem">Produsent</th>`;
+                    html += `<th style="padding:0.4rem;font-weight:700;color:#b45309">ALC-pris</th>`;
+                    html += `<th style="padding:0.4rem">Relevans</th>`;
+                    html += `<th style="padding:0.4rem">Tags</th>`;
+                    html += `<th style="padding:0.4rem">Velg</th>`;
+                    html += `</tr></thead><tbody>`;
+
+                    for (const c of r.candidates) {
+                        const isSelected = c.article_number === r.selected_candidate;
+                        const rowBg = isSelected ? 'background:#e8f5e9;' : '';
+                        const priceStr = c.alc_price != null ? `kr ${Number(c.alc_price).toFixed(2)}` : '<span style="color:#94a3b8">-</span>';
+
+                        let tagsHtml = '';
+                        if (c.tags && c.tags.length > 0) {
+                            for (const tag of c.tags) {
+                                const ts = TAG_STYLES[tag];
+                                if (ts) tagsHtml += `<span style="background:${ts.bg};color:${ts.color};padding:0.1rem 0.4rem;border-radius:10px;font-size:0.72rem;font-weight:600;margin-right:0.2rem">${ts.label}</span>`;
+                            }
+                        }
+
+                        html += `<tr style="${rowBg}border-bottom:1px solid #f1f5f9">`;
+                        html += `<td style="padding:0.4rem;text-align:center">${isSelected ? '<span style="color:#16a34a;font-weight:700">&#10003;</span>' : ''}</td>`;
+                        html += `<td style="padding:0.4rem;color:var(--text-muted)">${c.rank}</td>`;
+                        html += `<td style="padding:0.4rem;font-family:monospace;font-size:0.78rem">${escapeHtml(c.article_number)}</td>`;
+                        html += `<td style="padding:0.4rem">${escapeHtml(c.product_name || '')}</td>`;
+                        html += `<td style="padding:0.4rem;max-width:150px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap" title="${escapeHtml(c.specification || '')}">${escapeHtml(c.specification || '')}</td>`;
+                        html += `<td style="padding:0.4rem;font-size:0.78rem">${escapeHtml(c.supplier || '')}</td>`;
+                        html += `<td style="padding:0.4rem;font-weight:600;color:#b45309">${priceStr}</td>`;
+                        html += `<td style="padding:0.4rem">${c.relevance_score}%</td>`;
+                        html += `<td style="padding:0.4rem">${tagsHtml}</td>`;
+                        html += `<td style="padding:0.4rem">`;
+                        if (!isSelected && !isLocked) {
+                            html += `<button class="btn" style="font-size:0.72rem;padding:0.2rem 0.5rem;background:#eff6ff;color:var(--primary);border:1px solid #bfdbfe;cursor:pointer" onclick="event.stopPropagation();selectMatchCandidate(${r.input_row},'${c.article_number}')">Velg</button>`;
+                        } else if (isSelected) {
+                            html += '<span style="color:#16a34a;font-size:0.78rem;font-weight:600">Valgt</span>';
+                        }
+                        html += `</td></tr>`;
+
+                        if (c.ai_explanation) {
+                            html += `<tr style="${rowBg}"><td></td><td colspan="9" style="padding:0.2rem 0.4rem 0.5rem;font-size:0.75rem;color:var(--text-muted);font-style:italic">${escapeHtml(c.ai_explanation)}</td></tr>`;
+                        }
+                    }
+                    html += `</tbody></table>`;
+                } else {
+                    html += `<p style="color:var(--text-muted);font-size:0.85rem">Ingen kandidater funnet.</p>`;
+                }
+                html += `</div></td></tr>`;
+            }
+            tbody.innerHTML = html;
+        }
+
+        function getMatchStatusBadge(status) {
+            const map = {
+                matched: '<span class="status-badge status-ok">Matchet</span>',
+                no_match: '<span class="status-badge status-missing">Ingen match</span>',
+                multiple: '<span class="status-badge status-improve">Flere alternativer</span>',
+                manual_review: '<span class="status-badge" style="background:#fef3c7;color:#92400e">Manuell vurdering</span>',
+                pending: '<span class="status-badge" style="background:#e2e8f0;color:#475569">Venter</span>',
+            };
+            return map[status] || `<span class="status-badge">${status}</span>`;
+        }
+
+        function toggleMatchDetail(row, inputRow) {
+            const detailRow = document.getElementById(`matchDetail_${inputRow}`);
+            if (!detailRow) return;
+            const isVisible = detailRow.classList.contains('visible');
+            detailRow.classList.toggle('visible');
+            row.classList.toggle('expanded');
+        }
+
+        async function selectMatchCandidate(inputRow, articleNumber) {
+            if (!matchJobId) return;
+            try {
+                const resp = await fetch(`${API_BASE}/api/match/select/${matchJobId}`, {
+                    method: 'POST',
+                    headers: {'Content-Type': 'application/json'},
+                    body: JSON.stringify({input_row: inputRow, article_number: articleNumber}),
+                });
+                if (!resp.ok) {
+                    const err = await resp.json();
+                    alert(`Feil: ${err.detail || 'Kunne ikke velge kandidat'}`);
+                    return;
+                }
+
+                // Update local data and re-render
+                for (const r of matchResultsData) {
+                    if (r.input_row === inputRow) {
+                        r.selected_candidate = articleNumber;
+                        r.selected_by = 'manual';
+                        r.status = 'matched';
+                        // Update selected product info
+                        for (const c of r.candidates) {
+                            if (c.article_number === articleNumber) {
+                                r.selected_product_name = c.product_name;
+                                r.selected_alc_price = c.alc_price;
+                                r.selected_relevance_score = c.relevance_score;
+                                break;
+                            }
+                        }
+                        break;
+                    }
+                }
+
+                const isHardcore = matchMode === 'hardcore_price';
+                renderMatchResults(matchResultsData, isHardcore);
+
+            } catch (e) {
+                alert(`Nettverksfeil: ${e.message}`);
+            }
+        }
+
+        function resetMatchModule() {
+            matchFile = null;
+            matchJobId = null;
+            matchResultsData = [];
+            matchRowApprovals = {};
+            matchJobMeta = {};
+            matchFilter = 'all';
+            matchMinRelevance = 0;
+            document.getElementById('matchFileName').classList.add('hidden');
+            document.getElementById('matchFileInfo').textContent = '';
+            document.getElementById('matchColumnInfo').classList.add('hidden');
+            document.getElementById('matchStartBtn').disabled = true;
+            document.getElementById('matchStartBtn').textContent = 'Start matching';
+            document.getElementById('matchProgressSection').classList.remove('active');
+            document.getElementById('matchResultsSection').classList.remove('active');
+            document.getElementById('matchProgressBar').style.width = '0%';
+            document.getElementById('matchFileInput').value = '';
+            document.getElementById('matchJobName').value = '';
+            document.getElementById('matchConfigCard').style.display = '';
+            if (matchPollInterval) { clearInterval(matchPollInterval); matchPollInterval = null; }
+        }
+
+        // ── Row Approval ──
+
+        async function approveRow(inputRow, action) {
+            if (!matchJobId) return;
+            try {
+                const resp = await fetch(`${API_BASE}/api/jobs/${matchJobId}/approve`, {
+                    method: 'POST',
+                    headers: {'Content-Type': 'application/json'},
+                    body: JSON.stringify({rows: [inputRow], action}),
+                });
+                if (!resp.ok) { alert('Kunne ikke oppdatere godkjenning.'); return; }
+                matchRowApprovals[String(inputRow)] = action;
+                applyMatchFilters();
+            } catch (e) { alert('Nettverksfeil: ' + e.message); }
+        }
+
+        async function batchApproveVisible(action) {
+            const filtered = getFilteredResults();
+            if (!filtered.length) return;
+            if (!confirm(`Sett ${filtered.length} rader til "${action === 'approved' ? 'godkjent' : 'avsl\u00e5tt'}"?`)) return;
+            const rows = filtered.map(r => r.input_row);
+            try {
+                const resp = await fetch(`${API_BASE}/api/jobs/${matchJobId}/approve`, {
+                    method: 'POST',
+                    headers: {'Content-Type': 'application/json'},
+                    body: JSON.stringify({rows, action}),
+                });
+                if (!resp.ok) { alert('Kunne ikke oppdatere.'); return; }
+                rows.forEach(r => matchRowApprovals[String(r)] = action);
+                applyMatchFilters();
+            } catch (e) { alert('Nettverksfeil: ' + e.message); }
+        }
+
+        async function batchApproveAll(action) {
+            if (!matchJobId) return;
+            if (!confirm(`Sett ALLE ${matchResultsData.length} rader til "${action === 'approved' ? 'godkjent' : 'avsl\u00e5tt'}"?`)) return;
+            try {
+                const resp = await fetch(`${API_BASE}/api/jobs/${matchJobId}/approve`, {
+                    method: 'POST',
+                    headers: {'Content-Type': 'application/json'},
+                    body: JSON.stringify({all: true, action}),
+                });
+                if (!resp.ok) { alert('Kunne ikke oppdatere.'); return; }
+                matchResultsData.forEach(r => matchRowApprovals[String(r.input_row)] = action);
+                applyMatchFilters();
+            } catch (e) { alert('Nettverksfeil: ' + e.message); }
+        }
+
+        // ── Lock / Unlock ──
+
+        function showLockDialog() {
+            if (matchJobMeta.locked) {
+                document.getElementById('unlockModal').style.display = 'flex';
+                document.getElementById('unlockPasswordInput').value = '';
+                document.getElementById('unlockPasswordInput').focus();
+            } else {
+                document.getElementById('lockModal').style.display = 'flex';
+                document.getElementById('lockPasswordInput').value = '';
+                document.getElementById('lockPasswordInput').focus();
+            }
+        }
+        function closeLockModal() { document.getElementById('lockModal').style.display = 'none'; }
+        function closeUnlockModal() { document.getElementById('unlockModal').style.display = 'none'; }
+
+        async function doLockJob() {
+            const pw = document.getElementById('lockPasswordInput').value;
+            if (pw.length < 4) { alert('Passord m\u00e5 v\u00e6re minst 4 tegn.'); return; }
+            try {
+                const resp = await fetch(`${API_BASE}/api/jobs/${matchJobId}/lock`, {
+                    method: 'POST',
+                    headers: {'Content-Type': 'application/json'},
+                    body: JSON.stringify({password: pw}),
+                });
+                if (!resp.ok) { const e = await resp.json(); alert(e.detail || 'Feil'); return; }
+                matchJobMeta.locked = true;
+                document.getElementById('matchLockBadge').style.display = '';
+                closeLockModal();
+                applyMatchFilters();
+            } catch (e) { alert('Nettverksfeil: ' + e.message); }
+        }
+
+        async function doUnlockJob() {
+            const pw = document.getElementById('unlockPasswordInput').value;
+            if (!pw) { alert('Skriv inn passord.'); return; }
+            try {
+                const resp = await fetch(`${API_BASE}/api/jobs/${matchJobId}/unlock`, {
+                    method: 'POST',
+                    headers: {'Content-Type': 'application/json'},
+                    body: JSON.stringify({password: pw}),
+                });
+                if (!resp.ok) { const e = await resp.json(); alert(e.detail || 'Feil passord'); return; }
+                matchJobMeta.locked = false;
+                document.getElementById('matchLockBadge').style.display = 'none';
+                closeUnlockModal();
+                applyMatchFilters();
+            } catch (e) { alert('Nettverksfeil: ' + e.message); }
+        }
+
+        // ── Manual Product Search ──
+
+        let _manualSearchRow = null;
+
+        function openManualSearch(inputRow) {
+            _manualSearchRow = inputRow;
+            document.getElementById('manualSearchRow').textContent = inputRow;
+            document.getElementById('manualSearchInput').value = '';
+            document.getElementById('manualArtnrInput').value = '';
+            document.getElementById('manualSearchResults').innerHTML = '';
+            document.getElementById('manualSearchModal').style.display = 'flex';
+            document.getElementById('manualSearchInput').focus();
+        }
+        function closeManualSearchModal() { document.getElementById('manualSearchModal').style.display = 'none'; }
+
+        async function doManualSearch() {
+            const q = document.getElementById('manualSearchInput').value.trim();
+            if (!q) return;
+            const container = document.getElementById('manualSearchResults');
+            container.innerHTML = '<span class="spinner"></span> S\u00f8ker...';
+            try {
+                const resp = await fetch(`${API_BASE}/api/catalog/search?q=${encodeURIComponent(q)}`);
+                const data = await resp.json();
+                if (!data.results || !data.results.length) {
+                    container.innerHTML = '<p style="color:var(--text-muted)">Ingen resultater.</p>';
+                    return;
+                }
+                let html = '<table style="width:100%;border-collapse:collapse;margin-top:0.5rem"><thead><tr style="border-bottom:2px solid var(--border);text-align:left">';
+                html += '<th style="padding:0.4rem">Art.nr</th><th style="padding:0.4rem">Produktnavn</th><th style="padding:0.4rem">Spesifikasjon</th><th style="padding:0.4rem">Produsent</th><th style="padding:0.4rem">Velg</th>';
+                html += '</tr></thead><tbody>';
+                for (const p of data.results) {
+                    html += `<tr style="border-bottom:1px solid #f1f5f9">`;
+                    html += `<td style="padding:0.4rem;font-family:monospace;font-size:0.78rem">${escapeHtml(p.article_number)}</td>`;
+                    html += `<td style="padding:0.4rem">${escapeHtml(p.product_name || '')}</td>`;
+                    html += `<td style="padding:0.4rem;max-width:150px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap" title="${escapeHtml(p.specification || '')}">${escapeHtml(p.specification || '')}</td>`;
+                    html += `<td style="padding:0.4rem;font-size:0.78rem">${escapeHtml(p.supplier || '')}</td>`;
+                    html += `<td style="padding:0.4rem"><button class="btn" style="font-size:0.72rem;padding:0.2rem 0.5rem;background:#dcfce7;color:#166534;border:1px solid #bbf7d0;cursor:pointer" onclick="doSelectManual('${p.article_number}')">Velg</button></td>`;
+                    html += `</tr>`;
+                }
+                html += '</tbody></table>';
+                container.innerHTML = html;
+            } catch (e) {
+                container.innerHTML = `<p style="color:#ef4444">Feil: ${e.message}</p>`;
+            }
+        }
+
+        async function doManualArtnrSelect() {
+            const artnr = document.getElementById('manualArtnrInput').value.trim();
+            if (!artnr) return;
+            await doSelectManual(artnr);
+        }
+
+        async function doSelectManual(articleNumber) {
+            if (!matchJobId || _manualSearchRow === null) return;
+            try {
+                const resp = await fetch(`${API_BASE}/api/match/select-manual/${matchJobId}`, {
+                    method: 'POST',
+                    headers: {'Content-Type': 'application/json'},
+                    body: JSON.stringify({input_row: _manualSearchRow, article_number: articleNumber}),
+                });
+                if (!resp.ok) {
+                    const e = await resp.json();
+                    alert(e.detail || 'Kunne ikke velge produkt');
+                    return;
+                }
+                const data = await resp.json();
+                // Update local data
+                for (const r of matchResultsData) {
+                    if (r.input_row === _manualSearchRow) {
+                        r.selected_candidate = articleNumber;
+                        r.selected_by = 'manual';
+                        r.status = 'matched';
+                        r.selected_product_name = data.product_name || articleNumber;
+                        r.selected_alc_price = null;
+                        r.selected_relevance_score = 0;
+                        break;
+                    }
+                }
+                closeManualSearchModal();
+                applyMatchFilters();
+            } catch (e) { alert('Nettverksfeil: ' + e.message); }
+        }
+
+        // ── Job List ──
+
+        async function loadJobList() {
+            const container = document.getElementById('jobListContainer');
+            container.innerHTML = '<span class="spinner"></span> Laster...';
+            try {
+                const resp = await fetch(`${API_BASE}/api/jobs`);
+                const data = await resp.json();
+                const jobs = data.jobs || [];
+                if (!jobs.length) {
+                    container.innerHTML = '<p style="color:var(--text-muted)">Ingen jobber funnet.</p>';
+                    return;
+                }
+                let html = '<table style="width:100%;border-collapse:collapse"><thead><tr style="border-bottom:2px solid var(--border);text-align:left">';
+                html += '<th style="padding:0.5rem">Jobbnavn</th>';
+                html += '<th style="padding:0.5rem">Opprettet av</th>';
+                html += '<th style="padding:0.5rem">Type</th>';
+                html += '<th style="padding:0.5rem">Modus</th>';
+                html += '<th style="padding:0.5rem">Status</th>';
+                html += '<th style="padding:0.5rem">Produkter</th>';
+                html += '<th style="padding:0.5rem">Opprettet</th>';
+                html += '<th style="padding:0.5rem">Sist aktiv</th>';
+                html += '<th style="padding:0.5rem">L\u00e5st</th>';
+                html += '<th style="padding:0.5rem"></th>';
+                html += '</tr></thead><tbody>';
+                for (const j of jobs) {
+                    const created = j.created_at ? new Date(j.created_at * 1000).toLocaleString('nb-NO') : '-';
+                    const lastActive = j.last_activity_at ? new Date(j.last_activity_at * 1000).toLocaleString('nb-NO') : '-';
+                    const typeBg = j.job_type === 'anbud' ? 'background:#fef3c7;color:#92400e' : 'background:#dbeafe;color:#1e40af';
+                    const statusBadge = getMatchStatusBadge(j.status);
+                    const lockIcon = j.locked ? '<span style="color:#991b1b" title="L\u00e5st">&#128274;</span>' : '';
+                    html += `<tr style="border-bottom:1px solid #f1f5f9;cursor:pointer" onclick="openJob('${j.job_id}')">`;
+                    html += `<td style="padding:0.5rem;font-weight:600">${escapeHtml(j.job_name || j.job_id)}</td>`;
+                    html += `<td style="padding:0.5rem">${escapeHtml(j.created_by || '-')}</td>`;
+                    html += `<td style="padding:0.5rem"><span style="${typeBg};padding:0.1rem 0.4rem;border-radius:10px;font-size:0.72rem;font-weight:600">${j.job_type === 'anbud' ? 'Anbud' : 'Standard'}</span></td>`;
+                    html += `<td style="padding:0.5rem;font-size:0.82rem">${MATCH_MODE_LABELS[j.match_mode] || j.match_mode}</td>`;
+                    html += `<td style="padding:0.5rem">${statusBadge}</td>`;
+                    html += `<td style="padding:0.5rem">${j.processed || 0} / ${j.total || 0}</td>`;
+                    html += `<td style="padding:0.5rem;font-size:0.82rem">${created}</td>`;
+                    html += `<td style="padding:0.5rem;font-size:0.82rem">${lastActive}</td>`;
+                    html += `<td style="padding:0.5rem;text-align:center">${lockIcon}</td>`;
+                    html += `<td style="padding:0.5rem"><button class="btn btn-primary" style="font-size:0.75rem;padding:0.2rem 0.5rem" onclick="event.stopPropagation();openJob('${j.job_id}')">Åpne</button></td>`;
+                    html += `</tr>`;
+                }
+                html += '</tbody></table>';
+                container.innerHTML = html;
+            } catch (e) {
+                container.innerHTML = `<p style="color:#ef4444">Feil: ${e.message}</p>`;
+            }
+        }
+
+        async function openJob(jobId) {
+            // Load job and switch to matching view
+            matchJobId = jobId;
+            // Hide config, show progress/results
+            document.getElementById('matchConfigCard').style.display = 'none';
+            switchModule('matching');
+            document.getElementById('matchProgressSection').classList.add('active');
+            document.getElementById('matchProgressTitle').textContent = 'Laster jobb...';
+            try {
+                const resp = await fetch(`${API_BASE}/api/match/status/${jobId}`);
+                const data = await resp.json();
+                if (data.status === 'completed') {
+                    document.getElementById('matchProgressTitle').textContent = 'Fullf\u00f8rt';
+                    await loadMatchResults();
+                } else if (data.status === 'running') {
+                    document.getElementById('matchProgressTitle').textContent = `Matching p\u00e5g\u00e5r...`;
+                    matchPollInterval = setInterval(pollMatchStatus, 2000);
+                    pollMatchStatus();
+                } else {
+                    document.getElementById('matchProgressTitle').textContent = `Status: ${data.status}`;
+                    if (data.error) document.getElementById('matchProgressDetail').textContent = data.error;
+                }
+            } catch (e) {
+                document.getElementById('matchProgressDetail').textContent = 'Kunne ikke laste jobb: ' + e.message;
+            }
+        }
+
+        // ── Anbud Module ──
+
+        function setAnbudMode(mode) {
+            anbudMode = mode;
+            document.querySelectorAll('.anbud-mode-label').forEach(label => {
+                const labelMode = label.dataset.mode;
+                const isActive = labelMode === mode;
+                const style = MATCH_MODE_STYLES[labelMode] || MATCH_MODE_STYLES.standard;
+                label.style.border = isActive ? `2px solid ${style.color}` : '2px solid var(--border)';
+                label.style.background = isActive ? style.bg : '#fff';
+                label.classList.toggle('active', isActive);
+            });
+            const radio = document.querySelector(`input[name="anbudMode"][value="${mode}"]`);
+            if (radio) radio.checked = true;
+        }
+
+        function updateAnbudStartBtn() {
+            const name = document.getElementById('anbudJobName').value.trim();
+            const user = document.getElementById('anbudCreatedBy').value.trim();
+            document.getElementById('anbudStartBtn').disabled = !(anbudFile && name && user);
+        }
+
+        // Anbud file handling
+        const anbudFileInput = document.getElementById('anbudFileInput');
+        const anbudUploadArea = document.getElementById('anbudUploadArea');
+        if (anbudFileInput) {
+            anbudFileInput.addEventListener('change', (e) => { const f = e.target.files[0]; if (f) selectAnbudFile(f); });
+        }
+        if (anbudUploadArea) {
+            anbudUploadArea.addEventListener('dragover', (e) => { e.preventDefault(); anbudUploadArea.classList.add('dragover'); });
+            anbudUploadArea.addEventListener('dragleave', () => anbudUploadArea.classList.remove('dragover'));
+            anbudUploadArea.addEventListener('drop', (e) => {
+                e.preventDefault(); anbudUploadArea.classList.remove('dragover');
+                const f = e.dataTransfer.files[0]; if (f) selectAnbudFile(f);
+            });
+        }
+
+        function selectAnbudFile(file) {
+            if (!file.name.endsWith('.xlsx')) { alert('Kun .xlsx-filer st\u00f8ttes.'); return; }
+            anbudFile = file;
+            document.getElementById('anbudFileName').textContent = file.name;
+            document.getElementById('anbudFileName').classList.remove('hidden');
+            document.getElementById('anbudFileInfo').textContent = `${(file.size / 1024).toFixed(1)} KB`;
+            updateAnbudStartBtn();
+        }
+
+        // Start anbud matching — uses same backend endpoint with job_type=anbud
+        document.getElementById('anbudStartBtn')?.addEventListener('click', async () => {
+            if (!anbudFile) return;
+            const jobName = document.getElementById('anbudJobName').value.trim();
+            const createdBy = document.getElementById('anbudCreatedBy').value.trim();
+            if (!jobName || !createdBy) { alert('Jobbnavn og ditt navn er p\u00e5krevd.'); return; }
+            try { localStorage.setItem('masterdata_username', createdBy); } catch(e) {}
+
+            const btn = document.getElementById('anbudStartBtn');
+            btn.disabled = true;
+            btn.innerHTML = '<span class="spinner"></span> Starter...';
+
+            try {
+                const formData = new FormData();
+                formData.append('file', anbudFile);
+                const params = new URLSearchParams({match_mode: anbudMode, job_name: jobName, created_by: createdBy, job_type: 'anbud'});
+                const url = `${API_BASE}/api/match/start?${params}`;
+                const resp = await fetch(url, { method: 'POST', body: formData });
+
+                if (!resp.ok) {
+                    const err = await resp.json();
+                    alert(`Feil: ${err.detail || 'Ukjent feil'}`);
+                    btn.disabled = false; btn.textContent = 'Start matching'; return;
+                }
+
+                const data = await resp.json();
+                // Switch to matching module to show results (shared UI)
+                matchJobId = data.job_id;
+                matchMode = anbudMode;
+                btn.textContent = 'Start matching';
+
+                document.getElementById('anbudProgressSection').classList.add('active');
+                document.getElementById('anbudProgressTitle').textContent = `Matching p\u00e5g\u00e5r (${data.mode_label})...`;
+                document.getElementById('anbudProgressDetail').textContent = data.message || 'Starter...';
+
+                anbudPollInterval = setInterval(pollAnbudStatus, 2000);
+                pollAnbudStatus();
+
+            } catch (e) {
+                alert(`Nettverksfeil: ${e.message}`);
+                btn.disabled = false; btn.textContent = 'Start matching';
+            }
+        });
+
+        async function pollAnbudStatus() {
+            if (!matchJobId) return;
+            try {
+                const resp = await fetch(`${API_BASE}/api/match/status/${matchJobId}`);
+                const data = await resp.json();
+                document.getElementById('anbudProgressBar').style.width = `${data.progress_percent}%`;
+                document.getElementById('anbudProgressText').textContent = `${data.processed} / ${data.total} produkter`;
+                document.getElementById('anbudProgressPercent').textContent = `${data.progress_percent}%`;
+
+                if (data.status === 'completed' || data.status === 'failed') {
+                    clearInterval(anbudPollInterval);
+                    anbudPollInterval = null;
+                    if (data.status === 'completed') {
+                        // Switch to matching module to show shared results UI
+                        switchModule('matching');
+                        document.getElementById('matchConfigCard').style.display = 'none';
+                        document.getElementById('matchProgressSection').classList.remove('active');
+                        await loadMatchResults();
+                    } else {
+                        document.getElementById('anbudProgressTitle').textContent = 'Matching feilet';
+                        document.getElementById('anbudProgressDetail').textContent = data.error || 'Ukjent feil';
+                    }
+                }
+            } catch (e) { console.error('Anbud poll error:', e); }
+        }
+
+        // ═══════════════════════════════════════════════════════
+        // LEARNING MODULE (Lær av tidligere anbud)
+        // ═══════════════════════════════════════════════════════
+
+        let learningAuthenticated = false;
+        let learningAdminPw = '';
+        let learningFile = null;
+        let learningPreviewData = null;
+
+        async function verifyLearningAdmin() {
+            const pw = document.getElementById('learningAdminPassword').value;
+            const errEl = document.getElementById('learningAuthError');
+            try {
+                const resp = await fetch(`${API_BASE}/api/learning/auth`, {
+                    method: 'POST',
+                    headers: {'Content-Type': 'application/json'},
+                    body: JSON.stringify({password: pw}),
+                });
+                if (resp.ok) {
+                    learningAuthenticated = true;
+                    learningAdminPw = pw;
+                    document.getElementById('learningAuthCard').style.display = 'none';
+                    document.getElementById('learningAdminPanel').style.display = '';
+                    errEl.style.display = 'none';
+                    loadLearningStats();
+                    loadLearningBatches();
+                } else {
+                    errEl.textContent = 'Feil passord. Kontakt administrator.';
+                    errEl.style.display = '';
+                }
+            } catch(e) {
+                errEl.textContent = 'Nettverksfeil: ' + e.message;
+                errEl.style.display = '';
+            }
+        }
+
+        async function loadLearningStats() {
+            try {
+                const resp = await fetch(`${API_BASE}/api/learning/stats`);
+                const data = await resp.json();
+                const bySource = data.by_source || {};
+                document.getElementById('learningStatsGrid').innerHTML = `
+                    <div class="stat-card"><div class="value">${data.total_examples || 0}</div><div class="label">Totalt eksempler</div></div>
+                    <div class="stat-card"><div class="value">${bySource.ui_override || 0}</div><div class="label">Fra manuelt valg</div></div>
+                    <div class="stat-card"><div class="value">${bySource.ui_approval || 0}</div><div class="label">Fra godkjenninger</div></div>
+                    <div class="stat-card" style="background:#fdf4ff"><div class="value">${bySource.historical_import || 0}</div><div class="label">Fra historisk import</div></div>
+                    <div class="stat-card"><div class="value">${data.unique_articles || 0}</div><div class="label">Unike artikler</div></div>
+                    <div class="stat-card"><div class="value">${data.batches || 0}</div><div class="label">Importbatcher</div></div>
+                `;
+            } catch(e) { console.error('Learning stats error:', e); }
+        }
+
+        // File handling
+        const learningFileInput = document.getElementById('learningFileInput');
+        const learningUploadArea = document.getElementById('learningUploadArea');
+        if (learningFileInput) {
+            learningFileInput.addEventListener('change', (e) => { const f = e.target.files[0]; if (f) selectLearningFile(f); });
+        }
+        if (learningUploadArea) {
+            learningUploadArea.addEventListener('dragover', (e) => { e.preventDefault(); learningUploadArea.classList.add('dragover'); });
+            learningUploadArea.addEventListener('dragleave', () => learningUploadArea.classList.remove('dragover'));
+            learningUploadArea.addEventListener('drop', (e) => {
+                e.preventDefault(); learningUploadArea.classList.remove('dragover');
+                const f = e.dataTransfer.files[0]; if (f) selectLearningFile(f);
+            });
+        }
+
+        async function selectLearningFile(file) {
+            if (!file.name.endsWith('.xlsx')) { alert('Kun .xlsx-filer.'); return; }
+            learningFile = file;
+            document.getElementById('learningFileName').textContent = file.name;
+            document.getElementById('learningFileName').classList.remove('hidden');
+
+            // Preview columns
+            const formData = new FormData();
+            formData.append('file', file);
+            try {
+                const resp = await fetch(`${API_BASE}/api/learning/preview?password=${encodeURIComponent(learningAdminPw)}`, {
+                    method: 'POST', body: formData,
+                });
+                if (!resp.ok) { alert('Kunne ikke lese filen.'); return; }
+                learningPreviewData = await resp.json();
+                showLearningMapping();
+            } catch(e) { alert('Feil: ' + e.message); }
+        }
+
+        function showLearningMapping() {
+            const data = learningPreviewData;
+            if (!data) return;
+            const headers = data.headers || [];
+
+            // Build dropdown options
+            const optNone = '<option value="-1">-- Ikke valgt --</option>';
+            const opts = headers.map((h, i) => `<option value="${i}">${escapeHtml(h || '(kolonne ' + (i+1) + ')')}</option>`).join('');
+            const optsReq = headers.map((h, i) => `<option value="${i}">${escapeHtml(h || '(kolonne ' + (i+1) + ')')}</option>`).join('');
+
+            document.getElementById('learningColInputText').innerHTML = optsReq;
+            document.getElementById('learningColInputSpec').innerHTML = optNone + opts;
+            document.getElementById('learningColOutputArtnr').innerHTML = optsReq;
+            document.getElementById('learningColOutputName').innerHTML = optNone + opts;
+
+            // Auto-detect columns
+            for (let i = 0; i < headers.length; i++) {
+                const h = (headers[i] || '').toLowerCase().replace(/[.\-_ ]/g, '');
+                if (/produktnavn|produkt|product|beskrivelse|varenavn/.test(h)) {
+                    document.getElementById('learningColInputText').value = i;
+                }
+                if (/spesifikasjon|spec|detaljer/.test(h)) {
+                    document.getElementById('learningColInputSpec').value = i;
+                }
+                if (/artikkelnummer|artikkelnr|artnr|sku|varenr/.test(h)) {
+                    document.getElementById('learningColOutputArtnr').value = i;
+                }
+            }
+
+            // Preview table
+            let html = '<table style="width:100%;border-collapse:collapse;font-size:0.78rem"><thead><tr style="border-bottom:2px solid var(--border)">';
+            for (const h of headers) html += `<th style="padding:0.3rem;text-align:left">${escapeHtml(h || '-')}</th>`;
+            html += '</tr></thead><tbody>';
+            for (const row of (data.preview_rows || [])) {
+                html += '<tr style="border-bottom:1px solid #f1f5f9">';
+                for (const v of row) html += `<td style="padding:0.3rem;max-width:200px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap" title="${escapeHtml(v)}">${escapeHtml(v)}</td>`;
+                html += '</tr>';
+            }
+            html += '</tbody></table>';
+            document.getElementById('learningPreviewTable').innerHTML = html;
+
+            document.getElementById('learningMappingSection').style.display = '';
+        }
+
+        async function doLearningImport() {
+            const importName = document.getElementById('learningImportName').value.trim();
+            if (!importName) { alert('Importnavn er p\u00e5krevd.'); return; }
+            if (!learningFile) { alert('Last opp en fil f\u00f8rst.'); return; }
+
+            const inputTextCol = document.getElementById('learningColInputText').value;
+            const inputSpecCol = document.getElementById('learningColInputSpec').value;
+            const outputArtnrCol = document.getElementById('learningColOutputArtnr').value;
+            const outputNameCol = document.getElementById('learningColOutputName').value;
+
+            if (inputTextCol === '-1') { alert('Velg kolonne for produktbeskrivelse.'); return; }
+            if (outputArtnrCol === '-1') { alert('Velg kolonne for artikkelnummer.'); return; }
+
+            const btn = document.getElementById('learningImportBtn');
+            btn.disabled = true;
+            btn.innerHTML = '<span class="spinner"></span> Importerer...';
+
+            try {
+                const formData = new FormData();
+                formData.append('file', learningFile);
+                const params = new URLSearchParams({
+                    password: learningAdminPw,
+                    batch_name: importName,
+                    imported_by: localStorage.getItem('masterdata_username') || '',
+                    input_text_col: inputTextCol,
+                    input_spec_col: inputSpecCol,
+                    output_artnr_col: outputArtnrCol,
+                    output_name_col: outputNameCol,
+                });
+                const resp = await fetch(`${API_BASE}/api/learning/import?${params}`, {
+                    method: 'POST', body: formData,
+                });
+                if (!resp.ok) {
+                    const err = await resp.json();
+                    alert(err.detail || 'Import feilet');
+                    btn.disabled = false; btn.textContent = 'Kj\u00f8r import'; return;
+                }
+                const data = await resp.json();
+
+                document.getElementById('learningImportResult').style.display = '';
+                document.getElementById('learningImportResult').innerHTML = `
+                    <div style="font-weight:700;color:#166534;margin-bottom:0.5rem">Import fullf\u00f8rt!</div>
+                    <div style="font-size:0.85rem">
+                        <p><strong>Batch:</strong> ${escapeHtml(data.name)} (${data.batch_id})</p>
+                        <p><strong>Totalt rader:</strong> ${data.total_rows}</p>
+                        <p style="color:#166534"><strong>Gyldige eksempler importert:</strong> ${data.valid_examples}</p>
+                        <p style="color:#991b1b"><strong>Forkastede rader:</strong> ${data.rejected_rows}</p>
+                        <p><strong>Mapping:</strong> ${Object.entries(data.mapped_fields || {}).filter(([k,v]) => v).map(([k,v]) => `${k}: "${v}"`).join(', ')}</p>
+                    </div>
+                `;
+
+                loadLearningStats();
+                loadLearningBatches();
+                btn.disabled = false; btn.textContent = 'Kj\u00f8r import';
+            } catch(e) {
+                alert('Feil: ' + e.message);
+                btn.disabled = false; btn.textContent = 'Kj\u00f8r import';
+            }
+        }
+
+        function resetLearningImport() {
+            learningFile = null;
+            learningPreviewData = null;
+            document.getElementById('learningFileName').classList.add('hidden');
+            document.getElementById('learningMappingSection').style.display = 'none';
+            document.getElementById('learningImportResult').style.display = 'none';
+            document.getElementById('learningFileInput').value = '';
+        }
+
+        async function loadLearningBatches() {
+            const container = document.getElementById('learningBatchList');
+            try {
+                const resp = await fetch(`${API_BASE}/api/learning/batches`);
+                const data = await resp.json();
+                const batches = data.batches || [];
+                if (!batches.length) {
+                    container.innerHTML = '<p>Ingen importer enn\u00e5.</p>';
+                    return;
+                }
+                let html = '<table style="width:100%;border-collapse:collapse"><thead><tr style="border-bottom:2px solid var(--border);text-align:left">';
+                html += '<th style="padding:0.5rem">Navn</th>';
+                html += '<th style="padding:0.5rem">Fil</th>';
+                html += '<th style="padding:0.5rem">Importert av</th>';
+                html += '<th style="padding:0.5rem">Dato</th>';
+                html += '<th style="padding:0.5rem">Rader</th>';
+                html += '<th style="padding:0.5rem">Gyldige</th>';
+                html += '<th style="padding:0.5rem">Forkastet</th>';
+                html += '<th style="padding:0.5rem"></th>';
+                html += '</tr></thead><tbody>';
+                for (const b of batches) {
+                    const date = b.created_at ? new Date(b.created_at * 1000).toLocaleString('nb-NO') : '-';
+                    html += `<tr style="border-bottom:1px solid #f1f5f9">`;
+                    html += `<td style="padding:0.5rem;font-weight:600">${escapeHtml(b.name || b.batch_id)}</td>`;
+                    html += `<td style="padding:0.5rem;font-size:0.82rem">${escapeHtml(b.source_filename || '-')}</td>`;
+                    html += `<td style="padding:0.5rem">${escapeHtml(b.imported_by || '-')}</td>`;
+                    html += `<td style="padding:0.5rem;font-size:0.82rem">${date}</td>`;
+                    html += `<td style="padding:0.5rem">${b.total_rows || 0}</td>`;
+                    html += `<td style="padding:0.5rem;color:#166534;font-weight:600">${b.valid_examples || 0}</td>`;
+                    html += `<td style="padding:0.5rem;color:#991b1b">${b.rejected_rows || 0}</td>`;
+                    html += `<td style="padding:0.5rem"><button class="btn" style="font-size:0.72rem;padding:0.2rem 0.5rem;background:#fef2f2;color:#991b1b;border:1px solid #fecaca" onclick="deleteLearningBatch('${b.batch_id}')">Slett</button></td>`;
+                    html += `</tr>`;
+                }
+                html += '</tbody></table>';
+                container.innerHTML = html;
+            } catch(e) {
+                container.innerHTML = `<p style="color:#ef4444">Feil: ${e.message}</p>`;
+            }
+        }
+
+        async function deleteLearningBatch(batchId) {
+            if (!confirm('Slette denne importbatchen og alle dens l\u00e6ringseksempler?')) return;
+            try {
+                const resp = await fetch(`${API_BASE}/api/learning/batches/${batchId}?password=${encodeURIComponent(learningAdminPw)}`, {method: 'DELETE'});
+                if (!resp.ok) { const e = await resp.json(); alert(e.detail || 'Feil'); return; }
+                const data = await resp.json();
+                alert(data.message);
+                loadLearningStats();
+                loadLearningBatches();
+            } catch(e) { alert('Feil: ' + e.message); }
+        }
+
+        async function doReindexLearning() {
+            if (!confirm('Reindeksere alle l\u00e6ringseksempler?')) return;
+            try {
+                const resp = await fetch(`${API_BASE}/api/learning/reindex`, {
+                    method: 'POST',
+                    headers: {'Content-Type': 'application/json'},
+                    body: JSON.stringify({password: learningAdminPw}),
+                });
+                if (!resp.ok) { const e = await resp.json(); alert(e.detail || 'Feil'); return; }
+                const data = await resp.json();
+                alert(data.message);
+                loadLearningStats();
+            } catch(e) { alert('Feil: ' + e.message); }
+        }
+
+        // ═══════════════════════════════════════════════════════
+        // SUGGESTION REVIEW SYSTEM
+        // ═══════════════════════════════════════════════════════
+
+        let _reviewSuggestions = [];  // Flat array of {article_number, field_name, current_value, suggested_value, source, confidence, status}
+        let _reviewFilter = 'all';
+        let _reviewJobId = null;
+        let _reviewDecisions = {};  // {artnr: {field_name: {status, comment}}}
+
+        // Wire up the review button
+        document.getElementById('reviewSuggestionsBtn').addEventListener('click', async () => {
+            const card = document.getElementById('suggestionReviewCard');
+            if (!card.classList.contains('hidden')) {
+                card.classList.add('hidden');
+                return;
+            }
+            await loadAndRenderReviewPanel();
+            card.classList.remove('hidden');
+            card.scrollIntoView({ behavior: 'smooth', block: 'start' });
+        });
+
+        async function loadAndRenderReviewPanel() {
+            if (!currentJobId) return;
+            _reviewJobId = currentJobId;
+
+            // Load saved reviews from backend
+            try {
+                const resp = await fetch(`/api/reviews/${_reviewJobId}`);
+                if (resp.ok) {
+                    const data = await resp.json();
+                    _reviewDecisions = data.reviews || {};
+                }
+            } catch (e) { console.warn('Could not load saved reviews:', e); }
+
+            // Build flat list of suggestions from the results data
+            _reviewSuggestions = [];
+            const resultsResp = await fetch(`/api/results/${_reviewJobId}`);
+            if (!resultsResp.ok) return;
+            const resultsData = await resultsResp.json();
+
+            for (const r of (resultsData.results || [])) {
+                const artnr = r.article_number;
+                for (const es of (r.enrichment_suggestions || [])) {
+                    if (!es.suggested_value) continue;
+                    // Check if current and suggested are materially different
+                    const cur = (es.current_value || '').trim();
+                    const sug = (es.suggested_value || '').trim();
+                    if (cur === sug) continue;
+                    if (cur.toLowerCase() === sug.toLowerCase()) continue;
+
+                    const saved = (_reviewDecisions[artnr] || {})[es.field_name];
+                    _reviewSuggestions.push({
+                        article_number: artnr,
+                        product_name: r.product_name || '',
+                        field_name: es.field_name,
+                        current_value: es.current_value || '',
+                        suggested_value: es.suggested_value || '',
+                        source: es.source || '',
+                        source_url: es.source_url || '',
+                        evidence: es.evidence || '',
+                        confidence: es.confidence || 0,
+                        review_required: es.review_required,
+                        status: saved ? saved.status : 'pending',
+                    });
+                }
+                // Also include field_analyses that have suggestions
+                for (const fa of (r.field_analyses || [])) {
+                    if (!fa.suggested_value) continue;
+                    const cur = (fa.current_value || '').trim();
+                    const sug = (fa.suggested_value || '').trim();
+                    if (cur === sug || cur.toLowerCase() === sug.toLowerCase()) continue;
+                    // Skip if already covered by enrichment_suggestions
+                    const alreadyCovered = _reviewSuggestions.some(
+                        s => s.article_number === artnr && s.field_name === fa.field_name
+                    );
+                    if (alreadyCovered) continue;
+
+                    const saved = (_reviewDecisions[artnr] || {})[fa.field_name];
+                    _reviewSuggestions.push({
+                        article_number: artnr,
+                        product_name: r.product_name || '',
+                        field_name: fa.field_name,
+                        current_value: fa.current_value || '',
+                        suggested_value: fa.suggested_value || '',
+                        source: fa.source || '',
+                        source_url: '',
+                        evidence: fa.comment || '',
+                        confidence: fa.confidence || 0,
+                        review_required: true,
+                        status: saved ? saved.status : 'pending',
+                    });
+                }
+            }
+
+            renderReviewTable();
+        }
+
+        function getVisibleReviewSuggestions() {
+            let filtered = _reviewSuggestions;
+            const search = (document.getElementById('reviewSearchInput').value || '').trim().toLowerCase();
+
+            if (_reviewFilter === 'pending') filtered = filtered.filter(s => s.status === 'pending');
+            else if (_reviewFilter === 'accepted') filtered = filtered.filter(s => s.status === 'accepted');
+            else if (_reviewFilter === 'rejected') filtered = filtered.filter(s => s.status === 'rejected');
+
+            if (search) {
+                filtered = filtered.filter(s =>
+                    s.article_number.toLowerCase().includes(search) ||
+                    s.field_name.toLowerCase().includes(search) ||
+                    s.product_name.toLowerCase().includes(search)
+                );
+            }
+            return filtered;
+        }
+
+        function renderReviewTable() {
+            const tbody = document.getElementById('reviewTableBody');
+            const visible = getVisibleReviewSuggestions();
+
+            // Update stats
+            const total = _reviewSuggestions.length;
+            const accepted = _reviewSuggestions.filter(s => s.status === 'accepted').length;
+            const rejected = _reviewSuggestions.filter(s => s.status === 'rejected').length;
+            const pending = total - accepted - rejected;
+            document.getElementById('reviewCountBadge').textContent = `(${total} forslag)`;
+            document.getElementById('reviewStats').textContent =
+                `${accepted} akseptert · ${rejected} avslått · ${pending} ikke vurdert · ${visible.length} synlige`;
+
+            if (visible.length === 0) {
+                tbody.innerHTML = '<tr><td colspan="7" style="text-align:center;padding:2rem;color:var(--text-muted)">Ingen forslag å vise med gjeldende filter</td></tr>';
+                return;
+            }
+
+            tbody.innerHTML = visible.map((s, i) => {
+                const rowClass = `suggestion-row status-${s.status}`;
+                const confColor = s.confidence >= 0.7 ? '#16a34a' : s.confidence >= 0.4 ? '#d97706' : '#dc2626';
+                const confPct = Math.round(s.confidence * 100);
+
+                // Truncate long values for display
+                const curDisplay = truncateText(s.current_value, 200);
+                const sugDisplay = truncateText(s.suggested_value, 200);
+
+                const acceptClass = s.status === 'accepted' ? 'active-accepted' : '';
+                const rejectClass = s.status === 'rejected' ? 'active-rejected' : '';
+                const pendingClass = s.status === 'pending' ? 'active-pending' : '';
+
+                return `<tr class="${rowClass}" data-review-idx="${i}" data-artnr="${escapeHtml(s.article_number)}" data-field="${escapeHtml(s.field_name)}">
+                    <td style="font-family:monospace;font-size:0.8rem;white-space:nowrap">${escapeHtml(s.article_number)}</td>
+                    <td style="font-weight:500;font-size:0.8rem">${escapeHtml(s.field_name)}</td>
+                    <td class="suggestion-val-cell" title="${escapeHtml(s.current_value)}">
+                        ${curDisplay ? `<span style="color:#64748b">${escapeHtml(curDisplay)}</span>` : '<span style="color:#94a3b8;font-style:italic">Tomt</span>'}
+                    </td>
+                    <td class="suggestion-val-cell" title="${escapeHtml(s.suggested_value)}">
+                        <span class="suggestion-diff-new">${escapeHtml(sugDisplay)}</span>
+                        ${s.evidence ? `<div style="margin-top:0.3rem;font-size:0.72rem;color:var(--text-muted)" title="${escapeHtml(s.evidence)}">📋 ${escapeHtml(truncateText(s.evidence, 80))}</div>` : ''}
+                    </td>
+                    <td style="font-size:0.75rem;color:var(--text-muted)" title="${escapeHtml(s.source_url || s.source)}">${escapeHtml(truncateText(s.source, 30))}</td>
+                    <td style="text-align:center"><span style="color:${confColor};font-weight:600;font-size:0.8rem">${confPct}%</span></td>
+                    <td style="white-space:nowrap">
+                        <button class="suggestion-action-btn ${acceptClass}" onclick="setSuggestionReview('${escapeHtml(s.article_number)}','${escapeHtml(s.field_name)}','accepted',this)" title="Aksepter">✓ Aksepter</button>
+                        <button class="suggestion-action-btn ${rejectClass}" onclick="setSuggestionReview('${escapeHtml(s.article_number)}','${escapeHtml(s.field_name)}','rejected',this)" title="Avslå">✗ Avslå</button>
+                        <button class="suggestion-action-btn ${pendingClass}" onclick="setSuggestionReview('${escapeHtml(s.article_number)}','${escapeHtml(s.field_name)}','pending',this)" title="Tilbakestill">↺</button>
+                    </td>
+                </tr>`;
+            }).join('');
+        }
+
+        function truncateText(text, max) {
+            if (!text) return '';
+            return text.length > max ? text.substring(0, max) + '...' : text;
+        }
+
+        async function setSuggestionReview(artnr, fieldName, newStatus, btnEl) {
+            if (!_reviewJobId) return;
+
+            // Optimistic UI update
+            const sug = _reviewSuggestions.find(s => s.article_number === artnr && s.field_name === fieldName);
+            if (sug) sug.status = newStatus;
+
+            // Update local decisions cache
+            if (!_reviewDecisions[artnr]) _reviewDecisions[artnr] = {};
+            _reviewDecisions[artnr][fieldName] = { status: newStatus, comment: '' };
+
+            // Update row styling immediately
+            const row = btnEl.closest('tr');
+            if (row) {
+                row.className = `suggestion-row status-${newStatus}`;
+                row.querySelectorAll('.suggestion-action-btn').forEach(b => {
+                    b.classList.remove('active-accepted', 'active-rejected', 'active-pending');
+                });
+                btnEl.classList.add(`active-${newStatus}`);
+                // Also update the reset button
+                if (newStatus === 'pending') {
+                    row.querySelector('.suggestion-action-btn:last-child').classList.add('active-pending');
+                }
+            }
+
+            // Update stats
+            const total = _reviewSuggestions.length;
+            const accepted = _reviewSuggestions.filter(s => s.status === 'accepted').length;
+            const rejected = _reviewSuggestions.filter(s => s.status === 'rejected').length;
+            const pending = total - accepted - rejected;
+            const visible = getVisibleReviewSuggestions().length;
+            document.getElementById('reviewStats').textContent =
+                `${accepted} akseptert · ${rejected} avslått · ${pending} ikke vurdert · ${visible} synlige`;
+
+            // Persist to backend
+            try {
+                const resp = await fetch(`/api/reviews/${_reviewJobId}/${encodeURIComponent(artnr)}/${encodeURIComponent(fieldName)}`, {
+                    method: 'PUT',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ status: newStatus }),
+                });
+                if (!resp.ok) {
+                    console.error('Failed to save review:', await resp.text());
+                    // Revert optimistic update
+                    if (sug) sug.status = 'pending';
+                    renderReviewTable();
+                    alert('Kunne ikke lagre vurderingen. Prøv igjen.');
+                }
+            } catch (e) {
+                console.error('Network error saving review:', e);
+                if (sug) sug.status = 'pending';
+                renderReviewTable();
+                alert('Nettverksfeil ved lagring. Prøv igjen.');
+            }
+        }
+
+        function filterReviewSuggestions(filter) {
+            if (filter) {
+                _reviewFilter = filter;
+                document.querySelectorAll('.review-filter-btn').forEach(b => {
+                    b.classList.toggle('active', b.dataset.filter === filter);
+                });
+            }
+            renderReviewTable();
+        }
+
+        async function bulkReviewSuggestions(status) {
+            if (!_reviewJobId) return;
+            const visible = getVisibleReviewSuggestions();
+            if (visible.length === 0) return;
+
+            const action = status === 'accepted' ? 'godkjenne' : 'avslå';
+            if (!confirm(`Er du sikker på at du vil ${action} ${visible.length} forslag?`)) return;
+
+            // Optimistic update
+            const items = [];
+            for (const s of visible) {
+                s.status = status;
+                if (!_reviewDecisions[s.article_number]) _reviewDecisions[s.article_number] = {};
+                _reviewDecisions[s.article_number][s.field_name] = { status, comment: '' };
+                items.push({ article_number: s.article_number, field_name: s.field_name });
+            }
+            renderReviewTable();
+
+            // Persist to backend
+            try {
+                const resp = await fetch(`/api/reviews/${_reviewJobId}/bulk`, {
+                    method: 'PUT',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ items, status }),
+                });
+                if (!resp.ok) {
+                    console.error('Bulk review save failed:', await resp.text());
+                    alert('Kunne ikke lagre bulk-vurdering. Last inn siden på nytt.');
+                }
+            } catch (e) {
+                console.error('Bulk review network error:', e);
+                alert('Nettverksfeil ved bulk-lagring.');
+            }
+        }
+
     </script>
 </body>
 </html>

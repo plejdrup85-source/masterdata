@@ -10,6 +10,7 @@ import time
 import uuid
 from collections import defaultdict
 from datetime import datetime
+from io import BytesIO
 from pathlib import Path
 from typing import Optional
 
@@ -44,6 +45,7 @@ from backend.scraper import (
     build_full_index, scan_index_incremental, get_index_stats,
     find_batch_products_in_sitemap,
 )
+from backend.image_search import search_product_images, _confidence_label
 
 # Configure logging
 logging.basicConfig(
@@ -177,6 +179,13 @@ HISTORY_DIR.mkdir(parents=True, exist_ok=True)
 HISTORY_EXCEL_DIR = HISTORY_DIR / "exports"
 HISTORY_EXCEL_DIR.mkdir(parents=True, exist_ok=True)
 HISTORY_INDEX_FILE = HISTORY_DIR / "index.json"
+
+# Suggestion review persistence directory
+REVIEW_DIR = Path(os.environ.get("REVIEW_DIR", "data/reviews"))
+REVIEW_DIR.mkdir(parents=True, exist_ok=True)
+
+# In-memory cache for suggestion reviews: {job_id: {artnr: {field_name: {status, comment}}}}
+_suggestion_reviews: dict[str, dict] = {}
 HISTORY_MAX_ENTRIES = 100
 
 
@@ -265,6 +274,7 @@ def _add_to_history(job: "AnalysisJob", source_filename: str = "") -> None:
         "batch_info": job.batch_info or "",
         "avg_score": avg_score,
         "critical_count": critical_count,
+        "excluded_count": len(job.excluded_products),
     }
 
     entries = _load_history()
@@ -864,6 +874,7 @@ async def get_status(job_id: str):
         "batch_info": job.batch_info,
         "analysis_mode": job.analysis_mode,
         "focus_areas": job.focus_areas,
+        "excluded_products": job.excluded_products,
     }
 
 
@@ -902,6 +913,9 @@ async def download_result(
     if job.status != JobStatus.COMPLETED:
         raise HTTPException(400, "Analysen er ikke fullført enda")
 
+    # Load any saved suggestion reviews for this job
+    reviews = _load_suggestion_reviews(job_id)
+
     # If threshold is set, regenerate filtered export
     if threshold is not None and 0 < threshold <= 100:
         filtered_results = []
@@ -921,10 +935,28 @@ async def download_result(
         create_output_excel(
             filtered_results, filtered_path,
             analysis_mode=job.analysis_mode, focus_areas=job.focus_areas,
+            suggestion_reviews=reviews,
         )
         return FileResponse(
             filtered_path,
             filename=f"masterdata_kvalitetssjekk_{job_id}_under{threshold}.xlsx",
+            media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+        )
+
+    # Regenerate Excel with latest review decisions if reviews exist
+    if reviews and job.output_file:
+        timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+        reviewed_filename = f"masterdata_reviewed_{job_id}_{timestamp}.xlsx"
+        reviewed_path = str(OUTPUT_DIR / reviewed_filename)
+        create_output_excel(
+            job.results, reviewed_path,
+            analysis_mode=job.analysis_mode, focus_areas=job.focus_areas,
+            excluded_products=job.excluded_products,
+            suggestion_reviews=reviews,
+        )
+        return FileResponse(
+            reviewed_path,
+            filename=f"masterdata_kvalitetssjekk_{job_id}.xlsx",
             media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
         )
 
@@ -1031,6 +1063,95 @@ async def get_results(job_id: str):
             for r in job.results
         ],
     }
+
+
+# ── Suggestion Review API ──
+
+
+def _load_suggestion_reviews(job_id: str) -> dict:
+    """Load suggestion reviews from memory or disk."""
+    if job_id not in _suggestion_reviews:
+        disk_path = REVIEW_DIR / f"{job_id}.json"
+        if disk_path.exists():
+            try:
+                _suggestion_reviews[job_id] = json.loads(disk_path.read_text(encoding="utf-8"))
+            except Exception:
+                _suggestion_reviews[job_id] = {}
+        else:
+            _suggestion_reviews[job_id] = {}
+    return _suggestion_reviews[job_id]
+
+
+def _persist_suggestion_reviews(job_id: str):
+    """Write suggestion reviews to disk."""
+    data = _suggestion_reviews.get(job_id, {})
+    disk_path = REVIEW_DIR / f"{job_id}.json"
+    disk_path.write_text(json.dumps(data, ensure_ascii=False, indent=2), encoding="utf-8")
+
+
+@app.get("/api/reviews/{job_id}")
+async def get_suggestion_reviews(job_id: str):
+    """Get all suggestion review decisions for a job."""
+    reviews = _load_suggestion_reviews(job_id)
+    return {"job_id": job_id, "reviews": reviews}
+
+
+@app.put("/api/reviews/{job_id}/{article_number}/{field_name}")
+async def update_suggestion_review(job_id: str, article_number: str, field_name: str, request: Request):
+    """Accept or reject a single enrichment suggestion.
+
+    Body: {"status": "accepted"|"rejected"|"pending", "comment": "optional"}
+    """
+    data = await request.json()
+    new_status = data.get("status", "pending")
+    if new_status not in {"pending", "accepted", "rejected"}:
+        raise HTTPException(400, f"Ugyldig status: {new_status}")
+
+    reviews = _load_suggestion_reviews(job_id)
+    if article_number not in reviews:
+        reviews[article_number] = {}
+    reviews[article_number][field_name] = {
+        "status": new_status,
+        "comment": data.get("comment", ""),
+    }
+    _persist_suggestion_reviews(job_id)
+
+    return {
+        "status": "ok",
+        "article_number": article_number,
+        "field_name": field_name,
+        "review_status": new_status,
+    }
+
+
+@app.put("/api/reviews/{job_id}/bulk")
+async def bulk_update_suggestion_reviews(job_id: str, request: Request):
+    """Bulk accept or reject multiple suggestions.
+
+    Body: {
+        "items": [{"article_number": "...", "field_name": "..."}],
+        "status": "accepted"|"rejected"|"pending"
+    }
+    """
+    data = await request.json()
+    new_status = data.get("status", "pending")
+    items = data.get("items", [])
+    if new_status not in {"pending", "accepted", "rejected"}:
+        raise HTTPException(400, f"Ugyldig status: {new_status}")
+
+    reviews = _load_suggestion_reviews(job_id)
+    count = 0
+    for item in items:
+        artnr = item.get("article_number", "")
+        field = item.get("field_name", "")
+        if artnr and field:
+            if artnr not in reviews:
+                reviews[artnr] = {}
+            reviews[artnr][field] = {"status": new_status, "comment": ""}
+            count += 1
+
+    _persist_suggestion_reviews(job_id)
+    return {"status": "ok", "updated": count, "review_status": new_status}
 
 
 # ── Job History API ──
@@ -2192,6 +2313,25 @@ async def batch_evaluate_endpoint(data: dict):
     return {"results": results}
 
 
+def _determine_image_status(image_summary) -> str:
+    """Determine the current image quality status from CV analysis."""
+    if not image_summary or not image_summary.main_image_exists:
+        return "missing"
+    if image_summary.image_analyses:
+        main = image_summary.image_analyses[0]
+        score = main.overall_score
+        if score < 40:
+            return "low_quality"
+        elif score < 70:
+            issues = main.issues or []
+            if any("background" in str(i).lower() for i in issues):
+                return "poor_background"
+            elif any("resolution" in str(i).lower() for i in issues):
+                return "low_quality"
+            return "review"
+    return "ok"
+
+
 def _build_image_suggestion(
     product_data: ProductData,
     image_summary,
@@ -2200,31 +2340,11 @@ def _build_image_suggestion(
 ) -> Optional[ImageSuggestion]:
     """Build an image improvement suggestion if the current image is weak/missing.
 
-    Priority: manufacturer image > Norengros image.
-    Manufacturer images can be auto-suggested; Norengros always requires review.
+    This is the LEGACY synchronous path. Used as initial suggestion before
+    the async broad search runs. Priority: manufacturer > Norengros.
     """
     current_url = product_data.image_url
-    current_status = "ok"
-
-    # Determine current image status
-    if not image_summary or not image_summary.main_image_exists:
-        current_status = "missing"
-    elif image_summary.image_analyses:
-        main = image_summary.image_analyses[0]
-        score = main.overall_score
-        if score < 40:
-            current_status = "low_quality"
-        elif score < 70:
-            issues = main.issues or []
-            if any("background" in str(i).lower() for i in issues):
-                current_status = "poor_background"
-            elif any("resolution" in str(i).lower() for i in issues):
-                current_status = "low_quality"
-            else:
-                current_status = "review"
-        # OK images don't need suggestions
-        else:
-            return None
+    current_status = _determine_image_status(image_summary)
 
     if current_status == "ok":
         return None
@@ -2237,7 +2357,12 @@ def _build_image_suggestion(
             suggested_image_url=mfr_data.image_url,
             suggested_source="manufacturer",
             suggested_source_url=mfr_data.source_url,
+            suggested_source_domain=mfr_data.source_url.split("/")[2] if mfr_data.source_url and "/" in mfr_data.source_url else None,
+            suggested_source_type="manufacturer_website",
             confidence=mfr_data.confidence * 0.8,
+            identity_score=mfr_data.confidence * 0.8,
+            improvement_score=0.7 if current_status == "missing" else 0.5,
+            confidence_label="Middels tillit",
             review_required=True,
             reason=f"Produsentbilde funnet ({current_status}). Verifiser produktmatch.",
         )
@@ -2250,48 +2375,48 @@ def _build_image_suggestion(
             suggested_image_url=norengros_data.image_url,
             suggested_source="norengros",
             suggested_source_url=norengros_data.source_url,
+            suggested_source_domain=norengros_data.source_url.split("/")[2] if norengros_data.source_url and "/" in norengros_data.source_url else None,
+            suggested_source_type="catalog_site",
             confidence=0.25,
+            identity_score=0.25,
+            improvement_score=0.5 if current_status == "missing" else 0.3,
+            confidence_label="Lav tillit",
             review_required=True,
             reason=f"Norengros-bilde funnet ({current_status}). Konkurrentkilde — krever manuell godkjenning.",
         )
 
-    # No better image available — report the issue with producer search suggestion
-    if current_status != "ok":
-        # Build a producer search hint using available catalog info
-        search_hint = None
-        producer = product_data.manufacturer
-        supplier_item = product_data.manufacturer_article_number
-        if producer:
-            search_terms = [producer]
-            if supplier_item:
-                search_terms.append(supplier_item)
-            elif product_data.product_name:
-                search_terms.append(product_data.product_name)
-            search_hint = " ".join(search_terms)
+    # No image found via legacy path — return placeholder for broad search to override
+    cdn_url = current_url or (
+        f"https://res.onemed.com/NO/ARWebBig/{product_data.article_number}.jpg"
+    )
+    search_hint = None
+    producer = product_data.manufacturer
+    supplier_item = product_data.manufacturer_article_number
+    if producer:
+        search_terms = [producer]
+        if supplier_item:
+            search_terms.append(supplier_item)
+        elif product_data.product_name:
+            search_terms.append(product_data.product_name)
+        search_hint = " ".join(search_terms)
 
-        reason = f"Bildestatus: {current_status}. Ingen bedre bildekilde funnet automatisk."
-        if search_hint:
-            reason += f" Foreslått søk hos produsent: \"{search_hint}\""
+    reason = f"Bildestatus: {current_status}. Ingen bedre bildekilde funnet i primærkilder."
+    if search_hint:
+        reason += f" Søker bredt på nett: \"{search_hint}\""
 
-        # Always include the CDN image URL so the user has a reference.
-        # For producer_search suggestions, suggested_image_url points to the
-        # current CDN image (the best we have), and reason explains what to do.
-        cdn_url = current_url or (
-            f"https://res.onemed.com/NO/ARWebBig/{product_data.article_number}.jpg"
-        )
-
-        return ImageSuggestion(
-            current_image_url=cdn_url,
-            current_image_status=current_status,
-            suggested_image_url=cdn_url,  # Best available image URL
-            suggested_source="producer_search" if producer else "current_cdn",
-            suggested_source_url=product_data.product_url,  # Link to product page if available
-            confidence=0.0,
-            review_required=True,
-            reason=reason,
-        )
-
-    return None
+    return ImageSuggestion(
+        current_image_url=cdn_url,
+        current_image_status=current_status,
+        suggested_image_url=cdn_url,
+        suggested_source="producer_search" if producer else "current_cdn",
+        suggested_source_url=product_data.product_url,
+        confidence=0.0,
+        identity_score=0.0,
+        improvement_score=0.0,
+        confidence_label="Krever manuell vurdering",
+        review_required=True,
+        reason=reason,
+    )
 
 
 def _apply_enrichment_to_analysis(analysis: ProductAnalysis) -> None:
@@ -2615,26 +2740,68 @@ async def _run_analysis(
                         analysis.norengros_lookup = norengros_data
 
                     # Step 5b: Image suggestion logic
-                    # Also pass Jeeves data to enrich producer search hints
+                    # First: legacy path (manufacturer lookup / Norengros)
                     analysis.image_suggestion = _build_image_suggestion(
                         product_data, image_summary, mfr_data, norengros_data,
                     )
-                    # Step 5b+: For low-quality images without a suggested replacement,
-                    # try to find a better image from the producer if we have catalog info
-                    if (analysis.image_suggestion
-                            and analysis.image_suggestion.current_image_status in ("low_quality", "missing")
-                            and not analysis.image_suggestion.suggested_image_url
-                            and jeeves_data):
-                        # Use Jeeves supplier + supplier_item_no for a targeted search hint
-                        producer = jeeves_data.supplier or product_data.manufacturer
-                        supplier_item = jeeves_data.supplier_item_no or product_data.manufacturer_article_number
-                        if producer and supplier_item:
-                            analysis.image_suggestion.reason = (
-                                f"Bildekvalitet lav ({analysis.image_suggestion.current_image_status}). "
-                                f"Søk hos produsent anbefalt: {producer} (art.nr: {supplier_item}). "
-                                f"Produsentens nettside bør prioriteres som bildekilde."
+
+                    # Step 5b+: Broad web image search
+                    # Triggered when image is missing/low quality and no good suggestion yet
+                    current_img_status = _determine_image_status(image_summary)
+                    needs_broad_search = (
+                        current_img_status in ("missing", "low_quality", "poor_background", "review")
+                        and (
+                            not analysis.image_suggestion
+                            or analysis.image_suggestion.confidence < 0.4
+                        )
+                    )
+                    if needs_broad_search:
+                        job.current_step = "image_search"
+                        # Gather all available identifiers from product + Jeeves
+                        mfr_name = product_data.manufacturer or (jeeves_data.supplier if jeeves_data else "") or ""
+                        mfr_artnr = product_data.manufacturer_article_number or (jeeves_data.supplier_item_no if jeeves_data else "") or ""
+                        prod_desc = product_data.product_name or (jeeves_data.item_description if jeeves_data else "") or ""
+                        prod_spec = product_data.specification or (jeeves_data.specification if jeeves_data else "") or ""
+                        prod_gid = (jeeves_data.gid if jeeves_data else "") or ""
+
+                        try:
+                            image_candidates = await search_product_images(
+                                article_number=article_number,
+                                manufacturer_name=mfr_name,
+                                manufacturer_artnr=mfr_artnr,
+                                product_description=prod_desc,
+                                specification=prod_spec,
+                                current_image_status=current_img_status,
+                                gid=prod_gid,
                             )
-                            analysis.image_suggestion.suggested_source = "producer_search"
+
+                            if image_candidates:
+                                best = image_candidates[0]
+                                # Only use the candidate if it's better than current suggestion
+                                if (not analysis.image_suggestion
+                                        or best.confidence > analysis.image_suggestion.confidence):
+                                    analysis.image_suggestion = ImageSuggestion(
+                                        current_image_url=product_data.image_url,
+                                        current_image_status=current_img_status,
+                                        suggested_image_url=best.image_url,
+                                        suggested_source=best.source_name,
+                                        suggested_source_url=best.source_url,
+                                        suggested_source_domain=best.source_domain,
+                                        suggested_source_type=best.source_type,
+                                        confidence=best.confidence,
+                                        identity_score=best.identity_score,
+                                        improvement_score=best.improvement_score,
+                                        confidence_label=_confidence_label(best.confidence),
+                                        review_required=best.confidence < 0.7,
+                                        reason=best.reason,
+                                        verification_signals=best.verification_details,
+                                    )
+                                    logger.info(
+                                        f"[{job_id}] {article_number}: Broad image search found better "
+                                        f"candidate (conf={best.confidence:.2f}, source={best.source_name})"
+                                    )
+                        except Exception as e:
+                            logger.debug(f"[{job_id}] Broad image search failed for {article_number}: {e}")
 
                     # Apply enrichment suggestions to field_analyses (PDF takes priority)
                     _apply_enrichment_to_analysis(analysis)
@@ -2786,13 +2953,65 @@ async def _run_analysis(
                 logger.error(f"[{job_id}] {msg}")
                 job.errors.append(msg)
 
+        # ── HARD FILTER: Exclude products NOT found on the website ─────────
+        # A product is considered "found on the website" ONLY if:
+        #   1. found_on_onemed == True, AND
+        #   2. verification_status is EXACT_MATCH, NORMALIZED_MATCH, or SKU_IN_PAGE
+        # Products with CDN_ONLY, UNVERIFIED, MISMATCH, or AMBIGUOUS are excluded.
+        _VALID_VERIFICATION = {
+            VerificationStatus.EXACT_MATCH,
+            VerificationStatus.NORMALIZED_MATCH,
+            VerificationStatus.SKU_IN_PAGE,
+        }
+
+        filtered_results: list[ProductAnalysis] = []
+        excluded: list[dict] = []
+
+        for r in job.results:
+            pd = r.product_data
+            if not pd.found_on_onemed:
+                reason = "Ingen produktside funnet"
+                excluded.append({"article_number": pd.article_number, "reason": reason})
+                logger.info(
+                    f"[{job_id}] EKSKLUDERT fra output: {pd.article_number} — {reason}"
+                )
+            elif pd.verification_status not in _VALID_VERIFICATION:
+                reason_map = {
+                    VerificationStatus.CDN_ONLY: "Kun CDN-bilde — ingen gyldig produktside",
+                    VerificationStatus.UNVERIFIED: "Kunne ikke verifiseres mot nettsiden",
+                    VerificationStatus.MISMATCH: "Ugyldig treff — artikkelnr stemmer ikke",
+                    VerificationStatus.AMBIGUOUS: "Tvetydig identitet — motstridende signaler",
+                }
+                reason = reason_map.get(pd.verification_status, f"Ugyldig verifiseringsstatus: {pd.verification_status.value}")
+                excluded.append({"article_number": pd.article_number, "reason": reason})
+                logger.info(
+                    f"[{job_id}] EKSKLUDERT fra output: {pd.article_number} — {reason}"
+                )
+            else:
+                filtered_results.append(r)
+
+        if excluded:
+            logger.warning(
+                f"[{job_id}] WEBSITE FILTER: {len(excluded)} av {len(job.results)} produkter "
+                f"ekskludert fra output (ikke funnet på nettsiden). "
+                f"Art.nr: {', '.join(e['article_number'] for e in excluded)}"
+            )
+        else:
+            logger.info(f"[{job_id}] WEBSITE FILTER: Alle {len(job.results)} produkter funnet på nettsiden — ingen ekskludert.")
+
+        job.excluded_products = excluded
+        job.results = filtered_results
+        job.processed_products = len(filtered_results)
+        # ── END HARD FILTER ──────────────────────────────────────────────
+
         # Generate output Excel
         timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
         output_filename = f"masterdata_kvalitetssjekk_{job_id}_{timestamp}.xlsx"
         output_path = str(OUTPUT_DIR / output_filename)
 
         create_output_excel(job.results, output_path,
-                           analysis_mode=analysis_mode, focus_areas=focus_areas)
+                           analysis_mode=analysis_mode, focus_areas=focus_areas,
+                           excluded_products=job.excluded_products)
         job.output_file = output_path
         job.status = JobStatus.COMPLETED
         job.current_product = None
@@ -2806,6 +3025,1208 @@ async def _run_analysis(
         logger.error(f"[{job_id}] Analysis failed: {e}")
         job.status = JobStatus.FAILED
         job.errors.append(f"Fatal error: {str(e)}")
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+# MODULE: PRODUKTMATCHING (Standard + Hardcore Pris Prioritet)
+# ══════════════════════════════════════════════════════════════════════════════
+
+from backend.matcher import (
+    MatchMode, MatchResult, match_product, select_candidate, parse_alc_price,
+)
+from backend.job_store import (
+    save_job as _persist_job, load_job as _load_persisted_job,
+    list_jobs as _list_persisted_jobs, lock_job as _lock_persisted_job,
+    unlock_job as _unlock_persisted_job, verify_job_access as _verify_job_access,
+    cleanup_expired_jobs, update_job_activity,
+)
+from backend.learning_store import (
+    add_example as _add_learning_example,
+    verify_learning_admin as _verify_learning_admin,
+)
+
+# In-memory storage for match jobs (also persisted to disk)
+_match_jobs: dict[str, dict] = {}
+MATCH_OUTPUT_DIR = OUTPUT_DIR / "matching"
+MATCH_OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
+
+# Mode label helper
+_MODE_LABELS = {
+    MatchMode.STANDARD.value: "Standard",
+    MatchMode.HARDCORE_PRICE.value: "Hardcore Pris Prioritet",
+    MatchMode.OWN_BRAND.value: "Egne merkevarer",
+    MatchMode.STRICT_QUALITY.value: "Streng kvalitet",
+}
+
+
+def _build_catalog_for_matching(alc_prices: Optional[dict] = None) -> list[dict]:
+    """Build catalog list from Jeeves index for matching.
+
+    alc_prices: optional dict mapping article_number → ALC price
+    """
+    if not _jeeves_index or not _jeeves_index.loaded:
+        return []
+
+    catalog = []
+    for artnr in _jeeves_index.all_article_numbers():
+        jd = _jeeves_index.get(artnr)
+        if not jd:
+            continue
+        item = {
+            "article_number": jd.article_number,
+            "item_description": jd.item_description or "",
+            "specification": jd.specification or "",
+            "supplier": jd.supplier or "",
+            "product_brand": jd.product_brand or "",
+            "alc_price": (alc_prices or {}).get(artnr),
+        }
+        catalog.append(item)
+    return catalog
+
+
+@app.post("/api/match/start")
+async def start_match_job(
+    request: Request,
+    file: UploadFile = File(...),
+    match_mode: str = Query(MatchMode.STANDARD.value, description="Match mode"),
+    job_name: str = Query("", description="Job name"),
+    created_by: str = Query("", description="User who created the job"),
+    job_type: str = Query("standard", description="Job type: standard or anbud"),
+):
+    """Start a product matching job.
+
+    Upload an Excel file with input products to match against the catalog.
+    Expected columns: product name, specification (optional), article number (optional).
+    """
+    _cleanup_old_jobs()
+
+    client_ip = request.client.host if request.client else "unknown"
+    if not _check_rate_limit(client_ip):
+        raise HTTPException(429, "For mange forespørsler. Prøv igjen senere.")
+
+    if not _jeeves_index or not _jeeves_index.loaded:
+        raise HTTPException(400, "Jeeves-katalog er ikke lastet. Kan ikke kjøre matching.")
+
+    if not job_name.strip():
+        raise HTTPException(400, "Jobbnavn er påkrevd.")
+    if not created_by.strip():
+        raise HTTPException(400, "Brukernavn er påkrevd.")
+    if job_type not in ("standard", "anbud"):
+        raise HTTPException(400, "Ugyldig jobbtype. Bruk 'standard' eller 'anbud'.")
+
+    valid_modes = [m.value for m in MatchMode]
+    if match_mode not in valid_modes:
+        raise HTTPException(400, f"Ugyldig matchmodus: {match_mode}. Gyldige: {', '.join(valid_modes)}")
+
+    content = await file.read()
+    if len(content) > MAX_FILE_SIZE:
+        raise HTTPException(400, f"Filen er for stor. Maks {MAX_FILE_SIZE / 1024 / 1024:.0f} MB.")
+
+    # Parse input Excel
+    try:
+        from openpyxl import load_workbook
+        wb = load_workbook(BytesIO(content), read_only=True, data_only=True)
+        ws = wb.active
+        rows_iter = ws.iter_rows()
+        header_row = next(rows_iter)
+        headers = [str(cell.value or "").strip().lower() for cell in header_row]
+
+        # Detect columns
+        name_col = None
+        spec_col = None
+        artnr_col = None
+        alc_col = None
+
+        name_keywords = {"produktnavn", "produkt", "product", "navn", "name", "varenavn", "beskrivelse"}
+        spec_keywords = {"spesifikasjon", "specification", "spec", "detaljer", "details"}
+        artnr_keywords = {"artikkelnummer", "artikkel", "artikkelnr", "artnr", "art.nr", "sku", "varenr", "varenummer"}
+        alc_keywords = {"alc", "alc-pris", "alc pris", "alcpris", "pris", "price", "enhetspris"}
+
+        for idx, h in enumerate(headers):
+            h_normalized = h.replace(".", "").replace(" ", "").replace("-", "").replace("_", "")
+            if name_col is None and any(kw.replace(".", "").replace(" ", "") in h_normalized for kw in name_keywords):
+                name_col = idx
+            elif spec_col is None and any(kw.replace(".", "").replace(" ", "") in h_normalized for kw in spec_keywords):
+                spec_col = idx
+            elif artnr_col is None and any(kw.replace(".", "").replace(" ", "") in h_normalized for kw in artnr_keywords):
+                artnr_col = idx
+            elif alc_col is None and any(kw.replace(".", "").replace(" ", "") in h_normalized for kw in alc_keywords):
+                alc_col = idx
+
+        # Fallback: first column is product name if no header match
+        if name_col is None:
+            name_col = 0
+
+        # Read input products
+        input_products = []
+        for row_num, row in enumerate(rows_iter, start=2):
+            values = [cell.value for cell in row]
+            name = str(values[name_col] or "").strip() if name_col is not None and len(values) > name_col else ""
+            spec = str(values[spec_col] or "").strip() if spec_col is not None and len(values) > spec_col else ""
+            artnr = str(values[artnr_col] or "").strip() if artnr_col is not None and len(values) > artnr_col else ""
+
+            if not name and not spec:
+                continue
+
+            input_products.append({
+                "row": row_num,
+                "name": name,
+                "specification": spec,
+                "article_number": artnr,
+            })
+
+        # Read ALC prices if column found
+        alc_prices = {}
+        if alc_col is not None:
+            # Re-read to get ALC prices (this is for catalog products, not input)
+            # ALC prices typically come from a separate source; for now we handle
+            # them if present in the uploaded file as a mapping column
+            pass
+
+        wb.close()
+
+    except Exception as e:
+        logger.error(f"Failed to parse match input: {e}")
+        raise HTTPException(400, f"Kunne ikke lese Excel-filen: {e}")
+
+    if not input_products:
+        raise HTTPException(400, "Ingen produkter funnet i filen")
+
+    if len(input_products) > 500:
+        raise HTTPException(400, f"For mange produkter ({len(input_products)}). Maks 500 per matching-jobb.")
+
+    # Create match job
+    job_id = str(uuid.uuid4())[:8]
+    now = time.time()
+    match_job = {
+        "job_id": job_id,
+        "job_name": job_name.strip(),
+        "created_by": created_by.strip(),
+        "job_type": job_type,
+        "status": "running",
+        "match_mode": match_mode,
+        "total": len(input_products),
+        "processed": 0,
+        "results": [],
+        "created_at": now,
+        "updated_at": now,
+        "last_activity_at": now,
+        "source_filename": file.filename or "",
+        "input_products": input_products,
+        "detected_columns": {
+            "name": headers[name_col] if name_col is not None else None,
+            "specification": headers[spec_col] if spec_col is not None else None,
+            "article_number": headers[artnr_col] if artnr_col is not None else None,
+            "alc_price": headers[alc_col] if alc_col is not None else None,
+        },
+        "output_file": None,
+        "user_selections": {},
+        "row_approvals": {},  # {input_row: "approved"|"rejected"|"pending"}
+        "locked": False,
+    }
+    _match_jobs[job_id] = match_job
+    _persist_job(match_job)
+
+    # Run matching in background
+    async def _run_matching():
+        try:
+            catalog = _build_catalog_for_matching()
+            if not catalog:
+                match_job["status"] = "failed"
+                match_job["error"] = "Katalogen er tom"
+                return
+
+            use_ai = bool(os.environ.get("ANTHROPIC_API_KEY"))
+
+            for inp in input_products:
+                if match_job.get("cancelled"):
+                    break
+
+                result = await match_product(
+                    input_name=inp["name"],
+                    input_spec=inp["specification"],
+                    catalog=catalog,
+                    match_mode=match_mode,
+                    use_ai=use_ai,
+                    input_row=inp["row"],
+                    input_article_number=inp["article_number"],
+                )
+                match_job["results"].append(result)
+                match_job["processed"] += 1
+                # Persist progress every 5 products
+                if match_job["processed"] % 5 == 0:
+                    _persist_job(match_job)
+
+            # Generate Excel output
+            _generate_match_excel(match_job)
+
+            match_job["status"] = "completed"
+            match_job["summary"] = _compute_match_summary(match_job)
+
+            # Persist final state and save to history
+            _persist_job(match_job)
+            _add_match_to_history(match_job)
+
+        except Exception as e:
+            logger.error(f"[match-{job_id}] Failed: {e}")
+            match_job["status"] = "failed"
+            match_job["error"] = str(e)
+
+    task = asyncio.create_task(_run_matching())
+    _background_tasks.add(task)
+    task.add_done_callback(_background_tasks.discard)
+
+    mode_label = _MODE_LABELS.get(match_mode, "Standard")
+
+    return {
+        "job_id": job_id,
+        "job_name": match_job["job_name"],
+        "created_by": match_job["created_by"],
+        "job_type": job_type,
+        "match_mode": match_mode,
+        "mode_label": mode_label,
+        "total_products": len(input_products),
+        "detected_columns": match_job["detected_columns"],
+        "message": f"Matching startet ({mode_label}): {len(input_products)} produkter mot {_jeeves_index.count} i katalogen",
+    }
+
+
+def _get_job(job_id: str) -> Optional[dict]:
+    """Get job from memory or disk."""
+    job = _match_jobs.get(job_id)
+    if job:
+        return job
+    return _load_persisted_job(job_id)
+
+
+@app.get("/api/match/status/{job_id}")
+async def get_match_status(job_id: str):
+    """Get status of a matching job."""
+    job = _get_job(job_id)
+    if not job:
+        raise HTTPException(404, "Matching-jobb ikke funnet")
+
+    return {
+        "job_id": job["job_id"],
+        "job_name": job.get("job_name", ""),
+        "created_by": job.get("created_by", ""),
+        "status": job["status"],
+        "match_mode": job["match_mode"],
+        "total": job["total"],
+        "processed": job["processed"],
+        "progress_percent": round(job["processed"] / job["total"] * 100, 1) if job["total"] > 0 else 0,
+        "error": job.get("error"),
+        "locked": job.get("locked", False),
+    }
+
+
+@app.get("/api/match/results/{job_id}")
+async def get_match_results(job_id: str):
+    """Get matching results with all candidates."""
+    job = _get_job(job_id)
+    if not job:
+        raise HTTPException(404, "Matching-jobb ikke funnet")
+
+    if job["status"] not in ("completed", "running"):
+        raise HTTPException(400, "Resultater ikke tilgjengelig ennå")
+
+    # Results may be MatchResult objects (in-memory) or dicts (from disk)
+    results = job.get("results", [])
+    serialized = []
+    for r in results:
+        if hasattr(r, "to_dict"):
+            serialized.append(r.to_dict())
+        elif isinstance(r, dict):
+            serialized.append(r)
+
+    return {
+        "job_id": job["job_id"],
+        "job_name": job.get("job_name", ""),
+        "created_by": job.get("created_by", ""),
+        "job_type": job.get("job_type", "standard"),
+        "status": job["status"],
+        "match_mode": job["match_mode"],
+        "mode_label": _MODE_LABELS.get(job["match_mode"], "Standard"),
+        "total": job["total"],
+        "processed": job["processed"],
+        "source_filename": job.get("source_filename", ""),
+        "results": serialized,
+        "summary": job.get("summary") or _compute_match_summary(job),
+        "row_approvals": job.get("row_approvals", {}),
+        "locked": job.get("locked", False),
+    }
+
+
+def _compute_match_summary(job: dict) -> dict:
+    """Compute summary statistics for a matching job."""
+    results = job.get("results", [])
+    total = len(results)
+    matched = sum(1 for r in results if r.status == "matched")
+    no_match = sum(1 for r in results if r.status == "no_match")
+    multiple = sum(1 for r in results if r.status == "multiple")
+    manual = sum(1 for r in results if r.status == "manual_review")
+    manual_selected = sum(1 for r in results if r.selected_by == "manual")
+
+    # Price stats (only for selected candidates with prices)
+    prices = []
+    for r in results:
+        sel = r.get_selected()
+        if sel and sel.alc_price is not None:
+            prices.append(sel.alc_price)
+
+    return {
+        "total": total,
+        "matched": matched,
+        "no_match": no_match,
+        "multiple_candidates": multiple,
+        "manual_review_needed": manual,
+        "manual_selections": manual_selected,
+        "avg_price": round(sum(prices) / len(prices), 2) if prices else None,
+        "min_price": min(prices) if prices else None,
+        "max_price": max(prices) if prices else None,
+        "products_with_price": len(prices),
+    }
+
+
+@app.post("/api/match/select/{job_id}")
+async def select_match_candidate(
+    job_id: str,
+    data: dict = Body(...),
+):
+    """Manually select a candidate for a specific input row.
+
+    Body: {"input_row": 2, "article_number": "12345", "password": "optional"}
+    """
+    job = _match_jobs.get(job_id)
+    if not job:
+        raise HTTPException(404, "Matching-jobb ikke funnet")
+
+    # Check lock
+    if job.get("locked"):
+        can_edit, msg = _verify_job_access(job_id, data.get("password"))
+        if not can_edit:
+            raise HTTPException(403, msg)
+
+    input_row = data.get("input_row")
+    article_number = data.get("article_number")
+
+    if input_row is None or not article_number:
+        raise HTTPException(400, "Mangler input_row eller article_number")
+
+    # Find the result for this row
+    for result in job["results"]:
+        row_num = result.input_row if hasattr(result, "input_row") else result.get("input_row")
+        if row_num == input_row:
+            if hasattr(result, "input_row"):
+                success = select_candidate(result, article_number)
+            else:
+                # Result loaded from disk (dict) — update directly
+                result["selected_candidate"] = article_number
+                result["selected_by"] = "manual"
+                result["status"] = "matched"
+                success = True
+            if success:
+                job["user_selections"][str(input_row)] = article_number
+                job["last_activity_at"] = time.time()
+                _generate_match_excel(job)
+                _persist_job(job)
+
+                # Feed into learning store
+                input_name = result.input_product_name if hasattr(result, "input_product_name") else result.get("input_product_name", "")
+                input_spec = result.input_specification if hasattr(result, "input_specification") else result.get("input_specification", "")
+                _feed_learning_example(input_name, input_spec, article_number, "ui_override", job_id)
+
+                return {
+                    "message": "Kandidat valgt",
+                    "input_row": input_row,
+                    "selected": article_number,
+                }
+            else:
+                raise HTTPException(400, f"Kandidat {article_number} finnes ikke for rad {input_row}")
+
+    raise HTTPException(404, f"Rad {input_row} ikke funnet i resultater")
+
+
+def _feed_learning_example(input_name: str, input_spec: str, article_number: str, source: str, job_id: str) -> None:
+    """Feed a learning example from UI action."""
+    if not input_name or not article_number:
+        return
+    try:
+        # Look up product name from catalog
+        product_name = ""
+        if _jeeves_index and _jeeves_index.loaded:
+            jd = _jeeves_index.get(article_number)
+            if jd:
+                product_name = jd.item_description or ""
+        _add_learning_example(
+            input_text=input_name,
+            input_spec=input_spec,
+            matched_article=article_number,
+            matched_product_name=product_name,
+            source=source,
+            source_job_id=job_id,
+        )
+    except Exception as e:
+        logger.warning(f"Failed to feed learning example: {e}")
+
+
+@app.get("/api/match/download/{job_id}")
+async def download_match_result(job_id: str):
+    """Download the matching result Excel file."""
+    job = _get_job(job_id)
+    if not job:
+        raise HTTPException(404, "Matching-jobb ikke funnet")
+
+    if job["status"] != "completed":
+        raise HTTPException(400, "Matching er ikke fullført ennå")
+
+    output_file = job.get("output_file")
+    if not output_file or not Path(output_file).exists():
+        raise HTTPException(404, "Resultatfilen finnes ikke")
+
+    mode_suffix = {
+        MatchMode.STANDARD.value: "standard",
+        MatchMode.HARDCORE_PRICE.value: "hardcore_pris",
+        MatchMode.OWN_BRAND.value: "egne_merker",
+        MatchMode.STRICT_QUALITY.value: "streng_kvalitet",
+    }.get(job["match_mode"], "standard")
+    return FileResponse(
+        output_file,
+        filename=f"matching_{mode_suffix}_{job_id}.xlsx",
+        media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+    )
+
+
+def _generate_match_excel(job: dict) -> None:
+    """Generate Excel output for matching results."""
+    from openpyxl import Workbook
+    from openpyxl.styles import Alignment, Border, Font, PatternFill, Side
+
+    wb = Workbook()
+    results = job.get("results", [])
+    match_mode = job.get("match_mode", MatchMode.STANDARD.value)
+    is_hardcore = match_mode == MatchMode.HARDCORE_PRICE.value
+    mode_label = _MODE_LABELS.get(match_mode, "Standard")
+
+    # ── Sheet 1: Matching-resultater (main results) ──
+    ws = wb.active
+    ws.title = "Matching-resultater"
+
+    header_fill = PatternFill(start_color="4472C4", end_color="4472C4", fill_type="solid")
+    header_font = Font(bold=True, color="FFFFFF", size=11)
+    highlight_fill = PatternFill(start_color="E2EFDA", end_color="E2EFDA", fill_type="solid")
+    warning_fill = PatternFill(start_color="FFF2CC", end_color="FFF2CC", fill_type="solid")
+    danger_fill = PatternFill(start_color="FFC7CE", end_color="FFC7CE", fill_type="solid")
+    manual_fill = PatternFill(start_color="D9E2F3", end_color="D9E2F3", fill_type="solid")
+
+    headers = [
+        "Rad", "Innprodukt", "Inn-spesifikasjon", "Inn-artikkelnr",
+        "Matchmodus", "Status",
+        "Valgt art.nr", "Valgt produktnavn", "Valgt spesifikasjon",
+        "Valgt ALC-pris", "Valgt produsent",
+        "Relevansscore", "Valgt i UI",
+        "Billigste relevante alternativ", "Standard beste match avviker fra valgt",
+        "Antall kandidater", "Kommentar",
+    ]
+    for col, h in enumerate(headers, 1):
+        cell = ws.cell(row=1, column=col, value=h)
+        cell.fill = header_fill
+        cell.font = header_font
+        cell.alignment = Alignment(horizontal="center", wrap_text=True)
+
+    for row_idx, result in enumerate(results, 2):
+        selected = result.get_selected()
+        is_manual = result.selected_by == "manual"
+
+        # Check if this is the cheapest relevant
+        priced_relevant = [c for c in result.candidates if c.is_sufficiently_relevant and c.alc_price is not None]
+        is_cheapest_relevant = False
+        if selected and priced_relevant:
+            cheapest = min(priced_relevant, key=lambda c: c.alc_price)
+            is_cheapest_relevant = selected.article_number == cheapest.article_number
+
+        # Check if standard best match differs from selected
+        standard_best_differs = False
+        if selected and result.candidates:
+            best_by_relevance = max(result.candidates, key=lambda c: c.relevance_score)
+            standard_best_differs = best_by_relevance.article_number != selected.article_number
+
+        row_data = [
+            result.input_row,
+            result.input_product_name,
+            result.input_specification,
+            result.input_article_number,
+            mode_label,
+            result.status,
+            selected.article_number if selected else "",
+            selected.product_name if selected else "",
+            selected.specification if selected else "",
+            selected.alc_price if selected and selected.alc_price else "",
+            selected.supplier if selected else "",
+            round(selected.relevance_score, 1) if selected else "",
+            "Ja" if is_manual else "Nei",
+            "Ja" if is_cheapest_relevant else "Nei",
+            "Ja" if standard_best_differs else "Nei",
+            len(result.candidates),
+            result.comment,
+        ]
+
+        for col, val in enumerate(row_data, 1):
+            cell = ws.cell(row=row_idx, column=col, value=val)
+            if col == 10 and isinstance(val, (int, float)) and val > 0:
+                cell.number_format = '#,##0.00 "kr"'
+
+        # Row highlighting
+        if result.status == "no_match":
+            for col in range(1, len(headers) + 1):
+                ws.cell(row=row_idx, column=col).fill = danger_fill
+        elif result.status == "manual_review":
+            for col in range(1, len(headers) + 1):
+                ws.cell(row=row_idx, column=col).fill = warning_fill
+        elif is_manual:
+            for col in range(1, len(headers) + 1):
+                ws.cell(row=row_idx, column=col).fill = manual_fill
+
+    # Auto-width
+    for col_idx in range(1, len(headers) + 1):
+        ws.column_dimensions[chr(64 + col_idx) if col_idx <= 26 else 'A'].width = 18
+
+    # ── Sheet 2: Alle kandidater (all candidates per row) ──
+    ws2 = wb.create_sheet("Alle kandidater")
+    cand_headers = [
+        "Inn-rad", "Innprodukt",
+        "Kandidat-rang", "Kandidat art.nr", "Kandidat produktnavn",
+        "Kandidat spesifikasjon", "Kandidat produsent",
+        "ALC-pris", "Relevansscore", "AI-score",
+        "Tilstrekkelig relevant", "Tags", "AI-forklaring",
+        "Er valgt",
+    ]
+    for col, h in enumerate(cand_headers, 1):
+        cell = ws2.cell(row=1, column=col, value=h)
+        cell.fill = header_fill
+        cell.font = header_font
+        cell.alignment = Alignment(horizontal="center", wrap_text=True)
+
+    cand_row = 2
+    for result in results:
+        for cand in result.candidates:
+            is_selected = cand.article_number == result.selected_candidate
+            cand_data = [
+                result.input_row,
+                result.input_product_name,
+                cand.rank,
+                cand.article_number,
+                cand.product_name,
+                cand.specification,
+                cand.supplier,
+                cand.alc_price if cand.alc_price else "",
+                round(cand.relevance_score, 1),
+                round(cand.ai_relevance_score, 1) if cand.ai_relevance_score is not None else "",
+                "Ja" if cand.is_sufficiently_relevant else "Nei",
+                ", ".join(cand.tags) if cand.tags else "",
+                cand.ai_explanation,
+                "JA" if is_selected else "",
+            ]
+            for col, val in enumerate(cand_data, 1):
+                cell = ws2.cell(row=cand_row, column=col, value=val)
+                if col == 8 and isinstance(val, (int, float)) and val > 0:
+                    cell.number_format = '#,##0.00 "kr"'
+                if is_selected:
+                    cell.fill = highlight_fill
+            cand_row += 1
+
+    # ── Sheet 3: Sammendrag ──
+    ws3 = wb.create_sheet("Sammendrag")
+    ws3.insert_rows(1)
+    summary = _compute_match_summary(job)
+
+    summary_data = [
+        ("Matching-rapport", ""),
+        ("", ""),
+        ("Matchmodus", mode_label),
+        ("Kildefil", job.get("source_filename", "")),
+        ("Dato", datetime.now().strftime("%Y-%m-%d %H:%M")),
+        ("", ""),
+        ("Totalt produkter", summary["total"]),
+        ("Matchet", summary["matched"]),
+        ("Ingen match", summary["no_match"]),
+        ("Flere kandidater", summary["multiple_candidates"]),
+        ("Krever manuell vurdering", summary["manual_review_needed"]),
+        ("Manuelt valgt i UI", summary["manual_selections"]),
+        ("", ""),
+        ("Prisinformasjon", ""),
+        ("Produkter med ALC-pris", summary["products_with_price"]),
+        ("Gjennomsnittlig ALC-pris", f"kr {summary['avg_price']:,.2f}" if summary["avg_price"] else "N/A"),
+        ("Laveste ALC-pris", f"kr {summary['min_price']:,.2f}" if summary["min_price"] else "N/A"),
+        ("Høyeste ALC-pris", f"kr {summary['max_price']:,.2f}" if summary["max_price"] else "N/A"),
+    ]
+
+    for row_idx, (label, value) in enumerate(summary_data, 1):
+        ws3.cell(row=row_idx, column=1, value=label).font = Font(bold=bool(label and not value))
+        ws3.cell(row=row_idx, column=2, value=value)
+
+    ws3.column_dimensions["A"].width = 30
+    ws3.column_dimensions["B"].width = 30
+
+    # Save
+    timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+    mode_suffix = "hardcore_pris" if is_hardcore else "standard"
+    output_filename = f"matching_{mode_suffix}_{job['job_id']}_{timestamp}.xlsx"
+    output_path = str(MATCH_OUTPUT_DIR / output_filename)
+    wb.save(output_path)
+    job["output_file"] = output_path
+    logger.info(f"Match Excel saved: {output_path}")
+
+
+def _add_match_to_history(job: dict) -> None:
+    """Add a completed match job to the persistent history."""
+    if job["status"] != "completed":
+        return
+    src = Path(job.get("output_file", ""))
+    if not src.exists():
+        return
+
+    history_filename = f"matching_{job['job_id']}.xlsx"
+    dest = HISTORY_EXCEL_DIR / history_filename
+    try:
+        shutil.copy2(str(src), str(dest))
+    except OSError as e:
+        logger.error(f"Failed to copy match Excel to history: {e}")
+        return
+
+    summary = _compute_match_summary(job)
+    entry = {
+        "job_id": job["job_id"],
+        "timestamp": datetime.fromtimestamp(job["created_at"]).isoformat(),
+        "created_at": job["created_at"],
+        "source_filename": job.get("source_filename", ""),
+        "excel_filename": history_filename,
+        "product_count": summary["total"],
+        "analysis_mode": f"matching_{job['match_mode']}",
+        "focus_areas": [],
+        "batch_info": f"Matching ({summary['matched']}/{summary['total']} matchet)",
+        "avg_score": summary.get("avg_price") or 0,
+        "critical_count": summary["no_match"],
+        "match_mode": job["match_mode"],
+        "match_summary": summary,
+    }
+
+    entries = _load_history()
+    entries.append(entry)
+    _save_history(entries)
+
+
+@app.get("/api/match/history")
+async def get_match_history():
+    """Get matching job history."""
+    entries = _load_history()
+    match_entries = [e for e in entries if e.get("analysis_mode", "").startswith("matching_")]
+    match_entries.reverse()
+    return {"entries": match_entries}
+
+
+# ── Job Management Endpoints ──
+
+
+@app.get("/api/jobs")
+async def list_all_jobs():
+    """List all persistent matching/anbud jobs."""
+    jobs = _list_persisted_jobs()
+    return {"jobs": jobs}
+
+
+@app.get("/api/jobs/{job_id}")
+async def get_job_detail(job_id: str):
+    """Get full job details including results."""
+    job = _get_job(job_id)
+    if not job:
+        raise HTTPException(404, "Jobb ikke funnet")
+
+    results = job.get("results", [])
+    serialized = []
+    for r in results:
+        if hasattr(r, "to_dict"):
+            serialized.append(r.to_dict())
+        elif isinstance(r, dict):
+            serialized.append(r)
+
+    return {
+        "job_id": job["job_id"],
+        "job_name": job.get("job_name", ""),
+        "created_by": job.get("created_by", ""),
+        "job_type": job.get("job_type", "standard"),
+        "status": job.get("status", "unknown"),
+        "match_mode": job.get("match_mode", "standard"),
+        "mode_label": _MODE_LABELS.get(job.get("match_mode", ""), "Standard"),
+        "total": job.get("total", 0),
+        "processed": job.get("processed", 0),
+        "created_at": job.get("created_at", 0),
+        "updated_at": job.get("updated_at", 0),
+        "last_activity_at": job.get("last_activity_at", 0),
+        "source_filename": job.get("source_filename", ""),
+        "detected_columns": job.get("detected_columns", {}),
+        "results": serialized,
+        "summary": job.get("summary") or (_compute_match_summary(job) if results else {}),
+        "row_approvals": job.get("row_approvals", {}),
+        "locked": job.get("locked", False),
+    }
+
+
+@app.post("/api/jobs/{job_id}/approve")
+async def approve_rows(job_id: str, data: dict = Body(...)):
+    """Approve or reject one or more rows.
+
+    Body: {"rows": [2, 3, 5], "action": "approved"|"rejected"|"pending", "password": "optional"}
+    Or for all: {"all": true, "action": "approved", "password": "optional"}
+    """
+    job = _match_jobs.get(job_id)
+    if not job:
+        # Try loading from disk into memory
+        job = _load_persisted_job(job_id)
+        if job:
+            _match_jobs[job_id] = job
+        else:
+            raise HTTPException(404, "Jobb ikke funnet")
+
+    if job.get("locked"):
+        can_edit, msg = _verify_job_access(job_id, data.get("password"))
+        if not can_edit:
+            raise HTTPException(403, msg)
+
+    action = data.get("action", "approved")
+    if action not in ("approved", "rejected", "pending"):
+        raise HTTPException(400, "Ugyldig handling. Bruk 'approved', 'rejected' eller 'pending'.")
+
+    approvals = job.setdefault("row_approvals", {})
+
+    if data.get("all"):
+        results = job.get("results", [])
+        for r in results:
+            row_num = r.input_row if hasattr(r, "input_row") else r.get("input_row")
+            if row_num is not None:
+                approvals[str(row_num)] = action
+        count = len(results)
+    else:
+        rows = data.get("rows", [])
+        if not rows:
+            raise HTTPException(400, "Ingen rader spesifisert")
+        for row_num in rows:
+            approvals[str(row_num)] = action
+        count = len(rows)
+
+    job["last_activity_at"] = time.time()
+    _persist_job(job)
+
+    # Feed approved rows into learning store
+    if action == "approved":
+        _feed_approved_rows_to_learning(job, approvals, job_id)
+
+    return {"message": f"{count} rader satt til '{action}'", "row_approvals": approvals}
+
+
+def _feed_approved_rows_to_learning(job: dict, approvals: dict, job_id: str) -> None:
+    """Feed approved rows with selected candidates into learning store."""
+    results = job.get("results", [])
+    for r in results:
+        row_num = str(r.input_row if hasattr(r, "input_row") else r.get("input_row", ""))
+        if approvals.get(row_num) != "approved":
+            continue
+        selected = r.selected_candidate if hasattr(r, "selected_candidate") else r.get("selected_candidate")
+        if not selected:
+            continue
+        input_name = r.input_product_name if hasattr(r, "input_product_name") else r.get("input_product_name", "")
+        input_spec = r.input_specification if hasattr(r, "input_specification") else r.get("input_specification", "")
+        _feed_learning_example(input_name, input_spec, selected, "ui_approval", job_id)
+
+
+@app.post("/api/jobs/{job_id}/lock")
+async def lock_job_endpoint(job_id: str, data: dict = Body(...)):
+    """Lock a job with a password.
+
+    Body: {"password": "mypassword"}
+    """
+    password = data.get("password", "")
+    if not password or len(password) < 4:
+        raise HTTPException(400, "Passord må være minst 4 tegn.")
+
+    job = _get_job(job_id)
+    if not job:
+        raise HTTPException(404, "Jobb ikke funnet")
+
+    if job.get("locked"):
+        raise HTTPException(400, "Jobben er allerede låst.")
+
+    success = _lock_persisted_job(job_id, password)
+    if not success:
+        raise HTTPException(500, "Kunne ikke låse jobben.")
+
+    # Update in-memory too
+    if job_id in _match_jobs:
+        _match_jobs[job_id]["locked"] = True
+
+    return {"message": "Jobben er nå låst", "locked": True}
+
+
+@app.post("/api/jobs/{job_id}/unlock")
+async def unlock_job_endpoint(job_id: str, data: dict = Body(...)):
+    """Unlock a job with password or admin password.
+
+    Body: {"password": "mypassword"}
+    """
+    password = data.get("password", "")
+    if not password:
+        raise HTTPException(400, "Passord er påkrevd.")
+
+    success, msg = _unlock_persisted_job(job_id, password)
+    if not success:
+        raise HTTPException(403, msg)
+
+    # Update in-memory too
+    if job_id in _match_jobs:
+        _match_jobs[job_id]["locked"] = False
+        _match_jobs[job_id].pop("lock_hash", None)
+
+    return {"message": msg, "locked": False}
+
+
+@app.get("/api/catalog/search")
+async def search_catalog(
+    q: str = Query("", description="Search query"),
+    article_number: str = Query("", description="Article number exact lookup"),
+):
+    """Search the Jeeves catalog for products. Used for manual product selection."""
+    if not _jeeves_index or not _jeeves_index.loaded:
+        raise HTTPException(400, "Katalog ikke lastet.")
+
+    results = []
+    query = q.strip().lower()
+    artnr_query = article_number.strip()
+
+    if not query and not artnr_query:
+        raise HTTPException(400, "Søkeord eller artikkelnummer er påkrevd.")
+
+    # Article number exact lookup
+    if artnr_query:
+        jd = _jeeves_index.get(artnr_query)
+        if jd:
+            results.append({
+                "article_number": jd.article_number,
+                "product_name": jd.item_description or "",
+                "specification": jd.specification or "",
+                "supplier": jd.supplier or "",
+                "product_brand": jd.product_brand or "",
+                "alc_price": None,
+            })
+        return {"results": results, "total": len(results)}
+
+    # Free-text search
+    all_artnrs = _jeeves_index.all_article_numbers()
+    scored = []
+    for artnr in all_artnrs:
+        jd = _jeeves_index.get(artnr)
+        if not jd:
+            continue
+        text = f"{jd.item_description or ''} {jd.specification or ''} {jd.supplier or ''} {artnr}".lower()
+        # Simple relevance: count query words that appear
+        words = query.split()
+        hits = sum(1 for w in words if w in text)
+        if hits > 0:
+            scored.append((hits, len(text), {
+                "article_number": jd.article_number,
+                "product_name": jd.item_description or "",
+                "specification": jd.specification or "",
+                "supplier": jd.supplier or "",
+                "product_brand": jd.product_brand or "",
+                "alc_price": None,
+            }))
+
+    # Sort by hits desc, then text length asc (prefer shorter/more specific)
+    scored.sort(key=lambda x: (-x[0], x[1]))
+    results = [s[2] for s in scored[:20]]
+
+    return {"results": results, "total": len(results)}
+
+
+@app.post("/api/match/select-manual/{job_id}")
+async def select_manual_product(job_id: str, data: dict = Body(...)):
+    """Select a product by article number from the catalog (not from candidates).
+
+    Body: {"input_row": 2, "article_number": "12345", "password": "optional"}
+    """
+    job = _match_jobs.get(job_id)
+    if not job:
+        job = _load_persisted_job(job_id)
+        if job:
+            _match_jobs[job_id] = job
+        else:
+            raise HTTPException(404, "Jobb ikke funnet")
+
+    if job.get("locked"):
+        can_edit, msg = _verify_job_access(job_id, data.get("password"))
+        if not can_edit:
+            raise HTTPException(403, msg)
+
+    input_row = data.get("input_row")
+    article_number = data.get("article_number", "").strip()
+    if input_row is None or not article_number:
+        raise HTTPException(400, "Mangler input_row eller article_number")
+
+    # Look up product in catalog
+    if not _jeeves_index or not _jeeves_index.loaded:
+        raise HTTPException(400, "Katalog ikke lastet.")
+    jd = _jeeves_index.get(article_number)
+    if not jd:
+        raise HTTPException(404, f"Artikkelnummer {article_number} finnes ikke i katalogen.")
+
+    # Update the result
+    for result in job["results"]:
+        row_num = result.input_row if hasattr(result, "input_row") else result.get("input_row")
+        if row_num == input_row:
+            # Create a manual candidate and add it
+            manual_cand = {
+                "article_number": jd.article_number,
+                "product_name": jd.item_description or "",
+                "specification": jd.specification or "",
+                "supplier": jd.supplier or "",
+                "product_brand": jd.product_brand or "",
+                "alc_price": None,
+                "relevance_score": 0,
+                "text_similarity": 0,
+                "category_match": True,
+                "hard_mismatch": False,
+                "mismatch_reason": "",
+                "ai_relevance_score": None,
+                "ai_explanation": "Manuelt valgt fra katalog",
+                "final_score": 0,
+                "is_sufficiently_relevant": True,
+                "rank": 0,
+                "tags": ["manuelt_valgt"],
+            }
+
+            if hasattr(result, "candidates"):
+                # Check if candidate already exists
+                existing = [c for c in result.candidates if c.article_number == article_number]
+                if not existing:
+                    from backend.matcher import MatchCandidate
+                    mc = MatchCandidate(**{k: v for k, v in manual_cand.items() if k != "alc_price_display" and k != "tags"})
+                    mc.tags = ["manuelt_valgt"]
+                    result.candidates.insert(0, mc)
+                result.selected_candidate = article_number
+                result.selected_by = "manual"
+                result.status = "matched"
+            else:
+                # Dict-based result from disk
+                candidates = result.get("candidates", [])
+                existing = [c for c in candidates if c.get("article_number") == article_number]
+                if not existing:
+                    candidates.insert(0, manual_cand)
+                    result["candidates"] = candidates
+                result["selected_candidate"] = article_number
+                result["selected_by"] = "manual"
+                result["status"] = "matched"
+
+            job["user_selections"][str(input_row)] = article_number
+            job["last_activity_at"] = time.time()
+            _persist_job(job)
+
+            return {
+                "message": "Produkt valgt manuelt",
+                "input_row": input_row,
+                "selected": article_number,
+                "product_name": jd.item_description or "",
+                "specification": jd.specification or "",
+                "supplier": jd.supplier or "",
+            }
+
+    raise HTTPException(404, f"Rad {input_row} ikke funnet i resultater")
+
+
+# ── Learning Module Endpoints ──
+
+from backend.learning_store import (
+    add_examples_batch, get_all_examples, get_stats as get_learning_stats,
+    list_batches as list_learning_batches, delete_batch as delete_learning_batch,
+    register_batch, find_matching_examples, reindex as reindex_learning,
+)
+
+
+@app.post("/api/learning/auth")
+async def learning_auth(data: dict = Body(...)):
+    """Verify admin password for learning module."""
+    password = data.get("password", "")
+    if _verify_learning_admin(password):
+        return {"authenticated": True}
+    raise HTTPException(403, "Feil admin-passord for læringsmodul.")
+
+
+@app.post("/api/learning/preview")
+async def learning_preview(
+    file: UploadFile = File(...),
+    password: str = Query("", description="Admin password"),
+):
+    """Preview Excel columns for mapping. Returns headers and sample rows."""
+    if not _verify_learning_admin(password):
+        raise HTTPException(403, "Feil admin-passord.")
+
+    content = await file.read()
+    if len(content) > MAX_FILE_SIZE:
+        raise HTTPException(400, "Filen er for stor.")
+
+    try:
+        from openpyxl import load_workbook
+        wb = load_workbook(BytesIO(content), read_only=True, data_only=True)
+        ws = wb.active
+
+        rows = list(ws.iter_rows(max_row=6))
+        if not rows:
+            raise HTTPException(400, "Tom fil")
+
+        headers = [str(cell.value or "").strip() for cell in rows[0]]
+        preview_rows = []
+        for row in rows[1:]:
+            preview_rows.append([str(cell.value or "").strip() for cell in row])
+
+        wb.close()
+
+        return {
+            "headers": headers,
+            "preview_rows": preview_rows,
+            "column_count": len(headers),
+            "filename": file.filename,
+        }
+    except Exception as e:
+        raise HTTPException(400, f"Kunne ikke lese filen: {e}")
+
+
+@app.post("/api/learning/import")
+async def learning_import(
+    file: UploadFile = File(...),
+    password: str = Query("", description="Admin password"),
+    batch_name: str = Query("", description="Import batch name"),
+    imported_by: str = Query("", description="Imported by"),
+    input_text_col: int = Query(..., description="Column index for input product text"),
+    input_spec_col: int = Query(-1, description="Column index for input specification (-1 = none)"),
+    output_artnr_col: int = Query(..., description="Column index for matched article number"),
+    output_name_col: int = Query(-1, description="Column index for matched product name (-1 = none)"),
+):
+    """Import historical anbud as learning examples."""
+    if not _verify_learning_admin(password):
+        raise HTTPException(403, "Feil admin-passord.")
+
+    if not batch_name.strip():
+        raise HTTPException(400, "Importnavn er påkrevd.")
+
+    content = await file.read()
+    try:
+        from openpyxl import load_workbook
+        wb = load_workbook(BytesIO(content), read_only=True, data_only=True)
+        ws = wb.active
+
+        rows_iter = ws.iter_rows()
+        header_row = next(rows_iter)  # skip header
+        headers = [str(cell.value or "").strip() for cell in header_row]
+
+        items = []
+        total_rows = 0
+        rejected = 0
+
+        for row in rows_iter:
+            total_rows += 1
+            values = [cell.value for cell in row]
+
+            input_text = str(values[input_text_col] or "").strip() if input_text_col < len(values) else ""
+            input_spec = str(values[input_spec_col] or "").strip() if input_spec_col >= 0 and input_spec_col < len(values) else ""
+            matched_article = str(values[output_artnr_col] or "").strip() if output_artnr_col < len(values) else ""
+            matched_name = str(values[output_name_col] or "").strip() if output_name_col >= 0 and output_name_col < len(values) else ""
+
+            if not input_text or not matched_article:
+                rejected += 1
+                continue
+
+            # Skip if article number looks invalid
+            if len(matched_article) < 2 or matched_article.lower() in ("none", "nan", "-", ""):
+                rejected += 1
+                continue
+
+            items.append({
+                "input_text": input_text,
+                "input_spec": input_spec,
+                "matched_article": matched_article,
+                "matched_product_name": matched_name,
+            })
+
+        wb.close()
+    except Exception as e:
+        raise HTTPException(400, f"Kunne ikke lese filen: {e}")
+
+    if not items:
+        raise HTTPException(400, f"Ingen gyldige rader funnet. {rejected} rader ble forkastet (mangler input eller artikkelnummer).")
+
+    # Generate batch ID and import
+    batch_id = str(uuid.uuid4())[:8]
+    count = add_examples_batch(items, batch_id)
+
+    mapped_fields = {
+        "input_text": headers[input_text_col] if input_text_col < len(headers) else f"col_{input_text_col}",
+        "input_spec": headers[input_spec_col] if input_spec_col >= 0 and input_spec_col < len(headers) else None,
+        "output_artnr": headers[output_artnr_col] if output_artnr_col < len(headers) else f"col_{output_artnr_col}",
+        "output_name": headers[output_name_col] if output_name_col >= 0 and output_name_col < len(headers) else None,
+    }
+
+    batch = register_batch(
+        batch_id=batch_id,
+        name=batch_name.strip(),
+        source_filename=file.filename or "",
+        total_rows=total_rows,
+        valid_examples=count,
+        rejected_rows=rejected,
+        mapped_fields=mapped_fields,
+        imported_by=imported_by.strip(),
+    )
+
+    return {
+        "batch_id": batch_id,
+        "name": batch_name.strip(),
+        "total_rows": total_rows,
+        "valid_examples": count,
+        "rejected_rows": rejected,
+        "mapped_fields": mapped_fields,
+    }
+
+
+@app.get("/api/learning/stats")
+async def learning_stats_endpoint():
+    """Get learning store statistics."""
+    return get_learning_stats()
+
+
+@app.get("/api/learning/batches")
+async def learning_batches_endpoint():
+    """List all import batches."""
+    return {"batches": list_learning_batches()}
+
+
+@app.delete("/api/learning/batches/{batch_id}")
+async def delete_learning_batch_endpoint(batch_id: str, password: str = Query("", description="Admin password")):
+    """Delete an import batch and its examples."""
+    if not _verify_learning_admin(password):
+        raise HTTPException(403, "Feil admin-passord.")
+
+    removed = delete_learning_batch(batch_id)
+    if removed == 0:
+        raise HTTPException(404, "Batch ikke funnet eller allerede slettet.")
+
+    return {"message": f"{removed} læringseksempler slettet", "removed": removed}
+
+
+@app.post("/api/learning/reindex")
+async def learning_reindex_endpoint(data: dict = Body(...)):
+    """Reindex all learning examples (regenerate tokens)."""
+    if not _verify_learning_admin(data.get("password", "")):
+        raise HTTPException(403, "Feil admin-passord.")
+
+    count = reindex_learning()
+    return {"message": f"{count} eksempler reindeksert", "count": count}
 
 
 if __name__ == "__main__":

@@ -224,11 +224,17 @@ class ImageSuggestion(BaseModel):
     current_image_url: Optional[str] = None
     current_image_status: str = "unknown"  # ok, missing, low_quality, poor_background
     suggested_image_url: Optional[str] = None
-    suggested_source: Optional[str] = None  # "manufacturer", "norengros"
+    suggested_source: Optional[str] = None  # "manufacturer", "norengros", "manufacturer_mediabank", "web_search"
     suggested_source_url: Optional[str] = None
+    suggested_source_domain: Optional[str] = None  # Domain of the source
+    suggested_source_type: Optional[str] = None  # manufacturer_mediabank, manufacturer_website, etc.
     confidence: float = 0.0
+    identity_score: float = 0.0  # How sure we are this is the right product (0-1)
+    improvement_score: float = 0.0  # How much better this is than current (0-1)
+    confidence_label: str = "Krever manuell vurdering"  # Høy/Middels/Lav tillit
     review_required: bool = True
     reason: Optional[str] = None
+    verification_signals: list[str] = []  # What signals confirmed identity
 
 
 class ProductAnalysis(BaseModel):
@@ -330,3 +336,5 @@ class AnalysisJob(BaseModel):
     analysis_mode: str = AnalysisMode.FULL_ENRICHMENT.value
     focus_areas: list[str] = []  # Only used when analysis_mode == "focused_scan"
     source_filename: str = ""  # Original uploaded filename
+    # Products excluded from output (not found on website)
+    excluded_products: list[dict] = []  # [{article_number, reason}]
