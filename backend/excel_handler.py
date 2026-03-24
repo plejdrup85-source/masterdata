@@ -18,6 +18,7 @@ from backend.content_validator import (
 from backend.diff_display import build_field_diff, detect_change_scope, summarize_change_type
 from backend.identifiers import normalize_identifier, normalize_identifier_strict
 from backend.models import EnrichmentSuggestion, JeevesData, ProductAnalysis, QualityStatus
+from backend.quality_gate import quality_gate_check
 
 logger = logging.getLogger(__name__)
 
@@ -441,8 +442,8 @@ def _create_explanation_sheet(ws, results: list[ProductAnalysis]) -> None:
     top_align = Alignment(vertical="top", wrap_text=True)
 
     for col_idx, header in enumerate(headers, 1):
-        cell = ws.cell(row=1, column=col_idx, value=header)
-        _style_header(cell)
+        ws.cell(row=1, column=col_idx, value=header)
+    _style_header(ws, 1, len(headers))
 
     # Sort by priority (highest first)
     sorted_results = sorted(results, key=lambda r: -(r.priority_score or 0))
@@ -631,6 +632,22 @@ def _create_improvements_sheet(ws, results: list[ProductAnalysis]) -> None:
                 )
                 continue
 
+            # ── MANDATORY QUALITY GATE — final defense before Excel ──
+            gate_result = quality_gate_check(
+                suggested_value=es.suggested_value,
+                field_name=es.field_name,
+                current_value=es.current_value,
+                current_sku=sku,
+                confidence=es.confidence or 0.0,
+                source=es.source or "",
+            )
+            if not gate_result:
+                logger.info(
+                    f"[excel] Quality gate REJECTED for {sku}/{es.field_name}: "
+                    f"{gate_result.reason}"
+                )
+                continue
+
             # Safety net: translate any remaining sv/da content to Norwegian
             output_value = es.suggested_value
             translated, _lang, was_translated = translate_to_norwegian_if_needed(output_value)
@@ -678,6 +695,22 @@ def _create_improvements_sheet(ws, results: list[ProductAnalysis]) -> None:
                 if not is_valid:
                     logger.info(
                         f"[excel] Field suggestion rejected for {sku}/{fa.field_name}: {reject_reason}"
+                    )
+                    continue
+
+                # ── MANDATORY QUALITY GATE — final defense before Excel ──
+                gate_result = quality_gate_check(
+                    suggested_value=fa.suggested_value,
+                    field_name=fa.field_name,
+                    current_value=fa.current_value,
+                    current_sku=sku,
+                    confidence=fa.confidence or 0.0,
+                    source=fa.source or "",
+                )
+                if not gate_result:
+                    logger.info(
+                        f"[excel] Quality gate REJECTED field suggestion for "
+                        f"{sku}/{fa.field_name}: {gate_result.reason}"
                     )
                     continue
 
@@ -764,6 +797,18 @@ def _create_quick_wins_sheet(ws, results: list[ProductAnalysis]) -> None:
                 continue
             fa = fa_map.get(es.field_name)
             if not is_quick_win(es, fa):
+                continue
+
+            # Quality gate check for quick wins too
+            gate_result = quality_gate_check(
+                suggested_value=es.suggested_value,
+                field_name=es.field_name,
+                current_value=es.current_value,
+                current_sku=result.article_number,
+                confidence=es.confidence or 0.0,
+                source=es.source or "",
+            )
+            if not gate_result:
                 continue
 
             _write_id_cell(ws, row_idx, 1, result.article_number)
@@ -1236,14 +1281,16 @@ def _create_image_detail_sheet(ws, results: list[ProductAnalysis]) -> None:
         else:
             problem_desc = img_issues or ""
 
-        # Build improvement suggestion text
-        if has_suggestion and img_sugg.suggested_image_url:
+        # Build improvement suggestion text — use the structured reason
+        # from enhance_image_suggestion which includes search URLs
+        if has_suggestion and img_sugg.reason:
+            improvement = img_sugg.reason
+        elif has_suggestion and img_sugg.suggested_image_url:
             improvement = (
                 f"Bedre bilde funnet hos {img_sugg.suggested_source or 'ekstern kilde'}. "
                 f"URL: {img_sugg.suggested_image_url}"
             )
         elif has_problem:
-            # No image suggestion found, but there's a problem — suggest manual action
             search_hint = ""
             if producer and producer_artnr:
                 search_hint = f"Søk hos {producer} med varenummer {producer_artnr}"

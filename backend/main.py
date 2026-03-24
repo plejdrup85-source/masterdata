@@ -3268,26 +3268,45 @@ async def _run_analysis(
                         analysis.norengros_lookup = norengros_data
 
                     # Step 5b: Image suggestion logic
-                    # Also pass Jeeves data to enrich producer search hints
                     analysis.image_suggestion = _build_image_suggestion(
                         product_data, image_summary, mfr_data, norengros_data,
                     )
-                    # Step 5b+: For low-quality images without a suggested replacement,
-                    # try to find a better image from the producer if we have catalog info
-                    if (analysis.image_suggestion
-                            and analysis.image_suggestion.current_image_status in ("low_quality", "missing")
-                            and not analysis.image_suggestion.suggested_image_url
-                            and jeeves_data):
-                        # Use Jeeves supplier + supplier_item_no for a targeted search hint
-                        producer = jeeves_data.supplier or product_data.manufacturer
-                        supplier_item = jeeves_data.supplier_item_no or product_data.manufacturer_article_number
-                        if producer and supplier_item:
-                            analysis.image_suggestion.reason = (
-                                f"Bildekvalitet lav ({analysis.image_suggestion.current_image_status}). "
-                                f"Søk hos produsent anbefalt: {producer} (art.nr: {supplier_item}). "
-                                f"Produsentens nettside bør prioriteres som bildekilde."
-                            )
-                            analysis.image_suggestion.suggested_source = "producer_search"
+
+                    # Step 5b+: Enhance image suggestion with active search
+                    if analysis.image_suggestion:
+                        from backend.image_search import (
+                            enhance_image_suggestion,
+                            search_producer_image,
+                        )
+                        j_supplier = jeeves_data.supplier if jeeves_data else None
+                        j_supplier_item = jeeves_data.supplier_item_no if jeeves_data else None
+
+                        # Try active image search if no good image found yet
+                        if (analysis.image_suggestion.current_image_status in ("low_quality", "missing")
+                                and not (analysis.image_suggestion.suggested_image_url
+                                         and analysis.image_suggestion.suggested_source in ("manufacturer", "norengros"))):
+                            try:
+                                found_image = await search_producer_image(
+                                    product_data, mfr_data, j_supplier, j_supplier_item,
+                                )
+                                if found_image and found_image.get("image_url"):
+                                    analysis.image_suggestion.suggested_image_url = found_image["image_url"]
+                                    analysis.image_suggestion.suggested_source = found_image.get("source", "producer_website")
+                                    analysis.image_suggestion.suggested_source_url = found_image.get("source_url")
+                                    analysis.image_suggestion.confidence = found_image.get("confidence", 0.5)
+                                    analysis.image_suggestion.review_required = True
+                                    analysis.image_suggestion.reason = (
+                                        f"Bedre bilde funnet hos produsent. "
+                                        f"Verifiser at bildet viser riktig produkt."
+                                    )
+                            except Exception as e:
+                                logger.debug(f"[{job_id}] Active image search failed: {e}")
+
+                        # Always enhance with search URLs for manual follow-up
+                        analysis.image_suggestion = enhance_image_suggestion(
+                            analysis.image_suggestion, product_data,
+                            mfr_data, j_supplier, j_supplier_item,
+                        )
 
                     # Apply enrichment suggestions to field_analyses (PDF takes priority)
                     _apply_enrichment_to_analysis(analysis)
