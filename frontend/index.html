@@ -904,7 +904,7 @@
         <!-- Results Section -->
         <div class="results-section" id="resultsSection">
             <div class="card">
-                <h2>Resultater</h2>
+                <h2 style="display:flex;align-items:center;gap:0.5rem">Resultater <span id="saveIndicator" style="font-size:0.75rem;font-weight:400;color:#16a34a;opacity:0;transition:opacity 0.3s"></span></h2>
                 <div class="stats-grid" id="statsGrid"></div>
                 <div class="actions">
                     <button class="btn btn-success" id="downloadBtn">Last ned Excel-rapport</button>
@@ -2867,6 +2867,8 @@
                 if (rData && rData.enrichment_suggestions && rData.enrichment_suggestions[suggestionIndex]) {
                     rData.enrichment_suggestions[suggestionIndex].approval_status = status;
                 }
+                // Auto-save to persistent history (survives page refresh)
+                queueReviewSave(articleNumber, suggestionIndex, status);
             } catch (e) {
                 alert('Feil: ' + e.message);
             }
@@ -3595,6 +3597,11 @@
                     html += `<td style="padding:0.5rem;text-align:center">${wsBar}</td>`;
                     html += `<td style="padding:0.5rem;text-align:center">${prioBar}</td>`;
                     html += `<td style="padding:0.5rem;text-align:right;white-space:nowrap">`;
+                    // Reopen button — only if results JSON exists on disk
+                    if (e.reopenable || e.in_memory) {
+                        const reopenLabel = e.in_memory ? 'Vis i UI' : 'Gjenåpne';
+                        html += `<button class="btn" style="font-size:0.75rem;padding:0.25rem 0.6rem;margin-right:0.3rem;background:#dbeafe;color:#1d4ed8;border:none;cursor:pointer;font-weight:600" onclick="reopenJob('${e.job_id}')">${reopenLabel}</button>`;
+                    }
                     html += `<button class="btn btn-primary" style="font-size:0.75rem;padding:0.25rem 0.6rem" onclick="downloadHistoryFile('${e.job_id}')">Last ned</button>`;
                     html += compareBtn;
                     html += `<button class="btn" style="font-size:0.75rem;padding:0.25rem 0.5rem;margin-left:0.3rem;background:#fee2e2;color:#dc2626;border:none;cursor:pointer" onclick="deleteHistoryEntry('${e.job_id}')">Slett</button>`;
@@ -3623,6 +3630,98 @@
             } catch (err) {
                 alert('Kunne ikke slette: ' + err.message);
             }
+        }
+
+        async function reopenJob(jobId) {
+            try {
+                const resp = await fetch(`${API_BASE}/api/history/${jobId}/reopen`, {method: 'POST'});
+                if (!resp.ok) {
+                    const err = await resp.json().catch(() => ({}));
+                    if (resp.status === 410) {
+                        alert(err.detail || 'Denne jobben kan ikke gjenåpnes i UI. Prøv å laste ned Excel i stedet.');
+                    } else {
+                        throw new Error(err.detail || `HTTP ${resp.status}`);
+                    }
+                    return;
+                }
+                const data = await resp.json();
+                // Set current job and switch to masterdata module with results
+                currentJobId = data.job_id;
+                switchModule('masterdata');
+                // Hide upload area, show progress section as complete
+                const progressSection = document.getElementById('progressSection');
+                const progressTitle = document.getElementById('progressTitle');
+                const cancelBtn = document.getElementById('cancelBtn');
+                const resultsSection = document.getElementById('resultsSection');
+                if (progressSection) {
+                    progressSection.classList.add('active');
+                    if (progressTitle) progressTitle.textContent = `Gjenåpnet jobb — ${data.product_count} produkter`;
+                    if (cancelBtn) cancelBtn.classList.add('hidden');
+                }
+                // Load and display results
+                await loadResults();
+                if (resultsSection) resultsSection.classList.remove('hidden');
+            } catch (err) {
+                alert('Kunne ikke gjenåpne jobb: ' + err.message);
+            }
+        }
+
+        // Auto-save review decisions when user approves/rejects a suggestion
+        let _reviewSaveTimeout = null;
+        let _pendingReviewDecisions = [];
+        let _pendingImageDecisions = [];
+
+        function queueReviewSave(articleNumber, suggestionIndex, status, comment) {
+            _pendingReviewDecisions.push({
+                article_number: articleNumber,
+                suggestion_index: suggestionIndex,
+                status: status,
+                comment: comment || null,
+            });
+            _scheduleReviewSave();
+        }
+
+        function queueImageReviewSave(articleNumber, status) {
+            _pendingImageDecisions.push({
+                article_number: articleNumber,
+                status: status,
+            });
+            _scheduleReviewSave();
+        }
+
+        function _scheduleReviewSave() {
+            // Debounce: save after 1 second of no new changes
+            if (_reviewSaveTimeout) clearTimeout(_reviewSaveTimeout);
+            _reviewSaveTimeout = setTimeout(async () => {
+                if (!currentJobId) return;
+                if (_pendingReviewDecisions.length === 0 && _pendingImageDecisions.length === 0) return;
+
+                const body = {
+                    decisions: [..._pendingReviewDecisions],
+                    image_decisions: [..._pendingImageDecisions],
+                };
+                _pendingReviewDecisions = [];
+                _pendingImageDecisions = [];
+
+                try {
+                    const resp = await fetch(`${API_BASE}/api/history/${currentJobId}/review`, {
+                        method: 'PUT',
+                        headers: {'Content-Type': 'application/json'},
+                        body: JSON.stringify(body),
+                    });
+                    if (resp.ok) {
+                        // Show brief save indicator
+                        const indicator = document.getElementById('saveIndicator');
+                        if (indicator) {
+                            indicator.textContent = 'Lagret';
+                            indicator.style.opacity = '1';
+                            setTimeout(() => { indicator.style.opacity = '0'; }, 2000);
+                        }
+                    }
+                } catch (err) {
+                    console.warn('Auto-save failed:', err);
+                }
+            }, 1000);
         }
 
         async function compareRuns(currentId, previousId) {

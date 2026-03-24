@@ -34,8 +34,8 @@ from backend.manufacturer import (
     search_norengros,
 )
 from backend.models import (
-    AnalysisJob, AnalysisMode, BatchMode, ImageSuggestion, JobStatus,
-    ProductAnalysis, ProductData, QualityStatus, VerificationStatus,
+    AnalysisJob, AnalysisMode, ApprovalStatus, BatchMode, ImageSuggestion,
+    JobStatus, ProductAnalysis, ProductData, QualityStatus, VerificationStatus,
 )
 from backend.scoring import score_product_areas, FOCUS_AREAS, ALL_AREAS, AREA_LABELS, ANALYSIS_PRESETS
 from backend.pdf_enricher import run_enrichment_pipeline
@@ -255,6 +255,7 @@ def _save_history(entries: list[dict]) -> None:
         evicted = entries[:-HISTORY_MAX_ENTRIES]
         entries = entries[-HISTORY_MAX_ENTRIES:]
         for e in evicted:
+            jid = e.get("job_id", "")
             old_file = HISTORY_EXCEL_DIR / e.get("excel_filename", "")
             if old_file.exists():
                 try:
@@ -262,6 +263,9 @@ def _save_history(entries: list[dict]) -> None:
                     logger.info(f"History FIFO: deleted evicted Excel {old_file.name}")
                 except OSError:
                     pass
+            # Also delete results JSON
+            old_results = HISTORY_RESULTS_DIR / f"results_{jid}.json"
+            old_results.unlink(missing_ok=True)
     try:
         HISTORY_INDEX_FILE.write_text(
             json.dumps(entries, ensure_ascii=False, indent=2),
@@ -341,6 +345,101 @@ def _add_to_history(job: "AnalysisJob", source_filename: str = "") -> None:
     entries = _load_history()
     entries.append(entry)
     _save_history(entries)
+
+
+# ── Full results persistence for UI reopening ──
+HISTORY_RESULTS_DIR = HISTORY_DIR / "results"
+HISTORY_RESULTS_DIR.mkdir(parents=True, exist_ok=True)
+
+
+def _save_job_results(job_id: str, job: "AnalysisJob") -> None:
+    """Save full ProductAnalysis results as JSON for later UI reopening.
+
+    This is the key mechanism that allows historical jobs to be reopened
+    in the treatment interface, not just downloaded as Excel.
+    """
+    results_path = HISTORY_RESULTS_DIR / f"results_{job_id}.json"
+    try:
+        results_data = {
+            "job_id": job_id,
+            "status": job.status.value,
+            "total_products": job.total_products,
+            "processed_products": job.processed_products,
+            "analysis_mode": job.analysis_mode,
+            "focus_areas": job.focus_areas,
+            "source_filename": job.source_filename,
+            "batch_info": job.batch_info,
+            "created_at": job.created_at,
+            "results": [r.model_dump(mode="json") for r in job.results],
+        }
+        results_path.write_text(
+            json.dumps(results_data, default=str, ensure_ascii=False),
+            encoding="utf-8",
+        )
+        logger.info(
+            f"[history] Lagret full resultat-JSON for jobb {job_id} "
+            f"({len(job.results)} produkter, {results_path.stat().st_size // 1024} KB)"
+        )
+    except Exception as e:
+        logger.error(f"[history] Kunne ikke lagre resultat-JSON for {job_id}: {e}")
+
+
+def _load_job_results(job_id: str) -> Optional[dict]:
+    """Load full results JSON from disk. Returns raw dict or None."""
+    results_path = HISTORY_RESULTS_DIR / f"results_{job_id}.json"
+    if not results_path.exists():
+        return None
+    try:
+        return json.loads(results_path.read_text(encoding="utf-8"))
+    except Exception as e:
+        logger.warning(f"[history] Kunne ikke laste resultat-JSON for {job_id}: {e}")
+        return None
+
+
+def _rehydrate_job(job_id: str) -> Optional["AnalysisJob"]:
+    """Rehydrate a full AnalysisJob from saved results JSON.
+
+    Returns the job with all ProductAnalysis objects restored,
+    or None if the data is unavailable or incompatible.
+    """
+    raw = _load_job_results(job_id)
+    if not raw:
+        return None
+
+    try:
+        results = [ProductAnalysis(**r) for r in raw.get("results", [])]
+        job = AnalysisJob(
+            job_id=job_id,
+            status=JobStatus.COMPLETED,
+            total_products=raw.get("total_products", len(results)),
+            processed_products=raw.get("processed_products", len(results)),
+            results=results,
+            analysis_mode=raw.get("analysis_mode", "full_enrichment"),
+            focus_areas=raw.get("focus_areas", []),
+            source_filename=raw.get("source_filename", ""),
+            batch_info=raw.get("batch_info"),
+            created_at=raw.get("created_at", time.time()),
+        )
+        # Set output file reference if Excel exists in history
+        excel_path = HISTORY_EXCEL_DIR / f"kvalitetssjekk_{job_id}.xlsx"
+        if excel_path.exists():
+            job.output_file = str(excel_path)
+        logger.info(
+            f"[history] Jobb {job_id} rehydrert: {len(results)} produkter"
+        )
+        return job
+    except Exception as e:
+        logger.warning(f"[history] Kunne ikke rehydrere jobb {job_id}: {e}")
+        return None
+
+
+def _save_review_decisions(job_id: str, job: "AnalysisJob") -> None:
+    """Persist current review decisions (approvals, rejections) to disk.
+
+    Updates the results JSON so that manual decisions survive restart.
+    """
+    _save_job_results(job_id, job)
+
 
 # Jeeves ERP data file path — auto-detected from repo or configured via env
 JEEVES_FILE_PATH = os.environ.get("JEEVES_FILE_PATH", "")
@@ -1723,8 +1822,127 @@ async def get_results(job_id: str):
 async def get_history():
     """Return list of past completed jobs (newest first)."""
     entries = _load_history()
+    # Add reopenable flag — True if full results JSON exists
+    for e in entries:
+        jid = e.get("job_id", "")
+        results_path = HISTORY_RESULTS_DIR / f"results_{jid}.json"
+        e["reopenable"] = results_path.exists()
+        # Also check if currently loaded in memory
+        e["in_memory"] = jid in jobs
     entries.reverse()
     return {"entries": entries}
+
+
+@app.post("/api/history/{job_id}/reopen")
+async def reopen_historical_job(job_id: str):
+    """Reopen a historical job in the UI treatment interface.
+
+    Loads the full ProductAnalysis results from disk into memory
+    so that all /api/results/{job_id} endpoints work again.
+    """
+    # Already in memory?
+    if job_id in jobs and jobs[job_id].status == JobStatus.COMPLETED:
+        return {
+            "message": "Jobb allerede åpen",
+            "job_id": job_id,
+            "product_count": len(jobs[job_id].results),
+        }
+
+    # Try to rehydrate from saved results
+    job = _rehydrate_job(job_id)
+    if not job:
+        # Check if history entry exists
+        entries = _load_history()
+        entry = next((e for e in entries if e["job_id"] == job_id), None)
+        if not entry:
+            raise HTTPException(404, "Jobb ikke funnet i historikk")
+        raise HTTPException(
+            410,
+            "Jobbdata er ikke tilgjengelig for UI-gjenåpning. "
+            "Denne jobben ble opprettet før resultat-persistering ble innført. "
+            "Excel-filen kan fortsatt lastes ned."
+        )
+
+    # Store in memory — will be available via /api/results/{job_id}
+    jobs[job_id] = job
+
+    return {
+        "message": "Jobb gjenåpnet i UI",
+        "job_id": job_id,
+        "product_count": len(job.results),
+        "analysis_mode": job.analysis_mode,
+    }
+
+
+@app.put("/api/history/{job_id}/review")
+async def save_review_decisions(job_id: str, request: Request):
+    """Save manual review decisions (approvals, rejections, comments).
+
+    Body format:
+    {
+      "decisions": [
+        {
+          "article_number": "N245100189090",
+          "suggestion_index": 0,
+          "status": "Godkjent",
+          "comment": "Verifisert manuelt"
+        },
+        ...
+      ],
+      "image_decisions": [
+        {
+          "article_number": "N245100189090",
+          "status": "godkjent"
+        },
+        ...
+      ]
+    }
+    """
+    job = jobs.get(job_id)
+    if not job or job.status != JobStatus.COMPLETED:
+        raise HTTPException(404, "Jobb ikke funnet eller ikke fullført")
+
+    body = await request.json()
+    applied = 0
+
+    # Apply enrichment suggestion decisions
+    for dec in body.get("decisions", []):
+        art_nr = dec.get("article_number")
+        idx = dec.get("suggestion_index", -1)
+        status_str = dec.get("status", "")
+        comment = dec.get("comment")
+
+        for r in job.results:
+            if r.article_number != art_nr:
+                continue
+            if 0 <= idx < len(r.enrichment_suggestions):
+                es = r.enrichment_suggestions[idx]
+                try:
+                    es.approval_status = ApprovalStatus(status_str)
+                except ValueError:
+                    continue
+                if comment is not None:
+                    es.approval_comment = comment
+                es.approved_at = datetime.now().isoformat()
+                applied += 1
+            break
+
+    # Apply image suggestion decisions
+    for dec in body.get("image_decisions", []):
+        art_nr = dec.get("article_number")
+        status = dec.get("status", "")
+        from backend.image_search import approve_image_suggestion
+        if approve_image_suggestion(job.results, art_nr, status):
+            applied += 1
+
+    # Persist to disk
+    _save_review_decisions(job_id, job)
+
+    return {
+        "message": f"{applied} beslutninger lagret",
+        "job_id": job_id,
+        "applied": applied,
+    }
 
 
 @app.get("/api/history/{job_id}/download")
@@ -1769,9 +1987,14 @@ async def delete_history_entry(job_id: str):
     entries = [e for e in entries if e["job_id"] != job_id]
     _save_history(entries)
 
-    # Also delete snapshot
+    # Also delete snapshot and results JSON
     from backend.run_comparison import delete_snapshot
     delete_snapshot(job_id)
+    results_path = HISTORY_RESULTS_DIR / f"results_{job_id}.json"
+    results_path.unlink(missing_ok=True)
+
+    # Remove from memory if loaded
+    jobs.pop(job_id, None)
 
     return {"message": "Historikkoppføring slettet", "job_id": job_id}
 
@@ -3681,6 +3904,9 @@ async def _run_analysis(
 
         # Persist to history for later retrieval
         _add_to_history(job, source_filename=job.source_filename)
+
+        # Save full results JSON for UI reopening
+        _save_job_results(job_id, job)
 
         # Save lightweight snapshot for run comparison
         from backend.run_comparison import save_snapshot
