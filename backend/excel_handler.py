@@ -599,9 +599,24 @@ def _create_image_detail_sheet(ws, results: list[ProductAnalysis]) -> None:
     # Skip a row then add suggestion header
     sugg_start = row_idx + 2
     sugg_headers = [
-        "Artikkelnummer", "Nåværende bilde-URL", "Nåværende status",
-        "Foreslått bilde-URL", "Bildekilde", "Kilde-URL",
-        "Konfidensgrad", "Begrunnelse",
+        "Artikkelnummer",
+        "GID",
+        "Produktnavn",
+        "Spesifikasjon",
+        "Produsent",
+        "Produsent art.nr",
+        "Nåværende bilde-URL",
+        "Nåværende status",
+        "Foreslått bilde-URL",
+        "Kildedomain",
+        "Kildetype",
+        "Kilde-URL",
+        "Identitetsscore",
+        "Forbedringsscore",
+        "Konfidensgrad",
+        "Status",
+        "Begrunnelse",
+        "Verifiseringssignaler",
     ]
     for col, h in enumerate(sugg_headers, 1):
         ws.cell(row=sugg_start, column=col, value=h)
@@ -612,14 +627,26 @@ def _create_image_detail_sheet(ws, results: list[ProductAnalysis]) -> None:
         img_sugg = result.image_suggestion
         if not img_sugg:
             continue
+        pd = result.product_data
+        jd = result.jeeves_data
         _write_id_cell(ws, sugg_row, 1, result.article_number)
-        ws.cell(row=sugg_row, column=2, value=img_sugg.current_image_url or "")
-        ws.cell(row=sugg_row, column=3, value=img_sugg.current_image_status or "")
-        ws.cell(row=sugg_row, column=4, value=img_sugg.suggested_image_url or "")
-        ws.cell(row=sugg_row, column=5, value=img_sugg.suggested_source or "")
-        ws.cell(row=sugg_row, column=6, value=img_sugg.suggested_source_url or "")
-        ws.cell(row=sugg_row, column=7, value=img_sugg.confidence if img_sugg.confidence else 0)
-        ws.cell(row=sugg_row, column=8, value=img_sugg.reason or "")
+        ws.cell(row=sugg_row, column=2, value=(jd.gid if jd else "") or "")
+        ws.cell(row=sugg_row, column=3, value=pd.product_name or (jd.item_description if jd else "") or "")
+        ws.cell(row=sugg_row, column=4, value=pd.specification or (jd.specification if jd else "") or "")
+        ws.cell(row=sugg_row, column=5, value=pd.manufacturer or (jd.supplier if jd else "") or "")
+        ws.cell(row=sugg_row, column=6, value=pd.manufacturer_article_number or (jd.supplier_item_no if jd else "") or "")
+        ws.cell(row=sugg_row, column=7, value=img_sugg.current_image_url or "")
+        ws.cell(row=sugg_row, column=8, value=img_sugg.current_image_status or "")
+        ws.cell(row=sugg_row, column=9, value=img_sugg.suggested_image_url or "")
+        ws.cell(row=sugg_row, column=10, value=img_sugg.suggested_source_domain or img_sugg.suggested_source or "")
+        ws.cell(row=sugg_row, column=11, value=img_sugg.suggested_source_type or img_sugg.suggested_source or "")
+        ws.cell(row=sugg_row, column=12, value=img_sugg.suggested_source_url or "")
+        ws.cell(row=sugg_row, column=13, value=round(img_sugg.identity_score, 2) if img_sugg.identity_score else 0)
+        ws.cell(row=sugg_row, column=14, value=round(img_sugg.improvement_score, 2) if img_sugg.improvement_score else 0)
+        ws.cell(row=sugg_row, column=15, value=round(img_sugg.confidence, 2) if img_sugg.confidence else 0)
+        ws.cell(row=sugg_row, column=16, value=img_sugg.confidence_label or "")
+        ws.cell(row=sugg_row, column=17, value=img_sugg.reason or "")
+        ws.cell(row=sugg_row, column=18, value=", ".join(img_sugg.verification_signals) if img_sugg.verification_signals else "")
         sugg_row += 1
 
 

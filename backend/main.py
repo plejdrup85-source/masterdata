@@ -45,6 +45,7 @@ from backend.scraper import (
     build_full_index, scan_index_incremental, get_index_stats,
     find_batch_products_in_sitemap,
 )
+from backend.image_search import search_product_images, _confidence_label
 
 # Configure logging
 logging.basicConfig(
@@ -2195,6 +2196,25 @@ async def batch_evaluate_endpoint(data: dict):
     return {"results": results}
 
 
+def _determine_image_status(image_summary) -> str:
+    """Determine the current image quality status from CV analysis."""
+    if not image_summary or not image_summary.main_image_exists:
+        return "missing"
+    if image_summary.image_analyses:
+        main = image_summary.image_analyses[0]
+        score = main.overall_score
+        if score < 40:
+            return "low_quality"
+        elif score < 70:
+            issues = main.issues or []
+            if any("background" in str(i).lower() for i in issues):
+                return "poor_background"
+            elif any("resolution" in str(i).lower() for i in issues):
+                return "low_quality"
+            return "review"
+    return "ok"
+
+
 def _build_image_suggestion(
     product_data: ProductData,
     image_summary,
@@ -2203,31 +2223,11 @@ def _build_image_suggestion(
 ) -> Optional[ImageSuggestion]:
     """Build an image improvement suggestion if the current image is weak/missing.
 
-    Priority: manufacturer image > Norengros image.
-    Manufacturer images can be auto-suggested; Norengros always requires review.
+    This is the LEGACY synchronous path. Used as initial suggestion before
+    the async broad search runs. Priority: manufacturer > Norengros.
     """
     current_url = product_data.image_url
-    current_status = "ok"
-
-    # Determine current image status
-    if not image_summary or not image_summary.main_image_exists:
-        current_status = "missing"
-    elif image_summary.image_analyses:
-        main = image_summary.image_analyses[0]
-        score = main.overall_score
-        if score < 40:
-            current_status = "low_quality"
-        elif score < 70:
-            issues = main.issues or []
-            if any("background" in str(i).lower() for i in issues):
-                current_status = "poor_background"
-            elif any("resolution" in str(i).lower() for i in issues):
-                current_status = "low_quality"
-            else:
-                current_status = "review"
-        # OK images don't need suggestions
-        else:
-            return None
+    current_status = _determine_image_status(image_summary)
 
     if current_status == "ok":
         return None
@@ -2240,7 +2240,12 @@ def _build_image_suggestion(
             suggested_image_url=mfr_data.image_url,
             suggested_source="manufacturer",
             suggested_source_url=mfr_data.source_url,
+            suggested_source_domain=mfr_data.source_url.split("/")[2] if mfr_data.source_url and "/" in mfr_data.source_url else None,
+            suggested_source_type="manufacturer_website",
             confidence=mfr_data.confidence * 0.8,
+            identity_score=mfr_data.confidence * 0.8,
+            improvement_score=0.7 if current_status == "missing" else 0.5,
+            confidence_label="Middels tillit",
             review_required=True,
             reason=f"Produsentbilde funnet ({current_status}). Verifiser produktmatch.",
         )
@@ -2253,48 +2258,48 @@ def _build_image_suggestion(
             suggested_image_url=norengros_data.image_url,
             suggested_source="norengros",
             suggested_source_url=norengros_data.source_url,
+            suggested_source_domain=norengros_data.source_url.split("/")[2] if norengros_data.source_url and "/" in norengros_data.source_url else None,
+            suggested_source_type="catalog_site",
             confidence=0.25,
+            identity_score=0.25,
+            improvement_score=0.5 if current_status == "missing" else 0.3,
+            confidence_label="Lav tillit",
             review_required=True,
             reason=f"Norengros-bilde funnet ({current_status}). Konkurrentkilde — krever manuell godkjenning.",
         )
 
-    # No better image available — report the issue with producer search suggestion
-    if current_status != "ok":
-        # Build a producer search hint using available catalog info
-        search_hint = None
-        producer = product_data.manufacturer
-        supplier_item = product_data.manufacturer_article_number
-        if producer:
-            search_terms = [producer]
-            if supplier_item:
-                search_terms.append(supplier_item)
-            elif product_data.product_name:
-                search_terms.append(product_data.product_name)
-            search_hint = " ".join(search_terms)
+    # No image found via legacy path — return placeholder for broad search to override
+    cdn_url = current_url or (
+        f"https://res.onemed.com/NO/ARWebBig/{product_data.article_number}.jpg"
+    )
+    search_hint = None
+    producer = product_data.manufacturer
+    supplier_item = product_data.manufacturer_article_number
+    if producer:
+        search_terms = [producer]
+        if supplier_item:
+            search_terms.append(supplier_item)
+        elif product_data.product_name:
+            search_terms.append(product_data.product_name)
+        search_hint = " ".join(search_terms)
 
-        reason = f"Bildestatus: {current_status}. Ingen bedre bildekilde funnet automatisk."
-        if search_hint:
-            reason += f" Foreslått søk hos produsent: \"{search_hint}\""
+    reason = f"Bildestatus: {current_status}. Ingen bedre bildekilde funnet i primærkilder."
+    if search_hint:
+        reason += f" Søker bredt på nett: \"{search_hint}\""
 
-        # Always include the CDN image URL so the user has a reference.
-        # For producer_search suggestions, suggested_image_url points to the
-        # current CDN image (the best we have), and reason explains what to do.
-        cdn_url = current_url or (
-            f"https://res.onemed.com/NO/ARWebBig/{product_data.article_number}.jpg"
-        )
-
-        return ImageSuggestion(
-            current_image_url=cdn_url,
-            current_image_status=current_status,
-            suggested_image_url=cdn_url,  # Best available image URL
-            suggested_source="producer_search" if producer else "current_cdn",
-            suggested_source_url=product_data.product_url,  # Link to product page if available
-            confidence=0.0,
-            review_required=True,
-            reason=reason,
-        )
-
-    return None
+    return ImageSuggestion(
+        current_image_url=cdn_url,
+        current_image_status=current_status,
+        suggested_image_url=cdn_url,
+        suggested_source="producer_search" if producer else "current_cdn",
+        suggested_source_url=product_data.product_url,
+        confidence=0.0,
+        identity_score=0.0,
+        improvement_score=0.0,
+        confidence_label="Krever manuell vurdering",
+        review_required=True,
+        reason=reason,
+    )
 
 
 def _apply_enrichment_to_analysis(analysis: ProductAnalysis) -> None:
@@ -2618,26 +2623,68 @@ async def _run_analysis(
                         analysis.norengros_lookup = norengros_data
 
                     # Step 5b: Image suggestion logic
-                    # Also pass Jeeves data to enrich producer search hints
+                    # First: legacy path (manufacturer lookup / Norengros)
                     analysis.image_suggestion = _build_image_suggestion(
                         product_data, image_summary, mfr_data, norengros_data,
                     )
-                    # Step 5b+: For low-quality images without a suggested replacement,
-                    # try to find a better image from the producer if we have catalog info
-                    if (analysis.image_suggestion
-                            and analysis.image_suggestion.current_image_status in ("low_quality", "missing")
-                            and not analysis.image_suggestion.suggested_image_url
-                            and jeeves_data):
-                        # Use Jeeves supplier + supplier_item_no for a targeted search hint
-                        producer = jeeves_data.supplier or product_data.manufacturer
-                        supplier_item = jeeves_data.supplier_item_no or product_data.manufacturer_article_number
-                        if producer and supplier_item:
-                            analysis.image_suggestion.reason = (
-                                f"Bildekvalitet lav ({analysis.image_suggestion.current_image_status}). "
-                                f"Søk hos produsent anbefalt: {producer} (art.nr: {supplier_item}). "
-                                f"Produsentens nettside bør prioriteres som bildekilde."
+
+                    # Step 5b+: Broad web image search
+                    # Triggered when image is missing/low quality and no good suggestion yet
+                    current_img_status = _determine_image_status(image_summary)
+                    needs_broad_search = (
+                        current_img_status in ("missing", "low_quality", "poor_background", "review")
+                        and (
+                            not analysis.image_suggestion
+                            or analysis.image_suggestion.confidence < 0.4
+                        )
+                    )
+                    if needs_broad_search:
+                        job.current_step = "image_search"
+                        # Gather all available identifiers from product + Jeeves
+                        mfr_name = product_data.manufacturer or (jeeves_data.supplier if jeeves_data else "") or ""
+                        mfr_artnr = product_data.manufacturer_article_number or (jeeves_data.supplier_item_no if jeeves_data else "") or ""
+                        prod_desc = product_data.product_name or (jeeves_data.item_description if jeeves_data else "") or ""
+                        prod_spec = product_data.specification or (jeeves_data.specification if jeeves_data else "") or ""
+                        prod_gid = (jeeves_data.gid if jeeves_data else "") or ""
+
+                        try:
+                            image_candidates = await search_product_images(
+                                article_number=article_number,
+                                manufacturer_name=mfr_name,
+                                manufacturer_artnr=mfr_artnr,
+                                product_description=prod_desc,
+                                specification=prod_spec,
+                                current_image_status=current_img_status,
+                                gid=prod_gid,
                             )
-                            analysis.image_suggestion.suggested_source = "producer_search"
+
+                            if image_candidates:
+                                best = image_candidates[0]
+                                # Only use the candidate if it's better than current suggestion
+                                if (not analysis.image_suggestion
+                                        or best.confidence > analysis.image_suggestion.confidence):
+                                    analysis.image_suggestion = ImageSuggestion(
+                                        current_image_url=product_data.image_url,
+                                        current_image_status=current_img_status,
+                                        suggested_image_url=best.image_url,
+                                        suggested_source=best.source_name,
+                                        suggested_source_url=best.source_url,
+                                        suggested_source_domain=best.source_domain,
+                                        suggested_source_type=best.source_type,
+                                        confidence=best.confidence,
+                                        identity_score=best.identity_score,
+                                        improvement_score=best.improvement_score,
+                                        confidence_label=_confidence_label(best.confidence),
+                                        review_required=best.confidence < 0.7,
+                                        reason=best.reason,
+                                        verification_signals=best.verification_details,
+                                    )
+                                    logger.info(
+                                        f"[{job_id}] {article_number}: Broad image search found better "
+                                        f"candidate (conf={best.confidence:.2f}, source={best.source_name})"
+                                    )
+                        except Exception as e:
+                            logger.debug(f"[{job_id}] Broad image search failed for {article_number}: {e}")
 
                     # Apply enrichment suggestions to field_analyses (PDF takes priority)
                     _apply_enrichment_to_analysis(analysis)
