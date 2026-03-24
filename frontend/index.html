@@ -4834,7 +4834,7 @@
                     html += `<td style="padding:0.5rem">${b.total_rows || 0}</td>`;
                     html += `<td style="padding:0.5rem;color:#166534;font-weight:600">${b.valid_examples || 0}</td>`;
                     html += `<td style="padding:0.5rem;color:#991b1b">${b.rejected_rows || 0}</td>`;
-                    html += `<td style="padding:0.5rem"><button class="btn" style="font-size:0.72rem;padding:0.2rem 0.5rem;background:#fef2f2;color:#991b1b;border:1px solid #fecaca" onclick="deleteLearningBatch('${b.batch_id}')">Slett</button></td>`;
+                    html += `<td style="padding:0.5rem"><button class="btn" style="font-size:0.72rem;padding:0.2rem 0.5rem;background:#fef2f2;color:#991b1b;border:1px solid #fecaca" onclick="deleteLearningBatch('${escapeHtml(b.batch_id)}')">Slett</button></td>`;
                     html += `</tr>`;
                 }
                 html += '</tbody></table>';

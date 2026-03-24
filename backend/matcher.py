@@ -474,11 +474,13 @@ def _apply_learning_boost(
     input_name: str,
     input_spec: str,
     candidates: list[MatchCandidate],
+    match_mode: str = MatchMode.STANDARD.value,
 ) -> None:
     """Boost candidates that appear in historical learning examples.
 
     Looks up learned article numbers for similar inputs and adds a bonus
-    to their relevance_score. Also adds tags and explanations.
+    to their relevance_score, then recomputes final_score using the proper
+    mode-aware formula and re-tags candidates.
     """
     if not candidates:
         return
@@ -493,6 +495,7 @@ def _apply_learning_boost(
     if not learned:
         return
 
+    any_boosted = False
     for c in candidates:
         info = learned.get(c.article_number)
         if not info:
@@ -503,8 +506,9 @@ def _apply_learning_boost(
         scale = min(1.0, (similarity - LEARNING_MIN_SIMILARITY) / (1.0 - LEARNING_MIN_SIMILARITY) + 0.5)
         boost = LEARNING_BOOST_POINTS * scale
 
+        # Only boost relevance_score — final_score is recomputed below
         c.relevance_score = min(100.0, c.relevance_score + boost)
-        c.final_score = min(100.0, c.final_score + boost)
+        any_boosted = True
 
         # Tag and explain
         if "learned_match" not in c.tags:
@@ -526,12 +530,17 @@ def _apply_learning_boost(
         else:
             c.ai_explanation = explanation
 
-    # Re-sort candidates by updated final_score
-    candidates.sort(key=lambda c: c.final_score, reverse=True)
-
-    # Re-rank
-    for i, c in enumerate(candidates, 1):
-        c.rank = i
+    if any_boosted:
+        # Recompute final scores using the mode-aware formula (preserves hardcore/own_brand/strict logic)
+        _compute_final_scores(candidates, match_mode)
+        # Re-tag based on new ranking (best_match, billigst, etc.)
+        # First clear ranking-dependent tags
+        for c in candidates:
+            c.tags = [t for t in c.tags if t not in ("best_match", "billigst", "anbefalt_hardcore")]
+        _tag_candidates(candidates, match_mode)
+        # Re-rank
+        for i, c in enumerate(candidates, 1):
+            c.rank = i
 
 
 # ── AI-assisted relevance verification ──
@@ -734,7 +743,7 @@ async def match_product(
         )
 
     # Step 3: Learning boost — use historical examples to boost candidates
-    _apply_learning_boost(input_name, input_spec, candidates)
+    _apply_learning_boost(input_name, input_spec, candidates, match_mode=match_mode)
 
     # Step 4: Filter and trim
     # Remove hard mismatches from display

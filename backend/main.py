@@ -3043,6 +3043,9 @@ from backend.job_store import (
 from backend.learning_store import (
     add_example as _add_learning_example,
     verify_learning_admin as _verify_learning_admin,
+    add_examples_batch, get_all_examples, get_stats as get_learning_stats,
+    list_batches as list_learning_batches, delete_batch as delete_learning_batch,
+    register_batch, find_matching_examples, reindex as reindex_learning,
 )
 
 # In-memory storage for match jobs (also persisted to disk)
@@ -4042,13 +4045,6 @@ async def select_manual_product(job_id: str, data: dict = Body(...)):
 
 
 # ── Learning Module Endpoints ──
-
-from backend.learning_store import (
-    add_examples_batch, get_all_examples, get_stats as get_learning_stats,
-    list_batches as list_learning_batches, delete_batch as delete_learning_batch,
-    register_batch, find_matching_examples, reindex as reindex_learning,
-)
-
 
 @app.post("/api/learning/auth")
 async def learning_auth(data: dict = Body(...)):
