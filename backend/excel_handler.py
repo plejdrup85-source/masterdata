@@ -105,6 +105,7 @@ def create_output_excel(
     analysis_mode: str = "full_enrichment",
     focus_areas: list[str] | None = None,
     excluded_products: list[dict] | None = None,
+    suggestion_reviews: dict | None = None,
 ) -> None:
     """Create a structured Excel output file with analysis results.
 
@@ -148,7 +149,7 @@ def create_output_excel(
         _create_improvements_sheet(ws_improvements, results)
 
         ws_inriver = wb.create_sheet("Inriver Import")
-        _create_inriver_import_sheet(ws_inriver, results)
+        _create_inriver_import_sheet(ws_inriver, results, suggestion_reviews=suggestion_reviews)
 
         # Produsentoppfølging: only include if there are actual manufacturer-contact items
         mfr_contact_results = [
@@ -1684,18 +1685,21 @@ def _is_material_change(current: str | None, suggested: str | None) -> bool:
     return True
 
 
-def _create_inriver_import_sheet(ws, results: list[ProductAnalysis]) -> None:
+def _create_inriver_import_sheet(ws, results: list[ProductAnalysis], suggestion_reviews: dict | None = None) -> None:
     """Create the Inriver Import staging sheet.
 
     Only includes rows where at least one field has a genuine improvement.
-    Each field has an approval column (Godkjent/Ikke godkjent).
+    Each field has an approval column (Godkjent/Ikke godkjent/Avslått).
     Export logic: a value is included in the import only if:
     1. There is a suggested improvement
     2. The suggestion is materially different from the current value
     3. The approval column is set to 'Godkjent'
 
-    Unchanged values and empty placeholders are NOT exported.
+    When suggestion_reviews are provided (from the frontend review UI),
+    the approval column reflects the user's decision instead of defaulting
+    to 'Ikke godkjent'.
     """
+    reviews = suggestion_reviews or {}
     # Field definitions for the import sheet
     import_fields = [
         ("Produktnavn", lambda r: r.product_data.product_name or ""),
@@ -1765,6 +1769,7 @@ def _create_inriver_import_sheet(ws, results: list[ProductAnalysis]) -> None:
         # Check each field for material changes
         has_any_change = False
         field_data = []
+        artnr_reviews = reviews.get(result.article_number, {})
         for field_name, current_fn in import_fields:
             current_val = current_fn(result)
             suggested_val = _get_suggestion_for_field(result, field_name) or ""
@@ -1777,7 +1782,17 @@ def _create_inriver_import_sheet(ws, results: list[ProductAnalysis]) -> None:
             is_material = _is_material_change(current_val, suggested_val)
             # Only include the suggestion if it's a material change
             display_suggestion = suggested_val if is_material else ""
-            approval_default = "Ikke godkjent"  # Conservative default
+
+            # Determine approval status from saved reviews
+            field_review = artnr_reviews.get(field_name, {})
+            review_status = field_review.get("status", "")
+            if review_status == "accepted":
+                approval_default = "Godkjent"
+            elif review_status == "rejected":
+                approval_default = "Avslått"
+            else:
+                approval_default = "Ikke godkjent"  # Conservative default
+
             if is_material:
                 has_any_change = True
             field_data.append((current_val, display_suggestion, approval_default))

@@ -179,6 +179,13 @@ HISTORY_DIR.mkdir(parents=True, exist_ok=True)
 HISTORY_EXCEL_DIR = HISTORY_DIR / "exports"
 HISTORY_EXCEL_DIR.mkdir(parents=True, exist_ok=True)
 HISTORY_INDEX_FILE = HISTORY_DIR / "index.json"
+
+# Suggestion review persistence directory
+REVIEW_DIR = Path(os.environ.get("REVIEW_DIR", "data/reviews"))
+REVIEW_DIR.mkdir(parents=True, exist_ok=True)
+
+# In-memory cache for suggestion reviews: {job_id: {artnr: {field_name: {status, comment}}}}
+_suggestion_reviews: dict[str, dict] = {}
 HISTORY_MAX_ENTRIES = 100
 
 
@@ -906,6 +913,9 @@ async def download_result(
     if job.status != JobStatus.COMPLETED:
         raise HTTPException(400, "Analysen er ikke fullført enda")
 
+    # Load any saved suggestion reviews for this job
+    reviews = _load_suggestion_reviews(job_id)
+
     # If threshold is set, regenerate filtered export
     if threshold is not None and 0 < threshold <= 100:
         filtered_results = []
@@ -925,10 +935,28 @@ async def download_result(
         create_output_excel(
             filtered_results, filtered_path,
             analysis_mode=job.analysis_mode, focus_areas=job.focus_areas,
+            suggestion_reviews=reviews,
         )
         return FileResponse(
             filtered_path,
             filename=f"masterdata_kvalitetssjekk_{job_id}_under{threshold}.xlsx",
+            media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+        )
+
+    # Regenerate Excel with latest review decisions if reviews exist
+    if reviews and job.output_file:
+        timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+        reviewed_filename = f"masterdata_reviewed_{job_id}_{timestamp}.xlsx"
+        reviewed_path = str(OUTPUT_DIR / reviewed_filename)
+        create_output_excel(
+            job.results, reviewed_path,
+            analysis_mode=job.analysis_mode, focus_areas=job.focus_areas,
+            excluded_products=job.excluded_products,
+            suggestion_reviews=reviews,
+        )
+        return FileResponse(
+            reviewed_path,
+            filename=f"masterdata_kvalitetssjekk_{job_id}.xlsx",
             media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
         )
 
@@ -1035,6 +1063,95 @@ async def get_results(job_id: str):
             for r in job.results
         ],
     }
+
+
+# ── Suggestion Review API ──
+
+
+def _load_suggestion_reviews(job_id: str) -> dict:
+    """Load suggestion reviews from memory or disk."""
+    if job_id not in _suggestion_reviews:
+        disk_path = REVIEW_DIR / f"{job_id}.json"
+        if disk_path.exists():
+            try:
+                _suggestion_reviews[job_id] = json.loads(disk_path.read_text(encoding="utf-8"))
+            except Exception:
+                _suggestion_reviews[job_id] = {}
+        else:
+            _suggestion_reviews[job_id] = {}
+    return _suggestion_reviews[job_id]
+
+
+def _persist_suggestion_reviews(job_id: str):
+    """Write suggestion reviews to disk."""
+    data = _suggestion_reviews.get(job_id, {})
+    disk_path = REVIEW_DIR / f"{job_id}.json"
+    disk_path.write_text(json.dumps(data, ensure_ascii=False, indent=2), encoding="utf-8")
+
+
+@app.get("/api/reviews/{job_id}")
+async def get_suggestion_reviews(job_id: str):
+    """Get all suggestion review decisions for a job."""
+    reviews = _load_suggestion_reviews(job_id)
+    return {"job_id": job_id, "reviews": reviews}
+
+
+@app.put("/api/reviews/{job_id}/{article_number}/{field_name}")
+async def update_suggestion_review(job_id: str, article_number: str, field_name: str, request: Request):
+    """Accept or reject a single enrichment suggestion.
+
+    Body: {"status": "accepted"|"rejected"|"pending", "comment": "optional"}
+    """
+    data = await request.json()
+    new_status = data.get("status", "pending")
+    if new_status not in {"pending", "accepted", "rejected"}:
+        raise HTTPException(400, f"Ugyldig status: {new_status}")
+
+    reviews = _load_suggestion_reviews(job_id)
+    if article_number not in reviews:
+        reviews[article_number] = {}
+    reviews[article_number][field_name] = {
+        "status": new_status,
+        "comment": data.get("comment", ""),
+    }
+    _persist_suggestion_reviews(job_id)
+
+    return {
+        "status": "ok",
+        "article_number": article_number,
+        "field_name": field_name,
+        "review_status": new_status,
+    }
+
+
+@app.put("/api/reviews/{job_id}/bulk")
+async def bulk_update_suggestion_reviews(job_id: str, request: Request):
+    """Bulk accept or reject multiple suggestions.
+
+    Body: {
+        "items": [{"article_number": "...", "field_name": "..."}],
+        "status": "accepted"|"rejected"|"pending"
+    }
+    """
+    data = await request.json()
+    new_status = data.get("status", "pending")
+    items = data.get("items", [])
+    if new_status not in {"pending", "accepted", "rejected"}:
+        raise HTTPException(400, f"Ugyldig status: {new_status}")
+
+    reviews = _load_suggestion_reviews(job_id)
+    count = 0
+    for item in items:
+        artnr = item.get("article_number", "")
+        field = item.get("field_name", "")
+        if artnr and field:
+            if artnr not in reviews:
+                reviews[artnr] = {}
+            reviews[artnr][field] = {"status": new_status, "comment": ""}
+            count += 1
+
+    _persist_suggestion_reviews(job_id)
+    return {"status": "ok", "updated": count, "review_status": new_status}
 
 
 # ── Job History API ──
