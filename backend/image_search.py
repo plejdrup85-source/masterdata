@@ -610,8 +610,19 @@ def get_approved_images(results: list) -> list[dict]:
 async def download_approved_images_as_zip(
     results: list,
     output_path: str,
+    jpeg_quality: int = 90,
 ) -> dict:
-    """Download all approved images and package them as a ZIP file.
+    """Download all approved images, convert to JPEG, and package as a ZIP file.
+
+    ALL images are converted to JPEG (.jpg) regardless of source format.
+    This ensures consistent output for PIM/Inriver import.
+
+    Conversion handles:
+      - WEBP → JPEG
+      - PNG (with transparency) → JPEG with white background
+      - GIF (first frame) → JPEG
+      - RGBA/P/CMYK → RGB → JPEG
+      - Already-JPEG → re-saved with consistent quality settings
 
     Returns dict with:
       - zip_path: path to created ZIP file
@@ -621,6 +632,7 @@ async def download_approved_images_as_zip(
     """
     import zipfile
     import io
+    from PIL import Image
 
     approved = get_approved_images(results)
 
@@ -643,15 +655,16 @@ async def download_approved_images_as_zip(
             for item in approved:
                 url = item["image_url"]
                 base_name = item["article_number"]
-                ext = _guess_file_extension(url)
 
-                # Handle multiple images per product
+                # Always .jpg extension
                 if base_name in filename_counter:
                     filename_counter[base_name] += 1
-                    filename = f"{base_name}-{filename_counter[base_name]}{ext}"
+                    filename = f"{base_name}-{filename_counter[base_name]}.jpg"
                 else:
                     filename_counter[base_name] = 1
-                    filename = f"{base_name}{ext}"
+                    filename = f"{base_name}.jpg"
+
+                original_format = _guess_file_extension(url).lstrip(".")
 
                 try:
                     response = await client.get(url)
@@ -673,9 +686,43 @@ async def download_approved_images_as_zip(
                         })
                         continue
 
-                    zf.writestr(filename, response.content)
+                    # Convert to JPEG
+                    jpeg_bytes = _convert_to_jpeg(
+                        response.content, quality=jpeg_quality
+                    )
+                    if jpeg_bytes is None:
+                        failed.append({
+                            "article_number": base_name,
+                            "url": url,
+                            "reason": "Konvertering til JPEG feilet",
+                        })
+                        logger.warning(
+                            f"JPEG conversion failed for {base_name} "
+                            f"(original: {original_format}, url: {url})"
+                        )
+                        continue
+
+                    # Validate the output is valid JPEG before adding to ZIP
+                    if not _validate_jpeg(jpeg_bytes):
+                        failed.append({
+                            "article_number": base_name,
+                            "url": url,
+                            "reason": "JPEG-validering feilet etter konvertering",
+                        })
+                        logger.warning(
+                            f"JPEG validation failed for {base_name} after conversion"
+                        )
+                        continue
+
+                    zf.writestr(filename, jpeg_bytes)
                     downloaded.append(filename)
-                    logger.info(f"Downloaded image: {filename} from {url}")
+                    logger.info(
+                        f"Image OK: {filename} "
+                        f"(original: {original_format}, "
+                        f"size: {len(response.content) // 1024}KB → "
+                        f"{len(jpeg_bytes) // 1024}KB JPEG) "
+                        f"from {url}"
+                    )
 
                 except Exception as e:
                     failed.append({
@@ -685,9 +732,119 @@ async def download_approved_images_as_zip(
                     })
                     logger.warning(f"Failed to download image {url}: {e}")
 
+    if downloaded:
+        logger.info(
+            f"ZIP created: {output_path} — "
+            f"{len(downloaded)} images OK, {len(failed)} failed"
+        )
+    else:
+        logger.warning(
+            f"ZIP not created — all {len(failed)} images failed"
+        )
+
     return {
         "zip_path": output_path if downloaded else None,
         "downloaded": downloaded,
         "failed": failed,
         "total": len(approved),
     }
+
+
+def _convert_to_jpeg(
+    image_bytes: bytes,
+    quality: int = 90,
+    max_dimension: int = 4096,
+) -> Optional[bytes]:
+    """Convert any image format to JPEG with consistent settings.
+
+    Handles:
+      - RGBA / P with transparency → white background compositing
+      - CMYK → RGB conversion
+      - GIF → first frame only
+      - WEBP → full decode and re-encode
+      - Very large images → downscaled to max_dimension
+
+    Returns JPEG bytes or None if conversion fails.
+    """
+    import io
+    from PIL import Image, UnidentifiedImageError
+
+    try:
+        img = Image.open(io.BytesIO(image_bytes))
+    except (UnidentifiedImageError, Exception) as e:
+        logger.warning(f"Could not open image: {e}")
+        return None
+
+    try:
+        original_mode = img.mode
+        original_format = img.format or "unknown"
+
+        # For animated GIF/WEBP, use first frame
+        if hasattr(img, "n_frames") and img.n_frames > 1:
+            img.seek(0)
+
+        # Handle palette mode (P) — may have transparency
+        if img.mode == "P":
+            img = img.convert("RGBA")
+
+        # Handle transparency: composite onto white background
+        if img.mode in ("RGBA", "LA"):
+            background = Image.new("RGB", img.size, (255, 255, 255))
+            # Split out alpha channel for compositing
+            if img.mode == "LA":
+                img = img.convert("RGBA")
+            background.paste(img, mask=img.split()[3])
+            img = background
+        elif img.mode == "CMYK":
+            img = img.convert("RGB")
+        elif img.mode not in ("RGB",):
+            img = img.convert("RGB")
+
+        # Downscale very large images
+        w, h = img.size
+        if max(w, h) > max_dimension:
+            ratio = max_dimension / max(w, h)
+            new_size = (int(w * ratio), int(h * ratio))
+            img = img.resize(new_size, Image.LANCZOS)
+            logger.info(
+                f"Downscaled image from {w}x{h} to {new_size[0]}x{new_size[1]}"
+            )
+
+        # Save as JPEG
+        buffer = io.BytesIO()
+        img.save(
+            buffer,
+            format="JPEG",
+            quality=quality,
+            optimize=True,
+            progressive=True,
+        )
+        jpeg_bytes = buffer.getvalue()
+
+        logger.debug(
+            f"Converted {original_format} ({original_mode}) → JPEG "
+            f"({len(image_bytes)} → {len(jpeg_bytes)} bytes)"
+        )
+        return jpeg_bytes
+
+    except Exception as e:
+        logger.warning(f"JPEG conversion error: {e}")
+        return None
+
+
+def _validate_jpeg(data: bytes) -> bool:
+    """Validate that bytes are a valid, openable JPEG image."""
+    import io
+    from PIL import Image
+
+    if not data or len(data) < 100:
+        return False
+    # Check JPEG magic bytes (SOI marker)
+    if data[:2] != b"\xff\xd8":
+        return False
+    try:
+        img = Image.open(io.BytesIO(data))
+        img.verify()
+        return True
+    except Exception:
+        return False
