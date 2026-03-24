@@ -33,6 +33,7 @@ def verify_learning_admin(password: str) -> bool:
     """Verify admin password for learning module access."""
     admin_pw = os.environ.get(LEARNING_ADMIN_PASSWORD_ENV)
     if not admin_pw:
+        logger.warning(f"Environment variable {LEARNING_ADMIN_PASSWORD_ENV} is not set — learning module access blocked")
         return False
     return password == admin_pw
 
@@ -45,7 +46,11 @@ def _load_examples() -> list[dict]:
         return []
     try:
         return json.loads(EXAMPLES_FILE.read_text(encoding="utf-8"))
-    except (json.JSONDecodeError, OSError):
+    except json.JSONDecodeError as e:
+        logger.error(f"Learning examples file is corrupted: {e}")
+        return []
+    except OSError as e:
+        logger.error(f"Failed to read learning examples: {e}")
         return []
 
 
@@ -58,6 +63,7 @@ def _save_examples(examples: list[dict]) -> None:
         logger.error(f"Failed to save learning examples: {e}")
         if tmp.exists():
             tmp.unlink(missing_ok=True)
+        raise
 
 
 def add_example(
@@ -73,7 +79,13 @@ def add_example(
     """Add a single learning example.
 
     Sources: 'ui_override', 'ui_approval', 'historical_import'
+    Returns the example dict, or None if inputs are invalid.
     """
+    if not input_text or not input_text.strip():
+        return None
+    if not matched_article or not matched_article.strip():
+        return None
+
     example = {
         "id": str(uuid.uuid4())[:12],
         "input_text": input_text.strip(),
@@ -183,7 +195,11 @@ def _load_batches() -> list[dict]:
         return []
     try:
         return json.loads(BATCHES_FILE.read_text(encoding="utf-8"))
-    except (json.JSONDecodeError, OSError):
+    except json.JSONDecodeError as e:
+        logger.error(f"Batch metadata file is corrupted: {e}")
+        return []
+    except OSError as e:
+        logger.error(f"Failed to read batch metadata: {e}")
         return []
 
 
@@ -196,6 +212,7 @@ def _save_batches(batches: list[dict]) -> None:
         logger.error(f"Failed to save batch metadata: {e}")
         if tmp.exists():
             tmp.unlink(missing_ok=True)
+        raise
 
 
 def register_batch(

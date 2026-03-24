@@ -1372,39 +1372,76 @@
         <!-- ═══════════════════════════════════════════════════════ -->
         <div id="moduleAnbud" style="display:none">
 
-        <div class="card" id="anbudConfigCard">
-            <h2>Fyll ut anbudsprisark &mdash; Match kommunens produkter mot katalogen</h2>
+        <!-- ── STEP 1: Upload File ── -->
+        <div class="card" id="anbudStep1">
+            <h2>Steg 1: Last opp anbudsprisark</h2>
             <p style="color:var(--text-muted);font-size:0.9rem;margin-bottom:1.25rem">
-                Last opp anbudsprisarket (Excel). Systemet matcher produktene mot OneMed-katalogen og fyller ut priser.
-                Samme matchinglogikk og profiler som standard produktmatching.
+                Last opp anbudsprisarket (Excel). Systemet analyserer kolonnene og lar deg velge mapping f&oslash;r matching startes.
             </p>
 
-            <!-- Match Mode Selection (shared styling) -->
+            <div class="upload-area" id="anbudUploadArea" style="padding:2rem">
+                <svg class="upload-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" style="width:36px;height:36px">
+                    <path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/>
+                    <polyline points="17 8 12 3 7 8"/>
+                    <line x1="12" y1="3" x2="12" y2="15"/>
+                </svg>
+                <p>Dra og slipp anbudsprisark (Excel)</p>
+                <p style="font-size:0.78rem;color:#94a3b8;margin-top:0.3rem">
+                    Systemet detekterer automatisk kolonner for produktnavn, spesifikasjon og artikkelnummer.
+                </p>
+                <p class="filename hidden" id="anbudFileName"></p>
+                <input type="file" id="anbudFileInput" accept=".xlsx" style="position:absolute;inset:0;opacity:0;cursor:pointer">
+            </div>
+            <p id="anbudAnalyzeError" style="color:#ef4444;font-size:0.85rem;margin-top:0.5rem;display:none"></p>
+            <p id="anbudAnalyzeStatus" style="color:var(--text-muted);font-size:0.85rem;margin-top:0.5rem;display:none"></p>
+        </div>
+
+        <!-- ── STEP 2: Column Mapping + Match Mode + Job Identity ── -->
+        <div class="card" id="anbudStep2" style="display:none">
+            <h2>Steg 2: Kolonnemapping og innstillinger</h2>
+
+            <!-- Column Classification -->
+            <div style="margin-bottom:1.25rem">
+                <div style="font-size:0.95rem;font-weight:600;margin-bottom:0.5rem;color:#0369a1">Kolonnemapping</div>
+                <p style="font-size:0.82rem;color:var(--text-muted);margin-bottom:0.75rem">
+                    Systemet har klassifisert kolonnene fra filen. Juster om n&oslash;dvendig.
+                    Kolonner markert som <strong>Input</strong> brukes til matching, <strong>Hopp over</strong> ignoreres.
+                </p>
+                <div id="anbudColumnMapping"></div>
+            </div>
+
+            <!-- Preview Table -->
+            <div style="margin-bottom:1.25rem">
+                <div style="font-size:0.95rem;font-weight:600;margin-bottom:0.5rem;color:#0369a1">Forh&aring;ndsvisning (f&oslash;rste rader)</div>
+                <div id="anbudPreviewTable" style="overflow-x:auto;font-size:0.8rem;max-height:250px;overflow-y:auto"></div>
+            </div>
+
+            <!-- Match Mode Selection -->
             <div style="margin-bottom:1.25rem;padding:1rem;background:#f0f9ff;border-radius:8px;border:1px solid #bae6fd">
                 <div style="font-size:0.95rem;font-weight:600;margin-bottom:0.75rem;color:#0369a1">Matchmodus</div>
                 <div style="display:flex;gap:0.75rem;flex-wrap:wrap" id="anbudModeContainer">
-                    <label class="anbud-mode-label active" data-mode="standard" onclick="setAnbudMode('standard')" style="display:flex;align-items:flex-start;gap:0.5rem;cursor:pointer;background:#fff;padding:0.75rem 1rem;border-radius:8px;border:2px solid var(--primary);flex:1;min-width:220px">
+                    <label class="anbud-mode-label active" data-mode="standard" onclick="setAnbudMode('standard')" style="display:flex;align-items:flex-start;gap:0.5rem;cursor:pointer;background:#fff;padding:0.75rem 1rem;border-radius:8px;border:2px solid var(--primary);flex:1;min-width:200px">
                         <input type="radio" name="anbudMode" value="standard" checked style="margin-top:3px">
                         <div>
                             <div style="font-weight:600;font-size:0.9rem">Standard</div>
                             <div style="font-size:0.78rem;color:var(--text-muted);margin-top:0.2rem">Beste semantiske match vinner.</div>
                         </div>
                     </label>
-                    <label class="anbud-mode-label" data-mode="hardcore_price" onclick="setAnbudMode('hardcore_price')" style="display:flex;align-items:flex-start;gap:0.5rem;cursor:pointer;background:#fff;padding:0.75rem 1rem;border-radius:8px;border:2px solid var(--border);flex:1;min-width:220px">
+                    <label class="anbud-mode-label" data-mode="hardcore_price" onclick="setAnbudMode('hardcore_price')" style="display:flex;align-items:flex-start;gap:0.5rem;cursor:pointer;background:#fff;padding:0.75rem 1rem;border-radius:8px;border:2px solid var(--border);flex:1;min-width:200px">
                         <input type="radio" name="anbudMode" value="hardcore_price" style="margin-top:3px">
                         <div>
                             <div style="font-weight:600;font-size:0.9rem;color:#b45309">Hardcore Pris Prioritet</div>
                             <div style="font-size:0.78rem;color:var(--text-muted);margin-top:0.2rem">Billigste relevante alternativ.</div>
                         </div>
                     </label>
-                    <label class="anbud-mode-label" data-mode="own_brand" onclick="setAnbudMode('own_brand')" style="display:flex;align-items:flex-start;gap:0.5rem;cursor:pointer;background:#fff;padding:0.75rem 1rem;border-radius:8px;border:2px solid var(--border);flex:1;min-width:220px">
+                    <label class="anbud-mode-label" data-mode="own_brand" onclick="setAnbudMode('own_brand')" style="display:flex;align-items:flex-start;gap:0.5rem;cursor:pointer;background:#fff;padding:0.75rem 1rem;border-radius:8px;border:2px solid var(--border);flex:1;min-width:200px">
                         <input type="radio" name="anbudMode" value="own_brand" style="margin-top:3px">
                         <div>
                             <div style="font-weight:600;font-size:0.9rem;color:#047857">Egne merkevarer</div>
                             <div style="font-size:0.78rem;color:var(--text-muted);margin-top:0.2rem">Prioriterer husmerkevarer.</div>
                         </div>
                     </label>
-                    <label class="anbud-mode-label" data-mode="strict_quality" onclick="setAnbudMode('strict_quality')" style="display:flex;align-items:flex-start;gap:0.5rem;cursor:pointer;background:#fff;padding:0.75rem 1rem;border-radius:8px;border:2px solid var(--border);flex:1;min-width:220px">
+                    <label class="anbud-mode-label" data-mode="strict_quality" onclick="setAnbudMode('strict_quality')" style="display:flex;align-items:flex-start;gap:0.5rem;cursor:pointer;background:#fff;padding:0.75rem 1rem;border-radius:8px;border:2px solid var(--border);flex:1;min-width:200px">
                         <input type="radio" name="anbudMode" value="strict_quality" style="margin-top:3px">
                         <div>
                             <div style="font-weight:600;font-size:0.9rem;color:#7c3aed">Streng kvalitet</div>
@@ -1430,30 +1467,14 @@
                 </div>
             </div>
 
-            <!-- File Upload -->
-            <div class="upload-area" id="anbudUploadArea" style="padding:2rem">
-                <svg class="upload-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" style="width:36px;height:36px">
-                    <path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/>
-                    <polyline points="17 8 12 3 7 8"/>
-                    <line x1="12" y1="3" x2="12" y2="15"/>
-                </svg>
-                <p>Dra og slipp anbudsprisark (Excel)</p>
-                <p style="font-size:0.78rem;color:#94a3b8;margin-top:0.3rem">
-                    Forventede kolonner: Produktnavn, Spesifikasjon (valgfri), Artikkelnr (valgfri)
-                </p>
-                <p class="filename hidden" id="anbudFileName"></p>
-                <input type="file" id="anbudFileInput" accept=".xlsx" style="position:absolute;inset:0;opacity:0;cursor:pointer">
-            </div>
-
-            <div class="column-info hidden" id="anbudColumnInfo"></div>
-
-            <div class="actions">
-                <button class="btn btn-primary" id="anbudStartBtn" disabled>Start matching</button>
+            <div style="display:flex;gap:0.75rem;align-items:center">
+                <button class="btn" style="background:#e2e8f0;color:#475569" onclick="anbudBackToStep1()">Tilbake</button>
+                <button class="btn btn-primary" id="anbudStartBtn" disabled>Start anbudsbehandling</button>
                 <span id="anbudFileInfo" style="color:var(--text-muted);font-size:0.9rem"></span>
             </div>
         </div>
 
-        <!-- Anbud Progress (reuses matching progress display) -->
+        <!-- ── STEP 3: Progress ── -->
         <div class="card progress-section" id="anbudProgressSection">
             <h2 id="anbudProgressTitle">Matching p&aring;g&aring;r...</h2>
             <div class="progress-bar-container">
@@ -4489,7 +4510,10 @@
             }
         }
 
-        // ── Anbud Module ──
+        // ── Anbud Module (multi-step: upload → analyze → map → mode → start) ──
+
+        let anbudAnalysis = null;  // Result from /api/anbud/analyze
+        let anbudColumnRoles = []; // User-editable column roles
 
         function setAnbudMode(mode) {
             anbudMode = mode;
@@ -4508,7 +4532,9 @@
         function updateAnbudStartBtn() {
             const name = document.getElementById('anbudJobName').value.trim();
             const user = document.getElementById('anbudCreatedBy').value.trim();
-            document.getElementById('anbudStartBtn').disabled = !(anbudFile && name && user);
+            // Require at least one 'input' column mapped
+            const hasInput = anbudColumnRoles.some(c => c.role === 'input');
+            document.getElementById('anbudStartBtn').disabled = !(anbudFile && name && user && hasInput);
         }
 
         // Anbud file handling
@@ -4526,22 +4552,135 @@
             });
         }
 
-        function selectAnbudFile(file) {
+        async function selectAnbudFile(file) {
             if (!file.name.endsWith('.xlsx')) { alert('Kun .xlsx-filer st\u00f8ttes.'); return; }
             anbudFile = file;
             document.getElementById('anbudFileName').textContent = file.name;
             document.getElementById('anbudFileName').classList.remove('hidden');
-            document.getElementById('anbudFileInfo').textContent = `${(file.size / 1024).toFixed(1)} KB`;
+            const errEl = document.getElementById('anbudAnalyzeError');
+            const statusEl = document.getElementById('anbudAnalyzeStatus');
+            errEl.style.display = 'none';
+            statusEl.textContent = 'Analyserer fil...';
+            statusEl.style.display = '';
+
+            // Analyze file on server
+            try {
+                const formData = new FormData();
+                formData.append('file', file);
+                const resp = await fetch(`${API_BASE}/api/anbud/analyze`, { method: 'POST', body: formData });
+                if (!resp.ok) {
+                    const err = await resp.json();
+                    throw new Error(err.detail || 'Ukjent feil');
+                }
+                anbudAnalysis = await resp.json();
+                statusEl.style.display = 'none';
+                showAnbudStep2();
+            } catch (e) {
+                statusEl.style.display = 'none';
+                errEl.textContent = `Kunne ikke analysere filen: ${e.message}`;
+                errEl.style.display = '';
+                anbudFile = null;
+                anbudAnalysis = null;
+            }
+        }
+
+        function showAnbudStep2() {
+            if (!anbudAnalysis) return;
+            anbudColumnRoles = anbudAnalysis.columns.map(c => ({...c}));
+
+            // Build column mapping UI
+            const ROLE_OPTIONS = [
+                {value: 'input', label: 'Input: Produktbeskrivelse', color: '#166534', bg: '#dcfce7'},
+                {value: 'input_spec', label: 'Input: Spesifikasjon', color: '#0369a1', bg: '#dbeafe'},
+                {value: 'input_id', label: 'Input: Artikkelnr', color: '#7c3aed', bg: '#f5f3ff'},
+                {value: 'output_price', label: 'Output: Pris (fylles ut)', color: '#b45309', bg: '#fef3c7'},
+                {value: 'skip', label: 'Hopp over', color: '#64748b', bg: '#f1f5f9'},
+            ];
+            let mapHtml = '<div style="display:grid;gap:0.5rem">';
+            for (const col of anbudColumnRoles) {
+                const headerDisplay = escapeHtml(col.header || `(kolonne ${col.index + 1})`);
+                const opts = ROLE_OPTIONS.map(o =>
+                    `<option value="${o.value}" ${col.role === o.value ? 'selected' : ''}>${o.label}</option>`
+                ).join('');
+                mapHtml += `<div style="display:flex;align-items:center;gap:0.75rem;padding:0.4rem 0.5rem;background:#fafafa;border-radius:6px;border:1px solid #e2e8f0">
+                    <span style="font-weight:600;min-width:180px;font-size:0.85rem">${headerDisplay}</span>
+                    <select data-col-idx="${col.index}" onchange="updateAnbudColRole(${col.index}, this.value)"
+                        style="padding:0.3rem 0.5rem;border:1px solid var(--border);border-radius:4px;font-size:0.82rem;flex:1;max-width:250px">${opts}</select>
+                </div>`;
+            }
+            mapHtml += '</div>';
+            document.getElementById('anbudColumnMapping').innerHTML = mapHtml;
+
+            // Build preview table
+            renderAnbudPreview();
+
+            // Show step 2
+            document.getElementById('anbudStep1').style.display = 'none';
+            document.getElementById('anbudStep2').style.display = '';
+            document.getElementById('anbudFileInfo').textContent = `${anbudAnalysis.filename} \u2014 ${anbudAnalysis.total_data_rows} rader`;
             updateAnbudStartBtn();
         }
 
-        // Start anbud matching — uses same backend endpoint with job_type=anbud
+        function updateAnbudColRole(colIdx, newRole) {
+            const col = anbudColumnRoles.find(c => c.index === colIdx);
+            if (col) col.role = newRole;
+            renderAnbudPreview();
+            updateAnbudStartBtn();
+        }
+
+        function renderAnbudPreview() {
+            if (!anbudAnalysis) return;
+            const headers = anbudAnalysis.headers || [];
+            const rows = anbudAnalysis.preview_rows || [];
+            const roleColors = {input: '#dcfce7', input_spec: '#dbeafe', input_id: '#f5f3ff', output_price: '#fef3c7', skip: '#f8fafc'};
+
+            let html = '<table style="width:100%;border-collapse:collapse"><thead><tr>';
+            for (const col of anbudColumnRoles) {
+                const bg = roleColors[col.role] || '#f8fafc';
+                const roleLabel = {input: 'INPUT', input_spec: 'SPEC', input_id: 'ART.NR', output_price: 'OUTPUT', skip: '-'}[col.role] || '-';
+                html += `<th style="padding:0.4rem;text-align:left;border-bottom:2px solid var(--border);background:${bg};font-size:0.78rem">
+                    <div>${escapeHtml(col.header || '-')}</div>
+                    <div style="font-size:0.68rem;font-weight:400;color:#64748b">${roleLabel}</div>
+                </th>`;
+            }
+            html += '</tr></thead><tbody>';
+            for (const row of rows) {
+                html += '<tr>';
+                for (let i = 0; i < anbudColumnRoles.length; i++) {
+                    const val = i < row.length ? row[i] : '';
+                    const bg = roleColors[anbudColumnRoles[i].role] || '#fff';
+                    html += `<td style="padding:0.3rem;border-bottom:1px solid #f1f5f9;background:${bg};max-width:200px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap" title="${escapeHtml(val)}">${escapeHtml(val)}</td>`;
+                }
+                html += '</tr>';
+            }
+            html += '</tbody></table>';
+            document.getElementById('anbudPreviewTable').innerHTML = html;
+        }
+
+        function anbudBackToStep1() {
+            document.getElementById('anbudStep2').style.display = 'none';
+            document.getElementById('anbudStep1').style.display = '';
+            anbudFile = null;
+            anbudAnalysis = null;
+            anbudColumnRoles = [];
+            document.getElementById('anbudFileName').classList.add('hidden');
+            document.getElementById('anbudFileInput').value = '';
+        }
+
+        // Start anbud matching — passes column indices from mapping step
         document.getElementById('anbudStartBtn')?.addEventListener('click', async () => {
-            if (!anbudFile) return;
+            if (!anbudFile || !anbudAnalysis) return;
             const jobName = document.getElementById('anbudJobName').value.trim();
             const createdBy = document.getElementById('anbudCreatedBy').value.trim();
             if (!jobName || !createdBy) { alert('Jobbnavn og ditt navn er p\u00e5krevd.'); return; }
             try { localStorage.setItem('masterdata_username', createdBy); } catch(e) {}
+
+            // Extract column indices from user mapping
+            const nameCol = anbudColumnRoles.find(c => c.role === 'input');
+            const specCol = anbudColumnRoles.find(c => c.role === 'input_spec');
+            const artnrCol = anbudColumnRoles.find(c => c.role === 'input_id');
+
+            if (!nameCol) { alert('Velg minst \u00e9n kolonne som "Input: Produktbeskrivelse".'); return; }
 
             const btn = document.getElementById('anbudStartBtn');
             btn.disabled = true;
@@ -4550,22 +4689,30 @@
             try {
                 const formData = new FormData();
                 formData.append('file', anbudFile);
-                const params = new URLSearchParams({match_mode: anbudMode, job_name: jobName, created_by: createdBy, job_type: 'anbud'});
+                const params = new URLSearchParams({
+                    match_mode: anbudMode,
+                    job_name: jobName,
+                    created_by: createdBy,
+                    job_type: 'anbud',
+                    col_name: String(nameCol.index),
+                    col_spec: specCol ? String(specCol.index) : '-1',
+                    col_artnr: artnrCol ? String(artnrCol.index) : '-1',
+                });
                 const url = `${API_BASE}/api/match/start?${params}`;
                 const resp = await fetch(url, { method: 'POST', body: formData });
 
                 if (!resp.ok) {
                     const err = await resp.json();
                     alert(`Feil: ${err.detail || 'Ukjent feil'}`);
-                    btn.disabled = false; btn.textContent = 'Start matching'; return;
+                    btn.disabled = false; btn.textContent = 'Start anbudsbehandling'; return;
                 }
 
                 const data = await resp.json();
-                // Switch to matching module to show results (shared UI)
                 matchJobId = data.job_id;
                 matchMode = anbudMode;
-                btn.textContent = 'Start matching';
+                btn.textContent = 'Start anbudsbehandling';
 
+                document.getElementById('anbudStep2').style.display = 'none';
                 document.getElementById('anbudProgressSection').classList.add('active');
                 document.getElementById('anbudProgressTitle').textContent = `Matching p\u00e5g\u00e5r (${data.mode_label})...`;
                 document.getElementById('anbudProgressDetail').textContent = data.message || 'Starter...';
@@ -4575,7 +4722,7 @@
 
             } catch (e) {
                 alert(`Nettverksfeil: ${e.message}`);
-                btn.disabled = false; btn.textContent = 'Start matching';
+                btn.disabled = false; btn.textContent = 'Start anbudsbehandling';
             }
         });
 
@@ -4592,7 +4739,6 @@
                     clearInterval(anbudPollInterval);
                     anbudPollInterval = null;
                     if (data.status === 'completed') {
-                        // Switch to matching module to show shared results UI
                         switchModule('matching');
                         document.getElementById('matchConfigCard').style.display = 'none';
                         document.getElementById('matchProgressSection').classList.remove('active');
@@ -4834,7 +4980,7 @@
                     html += `<td style="padding:0.5rem">${b.total_rows || 0}</td>`;
                     html += `<td style="padding:0.5rem;color:#166534;font-weight:600">${b.valid_examples || 0}</td>`;
                     html += `<td style="padding:0.5rem;color:#991b1b">${b.rejected_rows || 0}</td>`;
-                    html += `<td style="padding:0.5rem"><button class="btn" style="font-size:0.72rem;padding:0.2rem 0.5rem;background:#fef2f2;color:#991b1b;border:1px solid #fecaca" onclick="deleteLearningBatch('${b.batch_id}')">Slett</button></td>`;
+                    html += `<td style="padding:0.5rem"><button class="btn" style="font-size:0.72rem;padding:0.2rem 0.5rem;background:#fef2f2;color:#991b1b;border:1px solid #fecaca" onclick="deleteLearningBatch('${escapeHtml(b.batch_id)}')">Slett</button></td>`;
                     html += `</tr>`;
                 }
                 html += '</tbody></table>';
