@@ -1232,22 +1232,29 @@ def _create_image_detail_sheet(ws, results: list[ProductAnalysis]) -> None:
         ws.auto_filter.ref = f"A1:{get_column_letter(len(headers))}{row_idx - 1}"
 
     # ── Image Improvement Suggestions section ──
-    # Separate table below main data with producer info and concrete suggestions
+    # Full-featured table with scoring, confidence, approval, and download support
     sugg_start = row_idx + 2
     sugg_headers = [
-        "Artikkelnummer",
+        "Art.nr",
         "Produktnavn",
         "Produsent",
-        "Produsentens varenummer",
-        "Bildeproblem",
+        "Produsent art.nr",
         "Nåværende bilde-URL",
-        "Nåværende status",
+        "Nåværende bildestatus",
         "Foreslått bilde-URL",
-        "Foreslått bildekilde",
-        "Kilde-URL",
-        "Bildesøk confidence",
-        "Forbedringsforslag",
-        "Krever manuell vurdering",
+        "Foreslått kilde",
+        "Kilde-type",
+        "Kilde-domene",
+        "Forbedringsscore",
+        "Confidence",
+        "Confidence-status",
+        "Status",
+        "Begrunnelse",
+        "Godkjent for nedlasting",
+        "Nedlastingsfilnavn",
+        "Søketermer brukt",
+        "Produsent-søk URL",
+        "Google-bildesøk URL",
     ]
     for col, h in enumerate(sugg_headers, 1):
         ws.cell(row=sugg_start, column=col, value=h)
@@ -1258,9 +1265,7 @@ def _create_image_detail_sheet(ws, results: list[ProductAnalysis]) -> None:
         iq = result.image_quality or {}
         img_sugg = result.image_suggestion
         img_status = iq.get("image_quality_status", "MISSING")
-        img_issues = iq.get("image_issue_summary", "")
 
-        # Include rows for ALL products with image problems (not just those with suggestions)
         has_problem = img_status in ("MISSING", "FAIL", "REVIEW")
         has_suggestion = img_sugg is not None
 
@@ -1271,51 +1276,103 @@ def _create_image_detail_sheet(ws, results: list[ProductAnalysis]) -> None:
             result.product_data, result.jeeves_data, result.manufacturer_lookup
         )
 
-        # Determine the image problem description
-        if img_status == "MISSING":
-            problem_desc = "Bilde mangler"
-        elif img_status == "FAIL":
-            problem_desc = f"Bildekvalitet for lav: {img_issues}" if img_issues else "Bildekvalitet for lav"
-        elif img_status == "REVIEW":
-            problem_desc = f"Bilde bør gjennomgås: {img_issues}" if img_issues else "Bilde bør gjennomgås"
-        else:
-            problem_desc = img_issues or ""
-
-        # Build improvement suggestion text — use the structured reason
-        # from enhance_image_suggestion which includes search URLs
-        if has_suggestion and img_sugg.reason:
-            improvement = img_sugg.reason
-        elif has_suggestion and img_sugg.suggested_image_url:
-            improvement = (
-                f"Bedre bilde funnet hos {img_sugg.suggested_source or 'ekstern kilde'}. "
-                f"URL: {img_sugg.suggested_image_url}"
-            )
-        elif has_problem:
-            search_hint = ""
-            if producer and producer_artnr:
-                search_hint = f"Søk hos {producer} med varenummer {producer_artnr}"
-            elif producer:
-                search_hint = f"Søk hos {producer} med produktnavn"
-            else:
-                search_hint = "Kontakt produsent for produktbilde"
-            improvement = f"Krever manuell bildesøk. {search_hint}"
-        else:
-            improvement = ""
-
         _write_id_cell(ws, sugg_row, 1, result.article_number)
         ws.cell(row=sugg_row, column=2, value=result.product_data.product_name or "")
         ws.cell(row=sugg_row, column=3, value=producer or "")
         ws.cell(row=sugg_row, column=4, value=producer_artnr or "")
-        ws.cell(row=sugg_row, column=5, value=problem_desc)
-        ws.cell(row=sugg_row, column=6, value=(img_sugg.current_image_url if img_sugg else result.product_data.image_url) or "")
-        ws.cell(row=sugg_row, column=7, value=(img_sugg.current_image_status if img_sugg else img_status) or "")
-        ws.cell(row=sugg_row, column=8, value=(img_sugg.suggested_image_url if img_sugg else "") or "")
-        ws.cell(row=sugg_row, column=9, value=(img_sugg.suggested_source if img_sugg else "") or "")
-        ws.cell(row=sugg_row, column=10, value=(img_sugg.suggested_source_url if img_sugg else "") or "")
-        ws.cell(row=sugg_row, column=11, value=(img_sugg.confidence if img_sugg and img_sugg.confidence else 0))
-        ws.cell(row=sugg_row, column=12, value=improvement)
-        ws.cell(row=sugg_row, column=13, value="Ja" if not has_suggestion or (img_sugg and img_sugg.review_required) else "Nei")
+        ws.cell(row=sugg_row, column=5, value=(img_sugg.current_image_url if img_sugg else result.product_data.image_url) or "")
+
+        # Current status with color
+        current_st = (img_sugg.current_image_status if img_sugg else img_status) or ""
+        status_cell = ws.cell(row=sugg_row, column=6, value=current_st)
+        if current_st in ("missing", "MISSING"):
+            status_cell.fill = PatternFill(start_color="FFC7CE", end_color="FFC7CE", fill_type="solid")
+            status_cell.font = Font(color="9C0006")
+        elif current_st in ("low_quality", "FAIL"):
+            status_cell.fill = PatternFill(start_color="FFEB9C", end_color="FFEB9C", fill_type="solid")
+
+        # Suggested image URL (the most important column)
+        suggested_url = (img_sugg.suggested_image_url if img_sugg else "") or ""
+        url_cell = ws.cell(row=sugg_row, column=7, value=suggested_url)
+        if suggested_url:
+            url_cell.font = Font(color="1D4ED8", underline="single")
+
+        ws.cell(row=sugg_row, column=8, value=(img_sugg.suggested_source if img_sugg else "") or "")
+        ws.cell(row=sugg_row, column=9, value=(img_sugg.source_type if img_sugg else "") or "")
+        ws.cell(row=sugg_row, column=10, value=(img_sugg.source_domain if img_sugg else "") or "")
+
+        # Improvement score with color
+        imp_score = (img_sugg.improvement_score if img_sugg else 0) or 0
+        imp_cell = ws.cell(row=sugg_row, column=11, value=imp_score)
+        if imp_score >= 70:
+            imp_cell.font = Font(color="006100", bold=True)
+        elif imp_score >= 40:
+            imp_cell.font = Font(color="9C6500")
+        else:
+            imp_cell.font = Font(color="9C0006")
+
+        # Confidence
+        conf = (img_sugg.confidence if img_sugg else 0) or 0
+        ws.cell(row=sugg_row, column=12, value=round(conf, 2))
+        conf_label = (img_sugg.confidence_label if img_sugg else "Krever manuell vurdering") or ""
+        conf_cell = ws.cell(row=sugg_row, column=13, value=conf_label)
+        if "Høy" in conf_label:
+            conf_cell.font = Font(color="006100")
+        elif "Lav" in conf_label or "manuell" in conf_label.lower():
+            conf_cell.font = Font(color="9C0006")
+
+        # Status (bildeproblem)
+        if img_status == "MISSING":
+            status_text = "Bilde mangler"
+        elif img_status == "FAIL":
+            status_text = "Bildekvalitet for lav"
+        elif img_status == "REVIEW":
+            status_text = "Bør gjennomgås"
+        else:
+            status_text = current_st
+        ws.cell(row=sugg_row, column=14, value=status_text)
+
+        # Begrunnelse
+        reason = ""
+        if img_sugg and img_sugg.improvement_reason:
+            reason = img_sugg.improvement_reason
+        elif img_sugg and img_sugg.reason:
+            reason = img_sugg.reason
+        ws.cell(row=sugg_row, column=15, value=reason).alignment = Alignment(wrap_text=True)
+
+        # Approval status
+        approval = (img_sugg.approval_status if img_sugg else "ikke_vurdert") or "ikke_vurdert"
+        approval_labels = {
+            "godkjent": "Ja",
+            "avvist": "Nei (avvist)",
+            "manuell_kontroll": "Manuell kontroll",
+            "ikke_vurdert": "Ikke vurdert",
+        }
+        approval_cell = ws.cell(row=sugg_row, column=16, value=approval_labels.get(approval, approval))
+        if approval == "godkjent":
+            approval_cell.fill = PatternFill(start_color="C6EFCE", end_color="C6EFCE", fill_type="solid")
+        elif approval == "avvist":
+            approval_cell.fill = PatternFill(start_color="FFC7CE", end_color="FFC7CE", fill_type="solid")
+
+        ws.cell(row=sugg_row, column=17, value=(img_sugg.download_filename if img_sugg else "") or "")
+        ws.cell(row=sugg_row, column=18, value=(img_sugg.search_terms_used if img_sugg else "") or "")
+
+        # Search URLs (clickable in Excel)
+        producer_url = (img_sugg.producer_search_url if img_sugg else "") or ""
+        ws.cell(row=sugg_row, column=19, value=producer_url)
+        google_url = (img_sugg.google_search_url if img_sugg else "") or ""
+        ws.cell(row=sugg_row, column=20, value=google_url)
+
         sugg_row += 1
+
+    # Auto-size columns for readability
+    sugg_col_widths = [16, 30, 20, 18, 40, 16, 50, 18, 14, 20, 16, 10, 22, 18, 45, 20, 24, 30, 50, 50]
+    for col_idx, width in enumerate(sugg_col_widths, 1):
+        if col_idx <= len(sugg_headers):
+            ws.column_dimensions[get_column_letter(col_idx)].width = max(
+                ws.column_dimensions[get_column_letter(col_idx)].width or 0,
+                width,
+            )
 
 
 def _create_image_issues_sheet(ws, results: list[ProductAnalysis]) -> None:

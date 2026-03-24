@@ -1189,6 +1189,119 @@ async def explain_product(job_id: str, article_number: str):
     raise HTTPException(404, f"Produkt {article_number} ikke funnet")
 
 
+# ── Image Suggestion API ──
+
+
+@app.get("/api/results/{job_id}/image-suggestions")
+async def get_image_suggestions(job_id: str):
+    """Get all image suggestions for a completed job."""
+    job = jobs.get(job_id)
+    if not job or job.status != JobStatus.COMPLETED:
+        raise HTTPException(404, "Jobb ikke funnet eller ikke fullført")
+
+    suggestions = []
+    for r in job.results:
+        sugg = r.image_suggestion
+        if not sugg:
+            continue
+        producer, producer_artnr = (None, None)
+        try:
+            from backend.content_validator import get_best_producer_info
+            producer, producer_artnr = get_best_producer_info(
+                r.product_data, r.jeeves_data, r.manufacturer_lookup
+            )
+        except Exception:
+            pass
+        suggestions.append({
+            "article_number": r.article_number,
+            "product_name": r.product_data.product_name,
+            "producer": producer,
+            "producer_article_number": producer_artnr,
+            "current_image_url": sugg.current_image_url,
+            "current_image_status": sugg.current_image_status,
+            "suggested_image_url": sugg.suggested_image_url,
+            "suggested_source": sugg.suggested_source,
+            "source_type": sugg.source_type,
+            "source_domain": sugg.source_domain,
+            "improvement_score": sugg.improvement_score,
+            "confidence": sugg.confidence,
+            "confidence_label": sugg.confidence_label,
+            "reason": sugg.reason,
+            "improvement_reason": sugg.improvement_reason,
+            "approval_status": sugg.approval_status,
+            "download_filename": sugg.download_filename,
+            "search_terms_used": sugg.search_terms_used,
+            "producer_search_url": sugg.producer_search_url,
+            "google_search_url": sugg.google_search_url,
+        })
+
+    return {
+        "job_id": job_id,
+        "total_suggestions": len(suggestions),
+        "with_url": sum(1 for s in suggestions if s["suggested_image_url"]),
+        "suggestions": suggestions,
+    }
+
+
+@app.put("/api/results/{job_id}/image-approve/{article_number}")
+async def approve_image(
+    job_id: str,
+    article_number: str,
+    status: str = Query(default="godkjent"),
+    approved_by: str = Query(default=None),
+):
+    """Approve or reject an image suggestion for a specific product.
+
+    Valid statuses: godkjent, avvist, manuell_kontroll, ikke_vurdert
+    """
+    job = jobs.get(job_id)
+    if not job or job.status != JobStatus.COMPLETED:
+        raise HTTPException(404, "Jobb ikke funnet eller ikke fullført")
+
+    from backend.image_search import approve_image_suggestion
+    ok = approve_image_suggestion(job.results, article_number, status, approved_by)
+    if not ok:
+        raise HTTPException(404, f"Bildeforslag for {article_number} ikke funnet")
+
+    return {"article_number": article_number, "status": status, "approved_by": approved_by}
+
+
+@app.get("/api/results/{job_id}/download-images")
+async def download_approved_images(job_id: str):
+    """Download all approved image suggestions as a ZIP file.
+
+    Only images with approval_status='godkjent' are included.
+    File names follow the pattern: {article_number}.{ext}
+    """
+    job = jobs.get(job_id)
+    if not job or job.status != JobStatus.COMPLETED:
+        raise HTTPException(404, "Jobb ikke funnet eller ikke fullført")
+
+    from backend.image_search import download_approved_images_as_zip, get_approved_images
+
+    approved = get_approved_images(job.results)
+    if not approved:
+        raise HTTPException(400, "Ingen godkjente bildeforslag å laste ned")
+
+    zip_filename = f"godkjente_bilder_{job_id}.zip"
+    zip_path = str(OUTPUT_DIR / zip_filename)
+
+    result = await download_approved_images_as_zip(job.results, zip_path)
+
+    if not result["zip_path"]:
+        raise HTTPException(500, f"Nedlasting feilet. Feil: {result['failed']}")
+
+    return FileResponse(
+        result["zip_path"],
+        media_type="application/zip",
+        filename=zip_filename,
+        headers={
+            "X-Downloaded-Count": str(len(result["downloaded"])),
+            "X-Failed-Count": str(len(result["failed"])),
+        },
+    )
+
+
 @app.get("/api/results/{job_id}/category-analysis")
 async def get_category_analysis(job_id: str):
     """Get aggregate category structure analysis for a completed job.

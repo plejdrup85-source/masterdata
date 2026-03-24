@@ -266,11 +266,26 @@ class ImageSuggestion(BaseModel):
     current_image_url: Optional[str] = None
     current_image_status: str = "unknown"  # ok, missing, low_quality, poor_background
     suggested_image_url: Optional[str] = None
-    suggested_source: Optional[str] = None  # "manufacturer", "norengros"
+    suggested_source: Optional[str] = None  # "manufacturer", "norengros", "producer_search"
     suggested_source_url: Optional[str] = None
+    source_type: Optional[str] = None  # "produsent", "distributør", "annen", "manuelt_søk"
+    source_domain: Optional[str] = None  # e.g. "icumed.com"
     confidence: float = 0.0
+    confidence_label: Optional[str] = None  # "Høy tillit", "Middels tillit", etc.
     review_required: bool = True
     reason: Optional[str] = None
+    # Improvement scoring
+    improvement_score: Optional[int] = None  # 0-100, how much better is the new image
+    improvement_reason: Optional[str] = None  # Why this image is better
+    # Approval workflow
+    approval_status: str = "ikke_vurdert"  # "ikke_vurdert", "godkjent", "avvist", "manuell_kontroll"
+    approved_by: Optional[str] = None
+    # Download support
+    download_filename: Optional[str] = None  # e.g. "N245100189090.jpg"
+    # Search metadata
+    search_terms_used: Optional[str] = None
+    producer_search_url: Optional[str] = None
+    google_search_url: Optional[str] = None
 
 
 class ProductAnalysis(BaseModel):
