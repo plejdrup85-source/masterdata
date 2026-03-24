@@ -330,3 +330,5 @@ class AnalysisJob(BaseModel):
     analysis_mode: str = AnalysisMode.FULL_ENRICHMENT.value
     focus_areas: list[str] = []  # Only used when analysis_mode == "focused_scan"
     source_filename: str = ""  # Original uploaded filename
+    # Products excluded from output (not found on website)
+    excluded_products: list[dict] = []  # [{article_number, reason}]

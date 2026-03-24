@@ -104,6 +104,7 @@ def create_output_excel(
     output_path: str,
     analysis_mode: str = "full_enrichment",
     focus_areas: list[str] | None = None,
+    excluded_products: list[dict] | None = None,
 ) -> None:
     """Create a structured Excel output file with analysis results.
 
@@ -121,7 +122,8 @@ def create_output_excel(
     # Sheet 1: Summary (always included)
     ws_summary = wb.active
     ws_summary.title = "Summary"
-    _create_summary_sheet(ws_summary, results, analysis_mode=analysis_mode, focus_areas=focus_areas)
+    _create_summary_sheet(ws_summary, results, analysis_mode=analysis_mode, focus_areas=focus_areas,
+                          excluded_products=excluded_products)
 
     # Sheet 2: Area Scores (audit and focused modes)
     if is_audit or is_focused:
@@ -1000,7 +1002,8 @@ def _create_conflicts_sheet(ws, results: list[ProductAnalysis]) -> None:
 
 def _create_summary_sheet(ws, results: list[ProductAnalysis],
                           analysis_mode: str = "full_enrichment",
-                          focus_areas: list[str] | None = None) -> None:
+                          focus_areas: list[str] | None = None,
+                          excluded_products: list[dict] | None = None) -> None:
     """Create the Summary sheet with high-level two-source metrics."""
     title_font = Font(bold=True, size=14)
     section_font = Font(bold=True, size=12, color="4472C4")
@@ -1077,7 +1080,8 @@ def _create_summary_sheet(ws, results: list[ProductAnalysis],
         ("KJØREMETADATA", "", 0),
         ("Analysemodus", mode_titles.get(analysis_mode, analysis_mode), 1),
         ("Dato/tid", datetime.now().strftime('%Y-%m-%d %H:%M'), 1),
-        ("Totalt antall produkter", total, 1),
+        ("Totalt antall produkter (i output)", total, 1),
+        ("Ekskludert (ikke funnet på nettsiden)", len(excluded_products) if excluded_products else 0, 1),
         ("Produkter i Jeeves", has_jeeves, 1),
         ("Gjennomsnittlig kvalitetsscore", f"{avg_score:.1f}%", 1),
         ("", "", 0),
@@ -1106,10 +1110,11 @@ def _create_summary_sheet(ws, results: list[ProductAnalysis],
     rows.append(("Mangler pakningsinformasjon", total - web_pkg, 1))
     rows.append(("", "", 0))
 
-    # Website coverage
+    # Website coverage — all products in output are verified on website
     rows.append(("NETTSIDE-DEKNING", "", 0))
-    rows.append(("Funnet på onemed.no", found, 1))
-    rows.append(("Ikke funnet på onemed.no", not_found, 1))
+    rows.append(("Alle produkter i rapporten er verifisert på onemed.no", "Ja", 1))
+    if excluded_products:
+        rows.append(("Ekskluderte artikler (ikke på nettsiden)", ", ".join(e["article_number"] for e in excluded_products), 1))
     rows.append(("", "", 0))
 
     if analysis_mode == "full_enrichment":

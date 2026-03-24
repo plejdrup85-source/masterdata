@@ -266,6 +266,7 @@ def _add_to_history(job: "AnalysisJob", source_filename: str = "") -> None:
         "batch_info": job.batch_info or "",
         "avg_score": avg_score,
         "critical_count": critical_count,
+        "excluded_count": len(job.excluded_products),
     }
 
     entries = _load_history()
@@ -865,6 +866,7 @@ async def get_status(job_id: str):
         "batch_info": job.batch_info,
         "analysis_mode": job.analysis_mode,
         "focus_areas": job.focus_areas,
+        "excluded_products": job.excluded_products,
     }
 
 
@@ -2787,13 +2789,65 @@ async def _run_analysis(
                 logger.error(f"[{job_id}] {msg}")
                 job.errors.append(msg)
 
+        # ── HARD FILTER: Exclude products NOT found on the website ─────────
+        # A product is considered "found on the website" ONLY if:
+        #   1. found_on_onemed == True, AND
+        #   2. verification_status is EXACT_MATCH, NORMALIZED_MATCH, or SKU_IN_PAGE
+        # Products with CDN_ONLY, UNVERIFIED, MISMATCH, or AMBIGUOUS are excluded.
+        _VALID_VERIFICATION = {
+            VerificationStatus.EXACT_MATCH,
+            VerificationStatus.NORMALIZED_MATCH,
+            VerificationStatus.SKU_IN_PAGE,
+        }
+
+        filtered_results: list[ProductAnalysis] = []
+        excluded: list[dict] = []
+
+        for r in job.results:
+            pd = r.product_data
+            if not pd.found_on_onemed:
+                reason = "Ingen produktside funnet"
+                excluded.append({"article_number": pd.article_number, "reason": reason})
+                logger.info(
+                    f"[{job_id}] EKSKLUDERT fra output: {pd.article_number} — {reason}"
+                )
+            elif pd.verification_status not in _VALID_VERIFICATION:
+                reason_map = {
+                    VerificationStatus.CDN_ONLY: "Kun CDN-bilde — ingen gyldig produktside",
+                    VerificationStatus.UNVERIFIED: "Kunne ikke verifiseres mot nettsiden",
+                    VerificationStatus.MISMATCH: "Ugyldig treff — artikkelnr stemmer ikke",
+                    VerificationStatus.AMBIGUOUS: "Tvetydig identitet — motstridende signaler",
+                }
+                reason = reason_map.get(pd.verification_status, f"Ugyldig verifiseringsstatus: {pd.verification_status.value}")
+                excluded.append({"article_number": pd.article_number, "reason": reason})
+                logger.info(
+                    f"[{job_id}] EKSKLUDERT fra output: {pd.article_number} — {reason}"
+                )
+            else:
+                filtered_results.append(r)
+
+        if excluded:
+            logger.warning(
+                f"[{job_id}] WEBSITE FILTER: {len(excluded)} av {len(job.results)} produkter "
+                f"ekskludert fra output (ikke funnet på nettsiden). "
+                f"Art.nr: {', '.join(e['article_number'] for e in excluded)}"
+            )
+        else:
+            logger.info(f"[{job_id}] WEBSITE FILTER: Alle {len(job.results)} produkter funnet på nettsiden — ingen ekskludert.")
+
+        job.excluded_products = excluded
+        job.results = filtered_results
+        job.processed_products = len(filtered_results)
+        # ── END HARD FILTER ──────────────────────────────────────────────
+
         # Generate output Excel
         timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
         output_filename = f"masterdata_kvalitetssjekk_{job_id}_{timestamp}.xlsx"
         output_path = str(OUTPUT_DIR / output_filename)
 
         create_output_excel(job.results, output_path,
-                           analysis_mode=analysis_mode, focus_areas=focus_areas)
+                           analysis_mode=analysis_mode, focus_areas=focus_areas,
+                           excluded_products=job.excluded_products)
         job.output_file = output_path
         job.status = JobStatus.COMPLETED
         job.current_product = None

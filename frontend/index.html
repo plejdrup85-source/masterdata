@@ -2226,17 +2226,30 @@
                     cancelBtn.classList.add('hidden');
 
                     if (data.status === 'completed') {
-                        progressTitle.textContent = 'Analyse fullf\u00f8rt!';
-                        progressDetail.textContent = 'Laster resultater...';
+                        progressTitle.textContent = 'Analyse fullført!';
+                        let detailMsg = 'Laster resultater...';
+                        if (data.excluded_products && data.excluded_products.length > 0) {
+                            detailMsg = `${data.excluded_products.length} produkt(er) ekskludert fra output (ikke funnet på nettsiden). Laster resultater...`;
+                        }
+                        progressDetail.textContent = detailMsg;
                         await loadResults();
                     } else {
                         progressTitle.textContent = 'Analyse feilet';
                         progressDetail.textContent = 'Analysen feilet. Sjekk feilloggen nedenfor.';
                     }
 
+                    // Show excluded products as informational messages
+                    if (data.excluded_products && data.excluded_products.length > 0) {
+                        errorsCard.classList.remove('hidden');
+                        const excludedHtml = data.excluded_products.map(e =>
+                            `<div style="color:#b45309">⚠ Ekskludert: ${escapeHtml(e.article_number)} — ${escapeHtml(e.reason)}</div>`
+                        ).join('');
+                        errorLog.innerHTML = excludedHtml + (errorLog.innerHTML || '');
+                    }
+
                     if (data.errors && data.errors.length > 0) {
                         errorsCard.classList.remove('hidden');
-                        errorLog.innerHTML = data.errors.map(e =>
+                        errorLog.innerHTML += data.errors.map(e =>
                             `<div>${escapeHtml(e)}</div>`
                         ).join('');
                     }
