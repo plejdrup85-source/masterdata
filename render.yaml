@@ -8,12 +8,12 @@ services:
       - key: PYTHON_VERSION
         value: "3.11"
       - key: CACHE_DIR
-        value: /data/cache
+        value: /var/data/cache
       - key: OUTPUT_DIR
-        value: /data/output
+        value: /var/data/output
       - key: HISTORY_DIR
-        value: /data/history
+        value: /var/data/history
     disk:
       name: masterdata-persistent
-      mountPath: /data
+      mountPath: /var/data
       sizeGB: 1

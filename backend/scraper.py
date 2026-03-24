@@ -29,11 +29,19 @@ from backend.models import ProductData, VerificationStatus
 
 logger = logging.getLogger(__name__)
 
-# Cache directory — use persistent path, NOT /tmp (wiped on deploy).
-# Default to data/cache in the project root; override via CACHE_DIR env var.
-# On Render/Cloud Run, mount a persistent disk at /data and set CACHE_DIR=/data/cache.
+# Cache directory — MUST be on persistent disk in production.
+# On Render: mount persistent disk at /var/data, set CACHE_DIR=/var/data/cache.
+# Locally: defaults to data/cache in the project root.
 CACHE_DIR = Path(os.environ.get("CACHE_DIR", Path(__file__).resolve().parent.parent / "data" / "cache"))
 CACHE_DIR.mkdir(parents=True, exist_ok=True)
+
+# Warn if CACHE_DIR looks ephemeral (common misconfiguration)
+_cache_dir_str = str(CACHE_DIR)
+if "/tmp" in _cache_dir_str:
+    logger.warning(
+        f"CACHE_DIR={_cache_dir_str} er under /tmp — dette wipes ved deploy! "
+        f"Sett CACHE_DIR til persistent disk (f.eks. /var/data/cache)."
+    )
 
 BASE_URL = "https://www.onemed.no"
 PRODUCT_URL_PREFIX = f"{BASE_URL}/nb-no/products"
