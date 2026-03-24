@@ -692,6 +692,9 @@
             <button class="module-tab active" id="tabMasterdata" onclick="switchModule('masterdata')">
                 Kvalitetsanalyse
             </button>
+            <button class="module-tab" id="tabMatching" onclick="switchModule('matching')">
+                Produktmatching
+            </button>
             <button class="module-tab" id="tabRelations" onclick="switchModule('relations')">
                 Produktfamilier
             </button>
@@ -944,6 +947,119 @@
         </div><!-- /moduleMasterdata -->
 
         <!-- ═══════════════════════════════════════════════════════ -->
+        <!-- MODULE: PRODUKTMATCHING                                 -->
+        <!-- ═══════════════════════════════════════════════════════ -->
+        <div id="moduleMatching" style="display:none">
+
+        <!-- Match Config Card -->
+        <div class="card" id="matchConfigCard">
+            <h2>Produktmatching &mdash; Finn beste produktmatch i katalogen</h2>
+            <p style="color:var(--text-muted);font-size:0.9rem;margin-bottom:1.25rem">
+                Last opp en Excel-fil med produkter du vil matche mot OneMed-katalogen.
+                Velg matchmodus for &aring; styre hvordan kandidater rangeres.
+            </p>
+
+            <!-- Match Mode Selection -->
+            <div style="margin-bottom:1.25rem;padding:1rem;background:#f0f9ff;border-radius:8px;border:1px solid #bae6fd">
+                <div style="font-size:0.95rem;font-weight:600;margin-bottom:0.75rem;color:#0369a1">Matchmodus</div>
+                <div style="display:flex;gap:0.75rem;flex-wrap:wrap">
+                    <label id="matchModeStandardLabel" style="display:flex;align-items:flex-start;gap:0.5rem;cursor:pointer;background:#fff;padding:0.75rem 1rem;border-radius:8px;border:2px solid var(--primary);flex:1;min-width:240px" onclick="setMatchMode('standard')">
+                        <input type="radio" name="matchMode" value="standard" checked style="margin-top:3px">
+                        <div>
+                            <div style="font-weight:600;font-size:0.9rem">Standard</div>
+                            <div style="font-size:0.78rem;color:var(--text-muted);margin-top:0.2rem">
+                                Beste semantiske match vinner. Pris er sekund&aelig;rt.
+                            </div>
+                        </div>
+                    </label>
+                    <label id="matchModeHardcoreLabel" style="display:flex;align-items:flex-start;gap:0.5rem;cursor:pointer;background:#fff;padding:0.75rem 1rem;border-radius:8px;border:2px solid var(--border);flex:1;min-width:240px" onclick="setMatchMode('hardcore_price')">
+                        <input type="radio" name="matchMode" value="hardcore_price" style="margin-top:3px">
+                        <div>
+                            <div style="font-weight:600;font-size:0.9rem;color:#b45309">Hardcore Pris Prioritet</div>
+                            <div style="font-size:0.78rem;color:var(--text-muted);margin-top:0.2rem">
+                                Velger billigste relevante alternativ fremfor mest presise match.
+                                Egnet n&aring;r pris skal prioriteres h&oslash;yere enn perfekt spesifikasjonsmatch.
+                            </div>
+                        </div>
+                    </label>
+                </div>
+            </div>
+
+            <!-- File Upload -->
+            <div class="upload-area" id="matchUploadArea" style="padding:2rem">
+                <svg class="upload-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" style="width:36px;height:36px">
+                    <path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/>
+                    <polyline points="17 8 12 3 7 8"/>
+                    <line x1="12" y1="3" x2="12" y2="15"/>
+                </svg>
+                <p>Dra og slipp Excel-fil med produkter som skal matches</p>
+                <p style="font-size:0.78rem;color:#94a3b8;margin-top:0.3rem">
+                    Forventede kolonner: Produktnavn, Spesifikasjon (valgfri), Artikkelnr (valgfri), ALC-pris (valgfri)
+                </p>
+                <p class="filename hidden" id="matchFileName"></p>
+                <input type="file" id="matchFileInput" accept=".xlsx" style="position:absolute;inset:0;opacity:0;cursor:pointer">
+            </div>
+
+            <div class="column-info hidden" id="matchColumnInfo"></div>
+
+            <div class="actions">
+                <button class="btn btn-primary" id="matchStartBtn" disabled>Start matching</button>
+                <span id="matchFileInfo" style="color:var(--text-muted);font-size:0.9rem"></span>
+            </div>
+        </div>
+
+        <!-- Match Progress -->
+        <div class="card progress-section" id="matchProgressSection">
+            <h2 id="matchProgressTitle">Matching p&aring;g&aring;r...</h2>
+            <div class="progress-bar-container">
+                <div class="progress-bar" id="matchProgressBar"></div>
+            </div>
+            <div class="progress-info">
+                <span id="matchProgressText">0 / 0 produkter</span>
+                <span id="matchProgressPercent">0%</span>
+            </div>
+            <div class="progress-detail" id="matchProgressDetail">Starter...</div>
+        </div>
+
+        <!-- Match Results -->
+        <div class="results-section" id="matchResultsSection">
+            <div class="card">
+                <div style="display:flex;align-items:center;justify-content:space-between;flex-wrap:wrap;gap:0.75rem">
+                    <h2 style="margin:0">Matching-resultater</h2>
+                    <div id="matchModeBadge" style="padding:0.3rem 0.8rem;border-radius:20px;font-size:0.8rem;font-weight:600"></div>
+                </div>
+                <div class="stats-grid" id="matchStatsGrid" style="margin-top:1rem"></div>
+                <div class="actions">
+                    <button class="btn btn-success" id="matchDownloadBtn">Last ned Excel-rapport</button>
+                    <button class="btn btn-primary" id="matchNewBtn" onclick="resetMatchModule()">Ny matching</button>
+                </div>
+            </div>
+
+            <!-- Match Results Table with Candidate Review -->
+            <div class="card">
+                <h2>Produktoversikt <span style="font-weight:400;font-size:0.85rem;color:var(--text-muted)">(klikk rad for &aring; se og velge kandidater)</span></h2>
+                <div style="overflow-x:auto">
+                    <table class="results-table">
+                        <thead>
+                            <tr>
+                                <th>Rad</th>
+                                <th>Innprodukt</th>
+                                <th>Status</th>
+                                <th>Valgt kandidat</th>
+                                <th>ALC-pris</th>
+                                <th>Relevans</th>
+                                <th>Kandidater</th>
+                            </tr>
+                        </thead>
+                        <tbody id="matchResultsBody"></tbody>
+                    </table>
+                </div>
+            </div>
+        </div>
+
+        </div><!-- /moduleMatching -->
+
+        <!-- ═══════════════════════════════════════════════════════ -->
         <!-- MODULE: PRODUKTFAMILIER / RELASJONER                   -->
         <!-- ═══════════════════════════════════════════════════════ -->
         <div id="moduleRelations" style="display:none">
@@ -1180,10 +1296,11 @@
         function switchModule(mod) {
             currentModule = mod;
             document.getElementById('moduleMasterdata').style.display = mod === 'masterdata' ? '' : 'none';
+            document.getElementById('moduleMatching').style.display = mod === 'matching' ? '' : 'none';
             document.getElementById('moduleRelations').style.display = mod === 'relations' ? '' : 'none';
             document.getElementById('moduleHistory').style.display = mod === 'history' ? '' : 'none';
             document.querySelectorAll('.module-tab').forEach(t => t.classList.remove('active'));
-            const tabMap = {masterdata: 'tabMasterdata', relations: 'tabRelations', history: 'tabHistory'};
+            const tabMap = {masterdata: 'tabMasterdata', matching: 'tabMatching', relations: 'tabRelations', history: 'tabHistory'};
             document.getElementById(tabMap[mod])?.classList.add('active');
             if (mod === 'relations') initRelModule();
             if (mod === 'history') loadHistory();
@@ -3109,6 +3226,8 @@
                     full_enrichment: 'Full berikelse',
                     audit_only: 'Kvalitetsrevisjon',
                     focused_scan: 'Fokusert sjekk',
+                    matching_standard: 'Matching (Standard)',
+                    matching_hardcore_price: 'Matching (Hardcore Pris)',
                 };
 
                 let html = '<table style="width:100%;border-collapse:collapse;font-size:0.85rem">';
@@ -3163,6 +3282,362 @@
                 alert('Kunne ikke slette: ' + err.message);
             }
         }
+        // ══════════════════════════════════════════════════════════════
+        // MATCHING MODULE
+        // ══════════════════════════════════════════════════════════════
+
+        let matchFile = null;
+        let matchJobId = null;
+        let matchPollInterval = null;
+        let matchMode = 'standard';
+        let matchResultsData = [];
+
+        function setMatchMode(mode) {
+            matchMode = mode;
+            const stdLabel = document.getElementById('matchModeStandardLabel');
+            const hcLabel = document.getElementById('matchModeHardcoreLabel');
+            if (mode === 'standard') {
+                stdLabel.style.border = '2px solid var(--primary)';
+                hcLabel.style.border = '2px solid var(--border)';
+            } else {
+                stdLabel.style.border = '2px solid var(--border)';
+                hcLabel.style.border = '2px solid #b45309';
+                hcLabel.style.background = '#fffbeb';
+            }
+            document.querySelector(`input[name="matchMode"][value="${mode}"]`).checked = true;
+        }
+
+        // File handling
+        const matchFileInput = document.getElementById('matchFileInput');
+        const matchUploadArea = document.getElementById('matchUploadArea');
+
+        matchFileInput.addEventListener('change', (e) => {
+            const f = e.target.files[0];
+            if (f) selectMatchFile(f);
+        });
+
+        matchUploadArea.addEventListener('dragover', (e) => { e.preventDefault(); matchUploadArea.classList.add('dragover'); });
+        matchUploadArea.addEventListener('dragleave', () => matchUploadArea.classList.remove('dragover'));
+        matchUploadArea.addEventListener('drop', (e) => {
+            e.preventDefault();
+            matchUploadArea.classList.remove('dragover');
+            const f = e.dataTransfer.files[0];
+            if (f) selectMatchFile(f);
+        });
+
+        function selectMatchFile(file) {
+            if (!file.name.endsWith('.xlsx')) {
+                alert('Kun .xlsx-filer st\u00f8ttes.');
+                return;
+            }
+            matchFile = file;
+            document.getElementById('matchFileName').textContent = file.name;
+            document.getElementById('matchFileName').classList.remove('hidden');
+            document.getElementById('matchFileInfo').textContent = `${(file.size / 1024).toFixed(1)} KB`;
+            document.getElementById('matchStartBtn').disabled = false;
+        }
+
+        // Start matching
+        document.getElementById('matchStartBtn').addEventListener('click', async () => {
+            if (!matchFile) return;
+
+            const btn = document.getElementById('matchStartBtn');
+            btn.disabled = true;
+            btn.innerHTML = '<span class="spinner"></span> Starter...';
+
+            try {
+                const formData = new FormData();
+                formData.append('file', matchFile);
+                const url = `${API_BASE}/api/match/start?match_mode=${matchMode}`;
+                const resp = await fetch(url, { method: 'POST', body: formData });
+
+                if (!resp.ok) {
+                    const err = await resp.json();
+                    alert(`Feil: ${err.detail || 'Ukjent feil'}`);
+                    btn.disabled = false;
+                    btn.textContent = 'Start matching';
+                    return;
+                }
+
+                const data = await resp.json();
+                matchJobId = data.job_id;
+
+                // Show column info
+                if (data.detected_columns) {
+                    const cols = data.detected_columns;
+                    const parts = [];
+                    if (cols.name) parts.push(`Produktnavn: "${cols.name}"`);
+                    if (cols.specification) parts.push(`Spesifikasjon: "${cols.specification}"`);
+                    if (cols.article_number) parts.push(`Art.nr: "${cols.article_number}"`);
+                    if (cols.alc_price) parts.push(`ALC-pris: "${cols.alc_price}"`);
+                    if (parts.length) {
+                        const colInfo = document.getElementById('matchColumnInfo');
+                        colInfo.textContent = 'Detekterte kolonner: ' + parts.join(', ');
+                        colInfo.classList.remove('hidden');
+                    }
+                }
+
+                // Show progress
+                btn.textContent = 'Start matching';
+                document.getElementById('matchProgressSection').classList.add('active');
+                document.getElementById('matchResultsSection').classList.remove('active');
+                document.getElementById('matchProgressTitle').textContent = `Matching p\u00e5g\u00e5r (${data.mode_label})...`;
+                document.getElementById('matchProgressDetail').textContent = data.message || 'Starter...';
+
+                matchPollInterval = setInterval(pollMatchStatus, 2000);
+                pollMatchStatus();
+
+            } catch (e) {
+                alert(`Nettverksfeil: ${e.message}`);
+                btn.disabled = false;
+                btn.textContent = 'Start matching';
+            }
+        });
+
+        async function pollMatchStatus() {
+            if (!matchJobId) return;
+            try {
+                const resp = await fetch(`${API_BASE}/api/match/status/${matchJobId}`);
+                const data = await resp.json();
+
+                document.getElementById('matchProgressBar').style.width = `${data.progress_percent}%`;
+                document.getElementById('matchProgressText').textContent = `${data.processed} / ${data.total} produkter`;
+                document.getElementById('matchProgressPercent').textContent = `${data.progress_percent}%`;
+
+                if (data.status === 'completed' || data.status === 'failed') {
+                    clearInterval(matchPollInterval);
+                    matchPollInterval = null;
+
+                    if (data.status === 'completed') {
+                        document.getElementById('matchProgressTitle').textContent = 'Matching fullf\u00f8rt!';
+                        await loadMatchResults();
+                    } else {
+                        document.getElementById('matchProgressTitle').textContent = 'Matching feilet';
+                        document.getElementById('matchProgressDetail').textContent = data.error || 'Ukjent feil';
+                    }
+                }
+            } catch (e) {
+                console.error('Match poll error:', e);
+            }
+        }
+
+        async function loadMatchResults() {
+            try {
+                const resp = await fetch(`${API_BASE}/api/match/results/${matchJobId}`);
+                const data = await resp.json();
+                matchResultsData = data.results || [];
+
+                const isHardcore = data.match_mode === 'hardcore_price';
+                const modeLabel = data.mode_label;
+
+                // Mode badge
+                const badge = document.getElementById('matchModeBadge');
+                badge.textContent = modeLabel;
+                badge.style.background = isHardcore ? '#fef3c7' : '#dbeafe';
+                badge.style.color = isHardcore ? '#92400e' : '#1e40af';
+
+                // Stats
+                const summary = data.summary || {};
+                const statsHtml = `
+                    <div class="stat-card"><div class="value">${summary.total || 0}</div><div class="label">Totalt</div></div>
+                    <div class="stat-card success"><div class="value">${summary.matched || 0}</div><div class="label">Matchet</div></div>
+                    <div class="stat-card danger"><div class="value">${summary.no_match || 0}</div><div class="label">Ingen match</div></div>
+                    <div class="stat-card warning"><div class="value">${summary.multiple_candidates || 0}</div><div class="label">Flere alternativer</div></div>
+                    <div class="stat-card"><div class="value">${summary.manual_review_needed || 0}</div><div class="label">Manuell vurdering</div></div>
+                    <div class="stat-card"><div class="value">${summary.manual_selections || 0}</div><div class="label">Manuelt valgt</div></div>
+                    ${summary.avg_price ? `<div class="stat-card"><div class="value">kr ${summary.avg_price.toFixed(0)}</div><div class="label">Snitt ALC-pris</div></div>` : ''}
+                    ${summary.products_with_price ? `<div class="stat-card"><div class="value">${summary.products_with_price}</div><div class="label">Med ALC-pris</div></div>` : ''}
+                `;
+                document.getElementById('matchStatsGrid').innerHTML = statsHtml;
+
+                // Results table
+                renderMatchResults(matchResultsData, isHardcore);
+
+                // Download button
+                document.getElementById('matchDownloadBtn').onclick = () => {
+                    window.location.href = `${API_BASE}/api/match/download/${matchJobId}`;
+                };
+
+                // Show results
+                document.getElementById('matchResultsSection').classList.add('active');
+
+            } catch (e) {
+                console.error('Failed to load match results:', e);
+                document.getElementById('matchProgressDetail').textContent = `Kunne ikke laste resultater: ${e.message}`;
+            }
+        }
+
+        function renderMatchResults(results, isHardcore) {
+            const tbody = document.getElementById('matchResultsBody');
+            let html = '';
+
+            for (const r of results) {
+                const statusBadge = getMatchStatusBadge(r.status);
+                const selectedName = r.selected_product_name || '-';
+                const alcDisplay = r.selected_alc_price != null
+                    ? `kr ${r.selected_alc_price.toFixed(2)}`
+                    : '<span style="color:#94a3b8">Mangler</span>';
+                const relevanceDisplay = r.selected_relevance_score != null
+                    ? `${r.selected_relevance_score}%`
+                    : '-';
+
+                // Main row
+                html += `<tr class="expandable" onclick="toggleMatchDetail(this, ${r.input_row})">`;
+                html += `<td>${r.input_row}</td>`;
+                html += `<td title="${escapeHtml(r.input_specification || '')}">${escapeHtml(r.input_product_name || '')}</td>`;
+                html += `<td>${statusBadge}</td>`;
+                html += `<td title="${r.selected_candidate || ''}">${escapeHtml(selectedName.substring(0, 40))}</td>`;
+                html += `<td style="font-weight:600">${alcDisplay}</td>`;
+                html += `<td>${relevanceDisplay}</td>`;
+                html += `<td>${r.candidate_count}</td>`;
+                html += `</tr>`;
+
+                // Detail row with candidates
+                html += `<tr class="detail-row" id="matchDetail_${r.input_row}"><td colspan="7"><div class="detail-content">`;
+                html += `<div style="margin-bottom:0.5rem">`;
+                html += `<strong>Innprodukt:</strong> ${escapeHtml(r.input_product_name || '')}`;
+                if (r.input_specification) html += ` &mdash; <em>${escapeHtml(r.input_specification)}</em>`;
+                if (r.comment) html += `<br><span style="color:var(--text-muted);font-size:0.8rem">${escapeHtml(r.comment)}</span>`;
+                html += `</div>`;
+
+                if (r.candidates && r.candidates.length > 0) {
+                    html += `<table style="width:100%;border-collapse:collapse;font-size:0.82rem;margin-top:0.5rem">`;
+                    html += `<thead><tr style="border-bottom:2px solid var(--border);text-align:left">`;
+                    html += `<th style="padding:0.4rem;width:30px"></th>`;
+                    html += `<th style="padding:0.4rem">#</th>`;
+                    html += `<th style="padding:0.4rem">Art.nr</th>`;
+                    html += `<th style="padding:0.4rem">Produktnavn</th>`;
+                    html += `<th style="padding:0.4rem">Spesifikasjon</th>`;
+                    html += `<th style="padding:0.4rem">Produsent</th>`;
+                    html += `<th style="padding:0.4rem;font-weight:700;color:#b45309">ALC-pris</th>`;
+                    html += `<th style="padding:0.4rem">Relevans</th>`;
+                    html += `<th style="padding:0.4rem">Tags</th>`;
+                    html += `<th style="padding:0.4rem">Velg</th>`;
+                    html += `</tr></thead><tbody>`;
+
+                    for (const c of r.candidates) {
+                        const isSelected = c.article_number === r.selected_candidate;
+                        const rowBg = isSelected ? 'background:#e8f5e9;' : '';
+                        const priceStr = c.alc_price != null ? `kr ${c.alc_price.toFixed(2)}` : '<span style="color:#94a3b8">-</span>';
+
+                        // Tags display
+                        let tagsHtml = '';
+                        if (c.tags && c.tags.length > 0) {
+                            for (const tag of c.tags) {
+                                if (tag === 'billigst') tagsHtml += '<span style="background:#dcfce7;color:#166534;padding:0.1rem 0.4rem;border-radius:10px;font-size:0.72rem;font-weight:600;margin-right:0.2rem">Billigst</span>';
+                                else if (tag === 'best_match') tagsHtml += '<span style="background:#dbeafe;color:#1e40af;padding:0.1rem 0.4rem;border-radius:10px;font-size:0.72rem;font-weight:600;margin-right:0.2rem">Best match</span>';
+                                else if (tag === 'anbefalt_hardcore') tagsHtml += '<span style="background:#fef3c7;color:#92400e;padding:0.1rem 0.4rem;border-radius:10px;font-size:0.72rem;font-weight:600;margin-right:0.2rem">Anbefalt</span>';
+                            }
+                        }
+
+                        html += `<tr style="${rowBg}border-bottom:1px solid #f1f5f9">`;
+                        html += `<td style="padding:0.4rem;text-align:center">${isSelected ? '<span style="color:#16a34a;font-weight:700">&#10003;</span>' : ''}</td>`;
+                        html += `<td style="padding:0.4rem;color:var(--text-muted)">${c.rank}</td>`;
+                        html += `<td style="padding:0.4rem;font-family:monospace;font-size:0.78rem">${escapeHtml(c.article_number)}</td>`;
+                        html += `<td style="padding:0.4rem">${escapeHtml(c.product_name || '')}</td>`;
+                        html += `<td style="padding:0.4rem;max-width:150px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap" title="${escapeHtml(c.specification || '')}">${escapeHtml(c.specification || '')}</td>`;
+                        html += `<td style="padding:0.4rem;font-size:0.78rem">${escapeHtml(c.supplier || '')}</td>`;
+                        html += `<td style="padding:0.4rem;font-weight:600;color:#b45309">${priceStr}</td>`;
+                        html += `<td style="padding:0.4rem">${c.relevance_score}%</td>`;
+                        html += `<td style="padding:0.4rem">${tagsHtml}</td>`;
+                        html += `<td style="padding:0.4rem">`;
+                        if (!isSelected) {
+                            html += `<button class="btn" style="font-size:0.72rem;padding:0.2rem 0.5rem;background:#eff6ff;color:var(--primary);border:1px solid #bfdbfe;cursor:pointer" onclick="event.stopPropagation();selectMatchCandidate(${r.input_row},'${c.article_number}')">Velg</button>`;
+                        } else {
+                            html += '<span style="color:#16a34a;font-size:0.78rem;font-weight:600">Valgt</span>';
+                        }
+                        html += `</td></tr>`;
+
+                        // AI explanation row
+                        if (c.ai_explanation) {
+                            html += `<tr style="${rowBg}"><td></td><td colspan="9" style="padding:0.2rem 0.4rem 0.5rem;font-size:0.75rem;color:var(--text-muted);font-style:italic">${escapeHtml(c.ai_explanation)}</td></tr>`;
+                        }
+                    }
+                    html += `</tbody></table>`;
+                } else {
+                    html += `<p style="color:var(--text-muted);font-size:0.85rem">Ingen kandidater funnet.</p>`;
+                }
+                html += `</div></td></tr>`;
+            }
+            tbody.innerHTML = html;
+        }
+
+        function getMatchStatusBadge(status) {
+            const map = {
+                matched: '<span class="status-badge status-ok">Matchet</span>',
+                no_match: '<span class="status-badge status-missing">Ingen match</span>',
+                multiple: '<span class="status-badge status-improve">Flere alternativer</span>',
+                manual_review: '<span class="status-badge" style="background:#fef3c7;color:#92400e">Manuell vurdering</span>',
+                pending: '<span class="status-badge" style="background:#e2e8f0;color:#475569">Venter</span>',
+            };
+            return map[status] || `<span class="status-badge">${status}</span>`;
+        }
+
+        function toggleMatchDetail(row, inputRow) {
+            const detailRow = document.getElementById(`matchDetail_${inputRow}`);
+            if (!detailRow) return;
+            const isVisible = detailRow.classList.contains('visible');
+            detailRow.classList.toggle('visible');
+            row.classList.toggle('expanded');
+        }
+
+        async function selectMatchCandidate(inputRow, articleNumber) {
+            if (!matchJobId) return;
+            try {
+                const resp = await fetch(`${API_BASE}/api/match/select/${matchJobId}`, {
+                    method: 'POST',
+                    headers: {'Content-Type': 'application/json'},
+                    body: JSON.stringify({input_row: inputRow, article_number: articleNumber}),
+                });
+                if (!resp.ok) {
+                    const err = await resp.json();
+                    alert(`Feil: ${err.detail || 'Kunne ikke velge kandidat'}`);
+                    return;
+                }
+
+                // Update local data and re-render
+                for (const r of matchResultsData) {
+                    if (r.input_row === inputRow) {
+                        r.selected_candidate = articleNumber;
+                        r.selected_by = 'manual';
+                        r.status = 'matched';
+                        // Update selected product info
+                        for (const c of r.candidates) {
+                            if (c.article_number === articleNumber) {
+                                r.selected_product_name = c.product_name;
+                                r.selected_alc_price = c.alc_price;
+                                r.selected_relevance_score = c.relevance_score;
+                                break;
+                            }
+                        }
+                        break;
+                    }
+                }
+
+                const isHardcore = matchMode === 'hardcore_price';
+                renderMatchResults(matchResultsData, isHardcore);
+
+            } catch (e) {
+                alert(`Nettverksfeil: ${e.message}`);
+            }
+        }
+
+        function resetMatchModule() {
+            matchFile = null;
+            matchJobId = null;
+            matchResultsData = [];
+            document.getElementById('matchFileName').classList.add('hidden');
+            document.getElementById('matchFileInfo').textContent = '';
+            document.getElementById('matchColumnInfo').classList.add('hidden');
+            document.getElementById('matchStartBtn').disabled = true;
+            document.getElementById('matchStartBtn').textContent = 'Start matching';
+            document.getElementById('matchProgressSection').classList.remove('active');
+            document.getElementById('matchResultsSection').classList.remove('active');
+            document.getElementById('matchProgressBar').style.width = '0%';
+            document.getElementById('matchFileInput').value = '';
+            if (matchPollInterval) { clearInterval(matchPollInterval); matchPollInterval = null; }
+        }
+
     </script>
 </body>
 </html>

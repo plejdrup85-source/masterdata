@@ -10,6 +10,7 @@ import time
 import uuid
 from collections import defaultdict
 from datetime import datetime
+from io import BytesIO
 from pathlib import Path
 from typing import Optional
 
@@ -2806,6 +2807,586 @@ async def _run_analysis(
         logger.error(f"[{job_id}] Analysis failed: {e}")
         job.status = JobStatus.FAILED
         job.errors.append(f"Fatal error: {str(e)}")
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+# MODULE: PRODUKTMATCHING (Standard + Hardcore Pris Prioritet)
+# ══════════════════════════════════════════════════════════════════════════════
+
+from backend.matcher import (
+    MatchMode, MatchResult, match_product, select_candidate, parse_alc_price,
+)
+
+# In-memory storage for match jobs
+_match_jobs: dict[str, dict] = {}
+MATCH_OUTPUT_DIR = OUTPUT_DIR / "matching"
+MATCH_OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
+
+
+def _build_catalog_for_matching(alc_prices: Optional[dict] = None) -> list[dict]:
+    """Build catalog list from Jeeves index for matching.
+
+    alc_prices: optional dict mapping article_number → ALC price
+    """
+    if not _jeeves_index or not _jeeves_index.loaded:
+        return []
+
+    catalog = []
+    for artnr in _jeeves_index.all_article_numbers():
+        jd = _jeeves_index.get(artnr)
+        if not jd:
+            continue
+        item = {
+            "article_number": jd.article_number,
+            "item_description": jd.item_description or "",
+            "specification": jd.specification or "",
+            "supplier": jd.supplier or "",
+            "product_brand": jd.product_brand or "",
+            "alc_price": (alc_prices or {}).get(artnr),
+        }
+        catalog.append(item)
+    return catalog
+
+
+@app.post("/api/match/start")
+async def start_match_job(
+    request: Request,
+    file: UploadFile = File(...),
+    match_mode: str = Query(MatchMode.STANDARD.value, description="Match mode: standard or hardcore_price"),
+):
+    """Start a product matching job.
+
+    Upload an Excel file with input products to match against the catalog.
+    Expected columns: product name, specification (optional), article number (optional).
+    Optionally includes ALC prices for catalog products.
+    """
+    _cleanup_old_jobs()
+
+    client_ip = request.client.host if request.client else "unknown"
+    if not _check_rate_limit(client_ip):
+        raise HTTPException(429, "For mange forespørsler. Prøv igjen senere.")
+
+    if not _jeeves_index or not _jeeves_index.loaded:
+        raise HTTPException(400, "Jeeves-katalog er ikke lastet. Kan ikke kjøre matching.")
+
+    if match_mode not in [MatchMode.STANDARD.value, MatchMode.HARDCORE_PRICE.value]:
+        raise HTTPException(400, f"Ugyldig matchmodus: {match_mode}. Bruk 'standard' eller 'hardcore_price'.")
+
+    content = await file.read()
+    if len(content) > MAX_FILE_SIZE:
+        raise HTTPException(400, f"Filen er for stor. Maks {MAX_FILE_SIZE / 1024 / 1024:.0f} MB.")
+
+    # Parse input Excel
+    try:
+        from openpyxl import load_workbook
+        wb = load_workbook(BytesIO(content), read_only=True, data_only=True)
+        ws = wb.active
+        rows_iter = ws.iter_rows()
+        header_row = next(rows_iter)
+        headers = [str(cell.value or "").strip().lower() for cell in header_row]
+
+        # Detect columns
+        name_col = None
+        spec_col = None
+        artnr_col = None
+        alc_col = None
+
+        name_keywords = {"produktnavn", "produkt", "product", "navn", "name", "varenavn", "beskrivelse"}
+        spec_keywords = {"spesifikasjon", "specification", "spec", "detaljer", "details"}
+        artnr_keywords = {"artikkelnummer", "artikkel", "artikkelnr", "artnr", "art.nr", "sku", "varenr", "varenummer"}
+        alc_keywords = {"alc", "alc-pris", "alc pris", "alcpris", "pris", "price", "enhetspris"}
+
+        for idx, h in enumerate(headers):
+            h_normalized = h.replace(".", "").replace(" ", "").replace("-", "").replace("_", "")
+            if name_col is None and any(kw.replace(".", "").replace(" ", "") in h_normalized for kw in name_keywords):
+                name_col = idx
+            elif spec_col is None and any(kw.replace(".", "").replace(" ", "") in h_normalized for kw in spec_keywords):
+                spec_col = idx
+            elif artnr_col is None and any(kw.replace(".", "").replace(" ", "") in h_normalized for kw in artnr_keywords):
+                artnr_col = idx
+            elif alc_col is None and any(kw.replace(".", "").replace(" ", "") in h_normalized for kw in alc_keywords):
+                alc_col = idx
+
+        # Fallback: first column is product name if no header match
+        if name_col is None:
+            name_col = 0
+
+        # Read input products
+        input_products = []
+        for row_num, row in enumerate(rows_iter, start=2):
+            values = [cell.value for cell in row]
+            name = str(values[name_col] or "").strip() if name_col is not None and len(values) > name_col else ""
+            spec = str(values[spec_col] or "").strip() if spec_col is not None and len(values) > spec_col else ""
+            artnr = str(values[artnr_col] or "").strip() if artnr_col is not None and len(values) > artnr_col else ""
+
+            if not name and not spec:
+                continue
+
+            input_products.append({
+                "row": row_num,
+                "name": name,
+                "specification": spec,
+                "article_number": artnr,
+            })
+
+        # Read ALC prices if column found
+        alc_prices = {}
+        if alc_col is not None:
+            # Re-read to get ALC prices (this is for catalog products, not input)
+            # ALC prices typically come from a separate source; for now we handle
+            # them if present in the uploaded file as a mapping column
+            pass
+
+        wb.close()
+
+    except Exception as e:
+        logger.error(f"Failed to parse match input: {e}")
+        raise HTTPException(400, f"Kunne ikke lese Excel-filen: {e}")
+
+    if not input_products:
+        raise HTTPException(400, "Ingen produkter funnet i filen")
+
+    if len(input_products) > 500:
+        raise HTTPException(400, f"For mange produkter ({len(input_products)}). Maks 500 per matching-jobb.")
+
+    # Create match job
+    job_id = str(uuid.uuid4())[:8]
+    match_job = {
+        "job_id": job_id,
+        "status": "running",
+        "match_mode": match_mode,
+        "total": len(input_products),
+        "processed": 0,
+        "results": [],
+        "created_at": time.time(),
+        "source_filename": file.filename or "",
+        "input_products": input_products,
+        "detected_columns": {
+            "name": headers[name_col] if name_col is not None else None,
+            "specification": headers[spec_col] if spec_col is not None else None,
+            "article_number": headers[artnr_col] if artnr_col is not None else None,
+            "alc_price": headers[alc_col] if alc_col is not None else None,
+        },
+        "output_file": None,
+        "user_selections": {},  # artnr → selected_candidate overrides
+    }
+    _match_jobs[job_id] = match_job
+
+    # Run matching in background
+    async def _run_matching():
+        try:
+            catalog = _build_catalog_for_matching()
+            if not catalog:
+                match_job["status"] = "failed"
+                match_job["error"] = "Katalogen er tom"
+                return
+
+            use_ai = bool(os.environ.get("ANTHROPIC_API_KEY"))
+
+            for inp in input_products:
+                if match_job.get("cancelled"):
+                    break
+
+                result = await match_product(
+                    input_name=inp["name"],
+                    input_spec=inp["specification"],
+                    catalog=catalog,
+                    match_mode=match_mode,
+                    use_ai=use_ai,
+                    input_row=inp["row"],
+                    input_article_number=inp["article_number"],
+                )
+                match_job["results"].append(result)
+                match_job["processed"] += 1
+
+            # Generate Excel output
+            _generate_match_excel(match_job)
+
+            match_job["status"] = "completed"
+
+            # Save to history
+            _add_match_to_history(match_job)
+
+        except Exception as e:
+            logger.error(f"[match-{job_id}] Failed: {e}")
+            match_job["status"] = "failed"
+            match_job["error"] = str(e)
+
+    task = asyncio.create_task(_run_matching())
+    _background_tasks.add(task)
+    task.add_done_callback(_background_tasks.discard)
+
+    mode_label = "Hardcore Pris Prioritet" if match_mode == MatchMode.HARDCORE_PRICE.value else "Standard"
+
+    return {
+        "job_id": job_id,
+        "match_mode": match_mode,
+        "mode_label": mode_label,
+        "total_products": len(input_products),
+        "detected_columns": match_job["detected_columns"],
+        "message": f"Matching startet ({mode_label}): {len(input_products)} produkter mot {_jeeves_index.count} i katalogen",
+    }
+
+
+@app.get("/api/match/status/{job_id}")
+async def get_match_status(job_id: str):
+    """Get status of a matching job."""
+    job = _match_jobs.get(job_id)
+    if not job:
+        raise HTTPException(404, "Matching-jobb ikke funnet")
+
+    return {
+        "job_id": job["job_id"],
+        "status": job["status"],
+        "match_mode": job["match_mode"],
+        "total": job["total"],
+        "processed": job["processed"],
+        "progress_percent": round(job["processed"] / job["total"] * 100, 1) if job["total"] > 0 else 0,
+        "error": job.get("error"),
+    }
+
+
+@app.get("/api/match/results/{job_id}")
+async def get_match_results(job_id: str):
+    """Get matching results with all candidates."""
+    job = _match_jobs.get(job_id)
+    if not job:
+        raise HTTPException(404, "Matching-jobb ikke funnet")
+
+    if job["status"] not in ("completed", "running"):
+        raise HTTPException(400, "Resultater ikke tilgjengelig ennå")
+
+    return {
+        "job_id": job["job_id"],
+        "status": job["status"],
+        "match_mode": job["match_mode"],
+        "mode_label": "Hardcore Pris Prioritet" if job["match_mode"] == MatchMode.HARDCORE_PRICE.value else "Standard",
+        "total": job["total"],
+        "processed": job["processed"],
+        "source_filename": job.get("source_filename", ""),
+        "results": [r.to_dict() for r in job["results"]],
+        "summary": _compute_match_summary(job),
+    }
+
+
+def _compute_match_summary(job: dict) -> dict:
+    """Compute summary statistics for a matching job."""
+    results = job.get("results", [])
+    total = len(results)
+    matched = sum(1 for r in results if r.status == "matched")
+    no_match = sum(1 for r in results if r.status == "no_match")
+    multiple = sum(1 for r in results if r.status == "multiple")
+    manual = sum(1 for r in results if r.status == "manual_review")
+    manual_selected = sum(1 for r in results if r.selected_by == "manual")
+
+    # Price stats (only for selected candidates with prices)
+    prices = []
+    for r in results:
+        sel = r.get_selected()
+        if sel and sel.alc_price is not None:
+            prices.append(sel.alc_price)
+
+    return {
+        "total": total,
+        "matched": matched,
+        "no_match": no_match,
+        "multiple_candidates": multiple,
+        "manual_review_needed": manual,
+        "manual_selections": manual_selected,
+        "avg_price": round(sum(prices) / len(prices), 2) if prices else None,
+        "min_price": min(prices) if prices else None,
+        "max_price": max(prices) if prices else None,
+        "products_with_price": len(prices),
+    }
+
+
+@app.post("/api/match/select/{job_id}")
+async def select_match_candidate(
+    job_id: str,
+    data: dict = Body(...),
+):
+    """Manually select a candidate for a specific input row.
+
+    Body: {"input_row": 2, "article_number": "12345"}
+    """
+    job = _match_jobs.get(job_id)
+    if not job:
+        raise HTTPException(404, "Matching-jobb ikke funnet")
+
+    input_row = data.get("input_row")
+    article_number = data.get("article_number")
+
+    if input_row is None or not article_number:
+        raise HTTPException(400, "Mangler input_row eller article_number")
+
+    # Find the result for this row
+    for result in job["results"]:
+        if result.input_row == input_row:
+            success = select_candidate(result, article_number)
+            if success:
+                # Store user selection
+                job["user_selections"][str(input_row)] = article_number
+                # Regenerate Excel
+                _generate_match_excel(job)
+                return {
+                    "message": "Kandidat valgt",
+                    "input_row": input_row,
+                    "selected": article_number,
+                }
+            else:
+                raise HTTPException(400, f"Kandidat {article_number} finnes ikke for rad {input_row}")
+
+    raise HTTPException(404, f"Rad {input_row} ikke funnet i resultater")
+
+
+@app.get("/api/match/download/{job_id}")
+async def download_match_result(job_id: str):
+    """Download the matching result Excel file."""
+    job = _match_jobs.get(job_id)
+    if not job:
+        raise HTTPException(404, "Matching-jobb ikke funnet")
+
+    if job["status"] != "completed":
+        raise HTTPException(400, "Matching er ikke fullført ennå")
+
+    output_file = job.get("output_file")
+    if not output_file or not Path(output_file).exists():
+        raise HTTPException(404, "Resultatfilen finnes ikke")
+
+    mode_suffix = "hardcore_pris" if job["match_mode"] == MatchMode.HARDCORE_PRICE.value else "standard"
+    return FileResponse(
+        output_file,
+        filename=f"matching_{mode_suffix}_{job_id}.xlsx",
+        media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+    )
+
+
+def _generate_match_excel(job: dict) -> None:
+    """Generate Excel output for matching results."""
+    from openpyxl import Workbook
+    from openpyxl.styles import Alignment, Border, Font, PatternFill, Side
+
+    wb = Workbook()
+    results = job.get("results", [])
+    match_mode = job.get("match_mode", MatchMode.STANDARD.value)
+    is_hardcore = match_mode == MatchMode.HARDCORE_PRICE.value
+    mode_label = "Hardcore Pris Prioritet" if is_hardcore else "Standard"
+
+    # ── Sheet 1: Matching-resultater (main results) ──
+    ws = wb.active
+    ws.title = "Matching-resultater"
+
+    header_fill = PatternFill(start_color="4472C4", end_color="4472C4", fill_type="solid")
+    header_font = Font(bold=True, color="FFFFFF", size=11)
+    highlight_fill = PatternFill(start_color="E2EFDA", end_color="E2EFDA", fill_type="solid")
+    warning_fill = PatternFill(start_color="FFF2CC", end_color="FFF2CC", fill_type="solid")
+    danger_fill = PatternFill(start_color="FFC7CE", end_color="FFC7CE", fill_type="solid")
+    manual_fill = PatternFill(start_color="D9E2F3", end_color="D9E2F3", fill_type="solid")
+
+    headers = [
+        "Rad", "Innprodukt", "Inn-spesifikasjon", "Inn-artikkelnr",
+        "Matchmodus", "Status",
+        "Valgt art.nr", "Valgt produktnavn", "Valgt spesifikasjon",
+        "Valgt ALC-pris", "Valgt produsent",
+        "Relevansscore", "Valgt i UI",
+        "Billigste relevante alternativ", "Standard beste match avviker fra valgt",
+        "Antall kandidater", "Kommentar",
+    ]
+    for col, h in enumerate(headers, 1):
+        cell = ws.cell(row=1, column=col, value=h)
+        cell.fill = header_fill
+        cell.font = header_font
+        cell.alignment = Alignment(horizontal="center", wrap_text=True)
+
+    for row_idx, result in enumerate(results, 2):
+        selected = result.get_selected()
+        is_manual = result.selected_by == "manual"
+
+        # Check if this is the cheapest relevant
+        priced_relevant = [c for c in result.candidates if c.is_sufficiently_relevant and c.alc_price is not None]
+        is_cheapest_relevant = False
+        if selected and priced_relevant:
+            cheapest = min(priced_relevant, key=lambda c: c.alc_price)
+            is_cheapest_relevant = selected.article_number == cheapest.article_number
+
+        # Check if standard best match differs from selected
+        standard_best_differs = False
+        if selected and result.candidates:
+            best_by_relevance = max(result.candidates, key=lambda c: c.relevance_score)
+            standard_best_differs = best_by_relevance.article_number != selected.article_number
+
+        row_data = [
+            result.input_row,
+            result.input_product_name,
+            result.input_specification,
+            result.input_article_number,
+            mode_label,
+            result.status,
+            selected.article_number if selected else "",
+            selected.product_name if selected else "",
+            selected.specification if selected else "",
+            selected.alc_price if selected and selected.alc_price else "",
+            selected.supplier if selected else "",
+            round(selected.relevance_score, 1) if selected else "",
+            "Ja" if is_manual else "Nei",
+            "Ja" if is_cheapest_relevant else "Nei",
+            "Ja" if standard_best_differs else "Nei",
+            len(result.candidates),
+            result.comment,
+        ]
+
+        for col, val in enumerate(row_data, 1):
+            cell = ws.cell(row=row_idx, column=col, value=val)
+            if col == 10 and isinstance(val, (int, float)) and val > 0:
+                cell.number_format = '#,##0.00 "kr"'
+
+        # Row highlighting
+        if result.status == "no_match":
+            for col in range(1, len(headers) + 1):
+                ws.cell(row=row_idx, column=col).fill = danger_fill
+        elif result.status == "manual_review":
+            for col in range(1, len(headers) + 1):
+                ws.cell(row=row_idx, column=col).fill = warning_fill
+        elif is_manual:
+            for col in range(1, len(headers) + 1):
+                ws.cell(row=row_idx, column=col).fill = manual_fill
+
+    # Auto-width
+    for col_idx in range(1, len(headers) + 1):
+        ws.column_dimensions[chr(64 + col_idx) if col_idx <= 26 else 'A'].width = 18
+
+    # ── Sheet 2: Alle kandidater (all candidates per row) ──
+    ws2 = wb.create_sheet("Alle kandidater")
+    cand_headers = [
+        "Inn-rad", "Innprodukt",
+        "Kandidat-rang", "Kandidat art.nr", "Kandidat produktnavn",
+        "Kandidat spesifikasjon", "Kandidat produsent",
+        "ALC-pris", "Relevansscore", "AI-score",
+        "Tilstrekkelig relevant", "Tags", "AI-forklaring",
+        "Er valgt",
+    ]
+    for col, h in enumerate(cand_headers, 1):
+        cell = ws2.cell(row=1, column=col, value=h)
+        cell.fill = header_fill
+        cell.font = header_font
+        cell.alignment = Alignment(horizontal="center", wrap_text=True)
+
+    cand_row = 2
+    for result in results:
+        for cand in result.candidates:
+            is_selected = cand.article_number == result.selected_candidate
+            cand_data = [
+                result.input_row,
+                result.input_product_name,
+                cand.rank,
+                cand.article_number,
+                cand.product_name,
+                cand.specification,
+                cand.supplier,
+                cand.alc_price if cand.alc_price else "",
+                round(cand.relevance_score, 1),
+                round(cand.ai_relevance_score, 1) if cand.ai_relevance_score is not None else "",
+                "Ja" if cand.is_sufficiently_relevant else "Nei",
+                ", ".join(cand.tags) if cand.tags else "",
+                cand.ai_explanation,
+                "JA" if is_selected else "",
+            ]
+            for col, val in enumerate(cand_data, 1):
+                cell = ws2.cell(row=cand_row, column=col, value=val)
+                if col == 8 and isinstance(val, (int, float)) and val > 0:
+                    cell.number_format = '#,##0.00 "kr"'
+                if is_selected:
+                    cell.fill = highlight_fill
+            cand_row += 1
+
+    # ── Sheet 3: Sammendrag ──
+    ws3 = wb.create_sheet("Sammendrag")
+    ws3.insert_rows(1)
+    summary = _compute_match_summary(job)
+
+    summary_data = [
+        ("Matching-rapport", ""),
+        ("", ""),
+        ("Matchmodus", mode_label),
+        ("Kildefil", job.get("source_filename", "")),
+        ("Dato", datetime.now().strftime("%Y-%m-%d %H:%M")),
+        ("", ""),
+        ("Totalt produkter", summary["total"]),
+        ("Matchet", summary["matched"]),
+        ("Ingen match", summary["no_match"]),
+        ("Flere kandidater", summary["multiple_candidates"]),
+        ("Krever manuell vurdering", summary["manual_review_needed"]),
+        ("Manuelt valgt i UI", summary["manual_selections"]),
+        ("", ""),
+        ("Prisinformasjon", ""),
+        ("Produkter med ALC-pris", summary["products_with_price"]),
+        ("Gjennomsnittlig ALC-pris", f"kr {summary['avg_price']:,.2f}" if summary["avg_price"] else "N/A"),
+        ("Laveste ALC-pris", f"kr {summary['min_price']:,.2f}" if summary["min_price"] else "N/A"),
+        ("Høyeste ALC-pris", f"kr {summary['max_price']:,.2f}" if summary["max_price"] else "N/A"),
+    ]
+
+    for row_idx, (label, value) in enumerate(summary_data, 1):
+        ws3.cell(row=row_idx, column=1, value=label).font = Font(bold=bool(label and not value))
+        ws3.cell(row=row_idx, column=2, value=value)
+
+    ws3.column_dimensions["A"].width = 30
+    ws3.column_dimensions["B"].width = 30
+
+    # Save
+    timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+    mode_suffix = "hardcore_pris" if is_hardcore else "standard"
+    output_filename = f"matching_{mode_suffix}_{job['job_id']}_{timestamp}.xlsx"
+    output_path = str(MATCH_OUTPUT_DIR / output_filename)
+    wb.save(output_path)
+    job["output_file"] = output_path
+    logger.info(f"Match Excel saved: {output_path}")
+
+
+def _add_match_to_history(job: dict) -> None:
+    """Add a completed match job to the persistent history."""
+    if job["status"] != "completed":
+        return
+    src = Path(job.get("output_file", ""))
+    if not src.exists():
+        return
+
+    history_filename = f"matching_{job['job_id']}.xlsx"
+    dest = HISTORY_EXCEL_DIR / history_filename
+    try:
+        shutil.copy2(str(src), str(dest))
+    except OSError as e:
+        logger.error(f"Failed to copy match Excel to history: {e}")
+        return
+
+    summary = _compute_match_summary(job)
+    entry = {
+        "job_id": job["job_id"],
+        "timestamp": datetime.fromtimestamp(job["created_at"]).isoformat(),
+        "created_at": job["created_at"],
+        "source_filename": job.get("source_filename", ""),
+        "excel_filename": history_filename,
+        "product_count": summary["total"],
+        "analysis_mode": f"matching_{job['match_mode']}",
+        "focus_areas": [],
+        "batch_info": f"Matching ({summary['matched']}/{summary['total']} matchet)",
+        "avg_score": summary.get("avg_price") or 0,
+        "critical_count": summary["no_match"],
+        "match_mode": job["match_mode"],
+        "match_summary": summary,
+    }
+
+    entries = _load_history()
+    entries.append(entry)
+    _save_history(entries)
+
+
+@app.get("/api/match/history")
+async def get_match_history():
+    """Get matching job history."""
+    entries = _load_history()
+    match_entries = [e for e in entries if e.get("analysis_mode", "").startswith("matching_")]
+    match_entries.reverse()
+    return {"entries": match_entries}
 
 
 if __name__ == "__main__":
