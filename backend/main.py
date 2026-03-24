@@ -935,6 +935,7 @@ async def download_result(
         create_output_excel(
             filtered_results, filtered_path,
             analysis_mode=job.analysis_mode, focus_areas=job.focus_areas,
+            excluded_products=job.excluded_products,
             suggestion_reviews=reviews,
         )
         return FileResponse(
@@ -987,11 +988,14 @@ async def get_results(job_id: str):
         "processed_products": job.processed_products,
         "analysis_mode": job.analysis_mode,
         "focus_areas": job.focus_areas,
+        "excluded_products": job.excluded_products,
         "results": [
             {
                 "article_number": r.article_number,
                 "product_name": r.product_data.product_name,
                 "found": r.product_data.found_on_onemed,
+                "verification_status": r.product_data.verification_status.value,
+                "product_url": r.product_data.product_url,
                 "score": r.total_score,
                 "status": r.overall_status.value,
                 "comment": r.overall_comment,

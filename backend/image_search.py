@@ -42,9 +42,8 @@ MEDIA_BANKS: dict[str, list[dict]] = {
             "name": "Abena Mediacenter",
             "base": "https://mediacenter.abena.com",
             "search_url": "https://mediacenter.abena.com/search?q={query}",
-            "direct_patterns": [
-                "https://mediacenter.abena.com/m/{hash}/Preview-{artnr}-psd.jpg",
-            ],
+            # Site-specific search: search engine with site: filter
+            "site_search_domains": ["mediacenter.abena.com", "abena.com"],
             "source_type": "manufacturer_mediabank",
         },
         {
@@ -107,6 +106,38 @@ MEDIA_BANKS: dict[str, list[dict]] = {
             "name": "3M",
             "base": "https://www.3m.com",
             "search_url": "https://www.3m.com/3M/en_US/search/?Ntt={query}",
+            "source_type": "manufacturer_website",
+        },
+    ],
+    "sca": [
+        {
+            "name": "SCA / TENA",
+            "base": "https://www.tena.no",
+            "search_url": "https://www.tena.no/sok/?q={query}",
+            "source_type": "manufacturer_website",
+        },
+    ],
+    "dansac": [
+        {
+            "name": "Dansac",
+            "base": "https://www.dansac.com",
+            "search_url": "https://www.dansac.com/search?q={query}",
+            "source_type": "manufacturer_website",
+        },
+    ],
+    "hollister": [
+        {
+            "name": "Hollister",
+            "base": "https://www.hollister.com",
+            "search_url": "https://www.hollister.com/search?q={query}",
+            "source_type": "manufacturer_website",
+        },
+    ],
+    "medela": [
+        {
+            "name": "Medela",
+            "base": "https://www.medela.com",
+            "search_url": "https://www.medela.com/search?q={query}",
             "source_type": "manufacturer_website",
         },
     ],
@@ -347,14 +378,26 @@ def _verify_candidate(
 
     # Compute identity score (capped at 1.0)
     if signals:
-        candidate.identity_score = min(sum(s[1] for s in signals), 1.0)
+        raw_score = sum(s[1] for s in signals)
+        # Bonus: if mfr artnr is found in BOTH URL and page text, strong combo
+        signal_names = {s[0] for s in signals}
+        if ("artnr_in_url" in signal_names or "artnr_in_filename" in signal_names) and "artnr_in_page_text" in signal_names:
+            raw_score += 0.10  # Combo bonus
+        if ("artnr_in_url" in signal_names or "artnr_in_filename" in signal_names) and "manufacturer_match" in signal_names:
+            raw_score += 0.10  # Manufacturer + artnr combo bonus
+        candidate.identity_score = min(raw_score, 1.0)
         candidate.verification_details = [s[0] for s in signals]
     else:
         candidate.identity_score = 0.0
 
     # Apply source type confidence multiplier
+    # For high identity scores on trusted sources, be less conservative
     source_mult = SOURCE_CONFIDENCE.get(candidate.source_type, 0.5)
-    candidate.confidence = min(candidate.identity_score * source_mult, 1.0)
+    if candidate.identity_score >= 0.5 and source_mult >= 0.7:
+        # Strong identity + trusted source: boost confidence
+        candidate.confidence = min(candidate.identity_score * (source_mult + 0.15), 1.0)
+    else:
+        candidate.confidence = min(candidate.identity_score * source_mult, 1.0)
 
     # Build human-readable reason
     details = []
@@ -446,6 +489,42 @@ def _extract_images_from_page(
                 seen_urls.add(url_part)
                 candidates.append((url_part, "", 1))
 
+    # Check data-src and data-zoom-image (lazy-loaded / zoom images)
+    for img in soup.find_all(["img", "a", "div"], attrs=True):
+        for attr in ["data-src", "data-zoom-image", "data-full-size", "data-large"]:
+            url = img.get(attr, "")
+            if url and _is_product_image(url) and url not in seen_urls:
+                if not url.startswith("http"):
+                    if url.startswith("//"):
+                        url = f"https:{url}"
+                    else:
+                        base = f"https://{urlparse(page_url).netloc}"
+                        url = f"{base}/{url.lstrip('/')}"
+                seen_urls.add(url)
+                alt = img.get("alt", "") or ""
+                priority = 0
+                norm_artnr = _normalize_artnr(manufacturer_artnr)
+                if norm_artnr and (_check_artnr_in_text(url, manufacturer_artnr) or _check_artnr_in_text(alt, manufacturer_artnr)):
+                    priority += 5
+                candidates.append((url, alt, priority))
+
+    # Check link tags that point to images (e.g., <a href="...jpg">)
+    for link in soup.find_all("a", href=True):
+        href = link.get("href", "")
+        if href and _is_product_image(href) and href not in seen_urls:
+            if not href.startswith("http"):
+                if href.startswith("//"):
+                    href = f"https:{href}"
+                else:
+                    base = f"https://{urlparse(page_url).netloc}"
+                    href = f"{base}/{href.lstrip('/')}"
+            seen_urls.add(href)
+            priority = 0
+            norm_artnr = _normalize_artnr(manufacturer_artnr)
+            if norm_artnr and _check_artnr_in_text(href, manufacturer_artnr):
+                priority += 5
+            candidates.append((href, "", priority))
+
     # Sort by priority (highest first) and return top candidates
     candidates.sort(key=lambda x: -x[2])
     return [(url, alt) for url, alt, _ in candidates[:10]]
@@ -456,6 +535,7 @@ async def _search_media_bank(
     manufacturer_artnr: str,
     product_name: str,
     client: httpx.AsyncClient,
+    specification: str = "",
 ) -> list[tuple[str, str, str]]:
     """Search a manufacturer media bank for product images.
 
@@ -467,15 +547,21 @@ async def _search_media_bank(
 
     if norm_artnr:
         queries.append(norm_artnr)
+        # Also try with common suffixes (e.g., 103014 -> 10301402)
+        queries.append(f"{norm_artnr}02")
+    if product_name and norm_artnr:
+        words = [w for w in product_name.split() if len(w) >= 3][:3]
+        if words:
+            queries.append(f"{norm_artnr} {' '.join(words)}")
     if product_name:
-        # Use first 3-4 significant words
         words = [w for w in product_name.split() if len(w) >= 3][:4]
         if words:
             queries.append(" ".join(words))
 
     search_url_template = bank.get("search_url", "")
 
-    for query in queries[:2]:
+    # Stage A: Direct media bank search
+    for query in queries[:3]:
         if not search_url_template:
             continue
         search_url = search_url_template.format(query=quote_plus(query))
@@ -494,6 +580,41 @@ async def _search_media_bank(
         except Exception as e:
             logger.debug(f"Media bank search error ({bank['name']}): {e}")
             continue
+
+    # Stage B: Site-specific web search (e.g., site:mediacenter.abena.com 103014)
+    site_domains = bank.get("site_search_domains", [])
+    if not results and norm_artnr and site_domains:
+        for domain in site_domains[:2]:
+            site_query = f"site:{domain} {norm_artnr}"
+            try:
+                ddg_url = f"https://html.duckduckgo.com/html/?q={quote_plus(site_query)}"
+                logger.info(f"Image search: site-specific query='{site_query}'")
+                response = await client.get(ddg_url, headers=HEADERS, follow_redirects=True, timeout=15)
+                if response.status_code != 200:
+                    continue
+
+                soup = BeautifulSoup(response.text, "lxml")
+                for link in soup.select("a.result__a")[:3]:
+                    href = link.get("href", "")
+                    if not href or "duckduckgo" in href:
+                        continue
+                    try:
+                        page_resp = await client.get(href, headers=HEADERS, follow_redirects=True, timeout=10)
+                        if page_resp.status_code != 200:
+                            continue
+                        page_text = BeautifulSoup(page_resp.text, "lxml").get_text(" ", strip=True)[:2000]
+                        images = _extract_images_from_page(page_resp.text, str(page_resp.url), manufacturer_artnr)
+                        for img_url, alt_text in images:
+                            results.append((img_url, page_text, str(page_resp.url)))
+                        if results:
+                            break
+                    except Exception:
+                        continue
+                if results:
+                    break
+            except Exception as e:
+                logger.debug(f"Site-specific search error ({domain}): {e}")
+                continue
 
     return results
 
@@ -587,7 +708,7 @@ async def _search_web_broad(
             if mfr_clean.endswith(suffix):
                 mfr_clean = mfr_clean[:-len(suffix)].strip()
 
-    # Build search queries — most specific first
+    # Build search queries — most specific first, many strategies
     search_queries = []
     if mfr_clean and norm_mfr_artnr:
         search_queries.append(f"{mfr_clean} {norm_mfr_artnr} product image")
@@ -599,9 +720,18 @@ async def _search_web_broad(
     if mfr_clean and product_description:
         desc_short = " ".join(product_description.split()[:5])
         search_queries.append(f"{mfr_clean} {desc_short}")
+    # Additional: specification-based queries
+    if norm_mfr_artnr and specification:
+        spec_short = specification[:40].strip()
+        search_queries.append(f"{norm_mfr_artnr} {spec_short}")
+    # Additional: our article number as last resort
+    if our_artnr and mfr_clean:
+        norm_our = _normalize_artnr(our_artnr)
+        if norm_our:
+            search_queries.append(f"{mfr_clean} {norm_our} product")
 
     # Try DuckDuckGo HTML search (no API key needed)
-    for query in search_queries[:3]:
+    for query in search_queries[:4]:
         try:
             ddg_url = f"https://html.duckduckgo.com/html/?q={quote_plus(query)}"
             logger.info(f"Image search: web query='{query}'")
@@ -735,7 +865,8 @@ async def search_product_images(
         for bank in banks:
             try:
                 raw_results = await _search_media_bank(
-                    bank, manufacturer_artnr, product_description, client
+                    bank, manufacturer_artnr, product_description, client,
+                    specification=specification,
                 )
                 for img_url, page_text, source_url in raw_results:
                     candidate = ImageCandidate(
