@@ -903,24 +903,30 @@ async def _load_sitemap(client: httpx.AsyncClient) -> list[str]:
                 f"{len(cached_index)} SKU-oppslag, {len(cached_no_sku)} sjekket-uten-SKU"
             )
 
-            # Download fresh sitemap to check for changes (lightweight — just XML)
+            # Download fresh sitemap to detect any URL changes (lightweight — just XML)
             fresh_urls = await _download_sitemap_xml(client)
             if fresh_urls:
-                from backend.index_fingerprint import (
-                    compute_sitemap_fingerprint,
-                    should_rebuild_index,
-                    save_index_fingerprint,
-                )
-                needs_rebuild, reason = should_rebuild_index(
+                from backend.index_fingerprint import should_rebuild_index
+                decision = should_rebuild_index(
                     CACHE_DIR, fresh_urls, len(cached_index), len(cached_no_sku),
                 )
-                if needs_rebuild:
-                    logger.info(f"Sitemap endret seg: {reason}")
-                    _sitemap_urls = fresh_urls
-                    # Keep existing SKU index — will be expanded incrementally
-                    _save_sitemap_index(_sitemap_urls, _sku_to_url)
+                if decision.can_reuse:
+                    logger.info(
+                        f"[sitemap] Cache gyldig, ingen endring: {decision.reason}"
+                    )
                 else:
-                    logger.info(f"Cache-signatur matcher, rebuild ikke nødvendig: {reason}")
+                    # Sitemap changed — update URL list, keep existing SKU index
+                    logger.info(
+                        f"[sitemap] Sitemap endret: {decision.reason} "
+                        f"(handling: {decision.action})"
+                    )
+                    _sitemap_urls = fresh_urls
+                    _save_sitemap_index(_sitemap_urls, _sku_to_url)
+            else:
+                logger.info(
+                    "[sitemap] Kunne ikke laste ned fersk sitemap — "
+                    "bruker cached versjon"
+                )
 
             return _sitemap_urls
 

@@ -91,7 +91,11 @@ def _find_jeeves_file() -> Optional[str]:
 
 @app.on_event("startup")
 async def preload_data():
-    """Pre-load sitemap and Jeeves data on startup."""
+    """Pre-load sitemap and Jeeves data on startup.
+
+    IMPORTANT: This does NOT trigger a full index rebuild unless the catalog
+    content has actually changed. Deploy with unchanged catalog = no rebuild.
+    """
     global _jeeves_index
 
     # Load Jeeves ERP data
@@ -99,75 +103,116 @@ async def preload_data():
     if jeeves_path:
         try:
             _jeeves_index = load_jeeves(jeeves_path)
-            logger.info(f"Jeeves data loaded: {_jeeves_index.count} products from {jeeves_path}")
+            logger.info(f"[startup] Jeeves data loaded: {_jeeves_index.count} products from {jeeves_path}")
         except Exception as e:
-            logger.warning(f"Failed to load Jeeves data from {jeeves_path}: {e}")
+            logger.warning(f"[startup] Failed to load Jeeves data from {jeeves_path}: {e}")
     else:
         logger.warning(
-            "Jeeves Excel file not found. Set JEEVES_FILE_PATH env var or place "
+            "[startup] Jeeves Excel file not found. Set JEEVES_FILE_PATH env var or place "
             "'Masterdata 2103.xlsx' in the project root. Two-source comparison disabled."
         )
 
     # Pre-load sitemap XML and cached SKU→URL index on startup.
-    # Uses persistent cache — does NOT rebuild unless sitemap content has changed.
+    # Uses persistent cache at CACHE_DIR — does NOT rebuild unless content changed.
+    from backend.scraper import CACHE_DIR
+    logger.info(f"[startup] CACHE_DIR={CACHE_DIR} (persistent={'data' in str(CACHE_DIR).lower()})")
+
     try:
         import httpx
         async with httpx.AsyncClient() as client:
             await _load_sitemap(client)
-        logger.info("Sitemap og indeks lastet ved oppstart")
+        logger.info("[startup] Sitemap og indeks lastet")
     except Exception as e:
-        logger.warning(f"Kunne ikke laste sitemap ved oppstart: {e}")
+        logger.warning(f"[startup] Kunne ikke laste sitemap: {e}")
 
-    # Check if full index build is needed — only if fingerprint says so.
-    # This prevents the 15-25 min rebuild that was triggered on every deploy.
+    # ── Fingerprint-based rebuild decision ──
+    # This is the key mechanism that prevents unnecessary rebuilds after deploy.
+    from backend.index_fingerprint import should_rebuild_index
+    from backend.scraper import _sitemap_urls, _sku_to_url, _checked_no_sku
+
     idx = get_index_stats()
-    if idx["sitemap_url_count"] > 0 and idx["coverage_pct"] < 80:
-        # Check fingerprint before deciding to rebuild
-        from backend.index_fingerprint import should_rebuild_index
-        from backend.scraper import CACHE_DIR, _sitemap_urls, _sku_to_url, _checked_no_sku
-        needs_rebuild, reason = should_rebuild_index(
-            CACHE_DIR, _sitemap_urls, len(_sku_to_url), len(_checked_no_sku),
-        )
-        if needs_rebuild:
-            logger.info(
-                f"Indeksdekning er {idx['coverage_pct']}% — {reason}. "
-                f"Starter bakgrunns-indeksering..."
-            )
+    decision = should_rebuild_index(
+        CACHE_DIR, _sitemap_urls, len(_sku_to_url), len(_checked_no_sku),
+    )
 
-            async def _auto_build():
-                global _index_build_status, _index_build_task
-                _index_build_status = {
-                    "status": "running",
-                    "started_at": datetime.now().isoformat(),
-                    "checked": 0, "total": 0, "new_indexed": 0,
-                    "trigger": "auto_startup",
-                }
+    logger.info(
+        f"[startup] Indeks-status: {idx['sku_index_count']} SKU / "
+        f"{idx['sitemap_url_count']} URLer = {idx['coverage_pct']}% dekning"
+    )
+    logger.info(
+        f"[startup] Rebuild-beslutning: {decision.action.upper()} — {decision.reason}"
+    )
 
-                async def _progress(checked, total, new_in_batch):
-                    _index_build_status["checked"] = checked
-                    _index_build_status["total"] = total
-                    _index_build_status["new_indexed"] += new_in_batch
-
-                try:
-                    result = await build_full_index(on_progress=_progress)
-                    _index_build_status.update({"status": "completed", **result})
-                    logger.info(f"Auto-indeksering fullført: {result}")
-                except Exception as exc:
-                    _index_build_status["status"] = "failed"
-                    _index_build_status["error"] = str(exc)
-                    logger.error(f"Auto-indeksering feilet: {exc}")
-
-            _index_build_task = asyncio.create_task(_auto_build())
-            _background_tasks.add(_index_build_task)
-            _index_build_task.add_done_callback(_background_tasks.discard)
-        else:
-            logger.info(
-                f"Indeksdekning er {idx['coverage_pct']}%, men rebuild ikke nødvendig: {reason}"
-            )
-    else:
+    if decision.needs_rebuild:
+        # FULL rebuild — only when catalog content genuinely changed or cache is missing
         logger.info(
-            f"Indeksdekning OK: {idx['coverage_pct']}% "
-            f"({idx['sku_index_count']}/{idx['sitemap_url_count']})"
+            f"[startup] ⚠ Starter FULL bakgrunns-indeksering "
+            f"(grunn: {decision.reason})"
+        )
+
+        async def _auto_build():
+            global _index_build_status, _index_build_task
+            _index_build_status = {
+                "status": "running",
+                "started_at": datetime.now().isoformat(),
+                "checked": 0, "total": 0, "new_indexed": 0,
+                "trigger": "auto_startup",
+                "reason": decision.reason,
+            }
+
+            async def _progress(checked, total, new_in_batch):
+                _index_build_status["checked"] = checked
+                _index_build_status["total"] = total
+                _index_build_status["new_indexed"] += new_in_batch
+
+            try:
+                result = await build_full_index(on_progress=_progress)
+                _index_build_status.update({"status": "completed", **result})
+                logger.info(f"[startup] Full indeksering fullført: {result}")
+            except Exception as exc:
+                _index_build_status["status"] = "failed"
+                _index_build_status["error"] = str(exc)
+                logger.error(f"[startup] Full indeksering feilet: {exc}")
+
+        _index_build_task = asyncio.create_task(_auto_build())
+        _background_tasks.add(_index_build_task)
+        _index_build_task.add_done_callback(_background_tasks.discard)
+
+    elif decision.needs_incremental:
+        # Minor sitemap change — run lightweight incremental scan in background
+        logger.info(
+            f"[startup] Sitemap endret minimalt — kjører inkrementell skanning "
+            f"i bakgrunnen (grunn: {decision.reason})"
+        )
+
+        async def _auto_incremental():
+            try:
+                new_count = await scan_index_incremental(max_pages=100)
+                # Save updated fingerprint after incremental scan
+                from backend.index_fingerprint import (
+                    compute_sitemap_fingerprint, save_index_fingerprint,
+                )
+                fp = compute_sitemap_fingerprint(_sitemap_urls)
+                save_index_fingerprint(
+                    CACHE_DIR, fp, len(_sku_to_url),
+                    len(_checked_no_sku), len(_sitemap_urls),
+                )
+                logger.info(
+                    f"[startup] Inkrementell skanning fullført: "
+                    f"{new_count} nye SKU-er funnet"
+                )
+            except Exception as exc:
+                logger.warning(f"[startup] Inkrementell skanning feilet: {exc}")
+
+        task = asyncio.create_task(_auto_incremental())
+        _background_tasks.add(task)
+        task.add_done_callback(_background_tasks.discard)
+
+    else:
+        # Cache is valid — no rebuild needed
+        logger.info(
+            f"[startup] ✓ Ny indeksering IKKE nødvendig — "
+            f"gjenbruker eksisterende cache ({decision.reason})"
         )
 
 # In-memory job storage

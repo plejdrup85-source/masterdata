@@ -3,15 +3,25 @@
 Computes a stable, deterministic signature for the SKU index so the system
 can detect whether a rebuild is actually needed after deploy/restart.
 
-A rebuild is triggered ONLY when:
-  - No cached index exists on disk
-  - The sitemap content has changed (new/removed URLs)
-  - Index configuration parameters have changed
+DECISION MATRIX:
 
-A rebuild is NOT triggered when:
-  - App is redeployed with same sitemap and same config
-  - A new job starts with an already-valid index
-  - The server process restarts
+  ┌─────────────────────────────────┬───────────────────────────────────┐
+  │ Condition                       │ Action                            │
+  ├─────────────────────────────────┼───────────────────────────────────┤
+  │ No cache exists at all          │ FULL REBUILD                      │
+  │ Cache exists, fingerprint match │ REUSE (no rebuild)                │
+  │ Sitemap changed slightly (<5%)  │ INCREMENTAL SCAN (fast)           │
+  │ Sitemap changed heavily (>=5%)  │ FULL REBUILD                      │
+  │ Index format version changed    │ FULL REBUILD                      │
+  │ Cache corrupt / invalid         │ FULL REBUILD                      │
+  │ App code changed, same catalog  │ REUSE (no rebuild)                │
+  │ Container restarted             │ REUSE (no rebuild)                │
+  │ User job starts                 │ REUSE (no rebuild)                │
+  └─────────────────────────────────┴───────────────────────────────────┘
+
+Index format version: Increment INDEX_FORMAT_VERSION when the index
+schema, scraping logic, or cache structure changes in an incompatible way.
+This is SEPARATE from catalog content changes.
 """
 
 import hashlib
@@ -22,8 +32,50 @@ from typing import Optional
 
 logger = logging.getLogger(__name__)
 
+# ── Configuration ──
+
 # Fingerprint metadata file — stored alongside the index
 _FINGERPRINT_FILENAME = "_index_fingerprint.json"
+
+# Index format version — increment ONLY when index structure/schema changes.
+# This does NOT change when app code changes that don't affect the index.
+# Examples of when to bump:
+#   - SKU extraction logic changes
+#   - Cache file format changes
+#   - New fields added to cached product data
+INDEX_FORMAT_VERSION = 2
+
+# Threshold for "significant" sitemap change (triggers full rebuild)
+# Below this: use incremental scan. Above this: full rebuild.
+SIGNIFICANT_CHANGE_THRESHOLD = 0.05  # 5% of URLs added/removed
+
+
+class RebuildDecision:
+    """Result of should_rebuild_index with structured metadata."""
+
+    NONE = "none"           # No rebuild needed — reuse cache
+    INCREMENTAL = "incremental"  # Minor change — incremental scan sufficient
+    FULL = "full"           # Major change — full rebuild needed
+
+    def __init__(self, action: str, reason: str, details: Optional[dict] = None):
+        self.action = action
+        self.reason = reason
+        self.details = details or {}
+
+    @property
+    def needs_rebuild(self) -> bool:
+        return self.action == self.FULL
+
+    @property
+    def needs_incremental(self) -> bool:
+        return self.action == self.INCREMENTAL
+
+    @property
+    def can_reuse(self) -> bool:
+        return self.action == self.NONE
+
+    def __repr__(self):
+        return f"RebuildDecision(action={self.action!r}, reason={self.reason!r})"
 
 
 def compute_sitemap_fingerprint(sitemap_urls: list[str]) -> str:
@@ -32,7 +84,6 @@ def compute_sitemap_fingerprint(sitemap_urls: list[str]) -> str:
     Sorts URLs to ensure deterministic output regardless of parse order.
     Returns a hex digest string.
     """
-    # Sort for deterministic ordering
     sorted_urls = sorted(sitemap_urls)
     content = "\n".join(sorted_urls)
     return hashlib.sha256(content.encode("utf-8")).hexdigest()[:32]
@@ -42,12 +93,19 @@ def compute_index_signature(
     sitemap_fingerprint: str,
     sku_count: int,
     checked_no_sku_count: int,
+    index_format_version: int = INDEX_FORMAT_VERSION,
 ) -> str:
     """Compute a signature representing the current state of the index.
 
-    Combines sitemap content hash with index completeness metrics.
+    Combines sitemap content hash with index completeness metrics AND
+    the index format version for change detection.
     """
-    parts = f"{sitemap_fingerprint}|skus={sku_count}|no_sku={checked_no_sku_count}"
+    parts = (
+        f"{sitemap_fingerprint}"
+        f"|skus={sku_count}"
+        f"|no_sku={checked_no_sku_count}"
+        f"|fmt={index_format_version}"
+    )
     return hashlib.sha256(parts.encode("utf-8")).hexdigest()[:32]
 
 
@@ -65,15 +123,21 @@ def save_index_fingerprint(
         "sku_count": sku_count,
         "checked_no_sku_count": checked_no_sku_count,
         "sitemap_url_count": sitemap_url_count,
+        "index_format_version": INDEX_FORMAT_VERSION,
         "signature": compute_index_signature(
             sitemap_fingerprint, sku_count, checked_no_sku_count
         ),
     }
     try:
+        cache_dir.mkdir(parents=True, exist_ok=True)
         fp_path.write_text(json.dumps(data, indent=2), encoding="utf-8")
-        logger.debug(f"Index fingerprint saved: {data['signature']}")
+        logger.info(
+            f"[fingerprint] Lagret: signature={data['signature'][:12]}… "
+            f"format_v={INDEX_FORMAT_VERSION} "
+            f"skus={sku_count} urls={sitemap_url_count}"
+        )
     except Exception as e:
-        logger.warning(f"Failed to save index fingerprint: {e}")
+        logger.warning(f"[fingerprint] Kunne ikke lagre fingerprint: {e}")
 
 
 def load_index_fingerprint(cache_dir: Path) -> Optional[dict]:
@@ -83,17 +147,17 @@ def load_index_fingerprint(cache_dir: Path) -> Optional[dict]:
     """
     fp_path = cache_dir / _FINGERPRINT_FILENAME
     if not fp_path.exists():
+        logger.info("[fingerprint] Ingen fingerprint-fil funnet på disk")
         return None
     try:
         data = json.loads(fp_path.read_text(encoding="utf-8"))
-        # Validate required fields
         required = {"sitemap_fingerprint", "sku_count", "signature"}
         if not required.issubset(data.keys()):
-            logger.warning("Index fingerprint file is missing required fields")
+            logger.warning("[fingerprint] Fingerprint-fil mangler påkrevde felt")
             return None
         return data
     except Exception as e:
-        logger.warning(f"Failed to load index fingerprint: {e}")
+        logger.warning(f"[fingerprint] Kunne ikke laste fingerprint: {e}")
         return None
 
 
@@ -102,52 +166,127 @@ def should_rebuild_index(
     current_sitemap_urls: list[str],
     cached_sku_count: int,
     cached_no_sku_count: int,
-) -> tuple[bool, str]:
-    """Determine whether the SKU index needs to be rebuilt.
+) -> RebuildDecision:
+    """Determine whether and how the SKU index needs to be rebuilt.
 
-    Returns (should_rebuild, reason) where reason explains the decision.
+    Returns a RebuildDecision with action (none/incremental/full) and reason.
 
-    Rebuild is needed when:
-      - No fingerprint file exists (first run or wiped cache)
-      - Sitemap content has changed (URLs added/removed)
-      - Index is empty despite having sitemap URLs
+    FULL rebuild when:
+      - No fingerprint exists AND no cache
+      - Index format version changed (incompatible cache)
+      - Sitemap changed significantly (>5% URLs added/removed)
+      - Index is completely empty
 
-    Rebuild is NOT needed when:
-      - Fingerprint matches and index has reasonable coverage
+    INCREMENTAL scan when:
+      - Sitemap changed slightly (<5% URLs added/removed)
+      - Some new URLs need to be checked
+
+    NO rebuild when:
+      - Fingerprint matches exactly
+      - Index has data and format is compatible
     """
     saved = load_index_fingerprint(cache_dir)
     current_fp = compute_sitemap_fingerprint(current_sitemap_urls)
+    current_url_count = len(current_sitemap_urls)
 
+    # ── Case 1: No fingerprint on disk ──
     if saved is None:
         if cached_sku_count > 0:
-            # We have an index but no fingerprint — save fingerprint and reuse
+            # Index exists but no fingerprint — create fingerprint, reuse index
             save_index_fingerprint(
                 cache_dir, current_fp, cached_sku_count,
-                cached_no_sku_count, len(current_sitemap_urls),
+                cached_no_sku_count, current_url_count,
             )
-            return False, (
+            logger.info(
+                f"[fingerprint] Indeks funnet ({cached_sku_count} SKU-er) "
+                f"men ingen fingerprint — oppretter fingerprint og gjenbruker cache"
+            )
+            return RebuildDecision(
+                RebuildDecision.NONE,
                 f"Indeks funnet uten fingerprint — lagrer fingerprint og gjenbruker "
-                f"({cached_sku_count} SKU-er)"
+                f"({cached_sku_count} SKU-er)",
             )
-        return True, "Ingen indeks-fingerprint funnet — full indeksering nødvendig"
-
-    # Check if sitemap content changed
-    if saved["sitemap_fingerprint"] != current_fp:
-        return True, (
-            f"Sitemap har endret seg (gammel fingerprint: {saved['sitemap_fingerprint'][:8]}…, "
-            f"ny: {current_fp[:8]}…) — rebuild nødvendig"
+        return RebuildDecision(
+            RebuildDecision.FULL,
+            "Ingen indeks-fingerprint og ingen cache — full indeksering nødvendig",
         )
 
-    # Check if index is empty despite sitemap having URLs
-    if cached_sku_count == 0 and len(current_sitemap_urls) > 0:
-        return True, "Indeks er tom men sitemap har URLer — rebuild nødvendig"
+    # ── Case 2: Index format version changed ──
+    saved_format = saved.get("index_format_version", 1)
+    if saved_format != INDEX_FORMAT_VERSION:
+        logger.info(
+            f"[fingerprint] Index-format endret: v{saved_format} → v{INDEX_FORMAT_VERSION}. "
+            f"Full rebuild nødvendig."
+        )
+        return RebuildDecision(
+            RebuildDecision.FULL,
+            f"Index-format endret (v{saved_format} → v{INDEX_FORMAT_VERSION}) "
+            f"— full rebuild for kompatibilitet",
+            {"old_format": saved_format, "new_format": INDEX_FORMAT_VERSION},
+        )
 
-    # Sitemap unchanged, index has data — reuse
-    coverage_pct = round(cached_sku_count / max(len(current_sitemap_urls), 1) * 100, 1)
-    return False, (
-        f"Cache-signatur matcher — rebuild ikke nødvendig "
-        f"(dekning: {coverage_pct}%, {cached_sku_count} SKU-er indeksert)"
+    # ── Case 3: Sitemap fingerprint matches exactly ──
+    if saved["sitemap_fingerprint"] == current_fp:
+        # Index is empty but shouldn't be
+        if cached_sku_count == 0 and current_url_count > 0:
+            return RebuildDecision(
+                RebuildDecision.FULL,
+                "Indeks er tom men sitemap har URLer — full rebuild nødvendig",
+            )
+
+        coverage_pct = round(
+            cached_sku_count / max(current_url_count, 1) * 100, 1
+        )
+        logger.info(
+            f"[fingerprint] ✓ Katalog uendret — gjenbruker cache. "
+            f"Fingerprint: {current_fp[:12]}… "
+            f"Dekning: {coverage_pct}% ({cached_sku_count} SKU-er)"
+        )
+        return RebuildDecision(
+            RebuildDecision.NONE,
+            f"Katalog-fingerprint matcher — rebuild IKKE nødvendig "
+            f"(dekning: {coverage_pct}%, {cached_sku_count} SKU-er indeksert)",
+            {"coverage_pct": coverage_pct, "fingerprint": current_fp[:12]},
+        )
+
+    # ── Case 4: Sitemap changed — determine severity ──
+    saved_url_count = saved.get("sitemap_url_count", 0) or cached_sku_count
+    if saved_url_count > 0:
+        change_ratio = abs(current_url_count - saved_url_count) / saved_url_count
+    else:
+        change_ratio = 1.0  # No prior data, treat as major
+
+    logger.info(
+        f"[fingerprint] Sitemap endret: "
+        f"gammel={saved['sitemap_fingerprint'][:12]}… ({saved_url_count} URLer) "
+        f"ny={current_fp[:12]}… ({current_url_count} URLer) "
+        f"endring={change_ratio:.1%}"
     )
+
+    if change_ratio >= SIGNIFICANT_CHANGE_THRESHOLD:
+        return RebuildDecision(
+            RebuildDecision.FULL,
+            f"Sitemap har endret seg vesentlig ({change_ratio:.1%} endring, "
+            f"terskel={SIGNIFICANT_CHANGE_THRESHOLD:.0%}) — full rebuild nødvendig",
+            {
+                "old_fingerprint": saved["sitemap_fingerprint"][:12],
+                "new_fingerprint": current_fp[:12],
+                "change_ratio": change_ratio,
+            },
+        )
+    else:
+        # Small change — incremental scan is sufficient
+        new_urls = current_url_count - saved_url_count
+        return RebuildDecision(
+            RebuildDecision.INCREMENTAL,
+            f"Sitemap har endret seg minimalt ({change_ratio:.1%}, "
+            f"~{abs(new_urls)} URLer) — inkrementell skanning tilstrekkelig",
+            {
+                "old_fingerprint": saved["sitemap_fingerprint"][:12],
+                "new_fingerprint": current_fp[:12],
+                "new_urls_approx": abs(new_urls),
+            },
+        )
 
 
 def load_cached_index_if_valid(
@@ -163,15 +302,14 @@ def load_cached_index_if_valid(
         CHECKED_NO_SKU_PATH,
     )
 
-    # Check all required files exist
     if not SITEMAP_INDEX_PATH.exists():
-        logger.info("Ingen cached SKU-indeks funnet på disk")
+        logger.info("[cache] Ingen cached SKU-indeks funnet på disk")
         return None
 
     try:
         sku_index = json.loads(SITEMAP_INDEX_PATH.read_text(encoding="utf-8"))
     except Exception as e:
-        logger.warning(f"Kunne ikke laste SKU-indeks fra disk: {e}")
+        logger.warning(f"[cache] Kunne ikke laste SKU-indeks fra disk: {e}")
         return None
 
     urls = []
@@ -189,11 +327,11 @@ def load_cached_index_if_valid(
             pass
 
     if not sku_index:
-        logger.info("Cached SKU-indeks er tom")
+        logger.info("[cache] Cached SKU-indeks er tom")
         return None
 
     logger.info(
-        f"Fant gyldig indeks-cache på disk: "
+        f"[cache] Gyldig indeks-cache funnet: "
         f"{len(sku_index)} SKU-er, {len(urls)} sitemap-URLer, "
         f"{len(no_sku)} sjekket-uten-SKU"
     )
