@@ -3034,11 +3034,25 @@ async def _run_analysis(
 from backend.matcher import (
     MatchMode, MatchResult, match_product, select_candidate, parse_alc_price,
 )
+from backend.job_store import (
+    save_job as _persist_job, load_job as _load_persisted_job,
+    list_jobs as _list_persisted_jobs, lock_job as _lock_persisted_job,
+    unlock_job as _unlock_persisted_job, verify_job_access as _verify_job_access,
+    cleanup_expired_jobs, update_job_activity,
+)
 
-# In-memory storage for match jobs
+# In-memory storage for match jobs (also persisted to disk)
 _match_jobs: dict[str, dict] = {}
 MATCH_OUTPUT_DIR = OUTPUT_DIR / "matching"
 MATCH_OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
+
+# Mode label helper
+_MODE_LABELS = {
+    MatchMode.STANDARD.value: "Standard",
+    MatchMode.HARDCORE_PRICE.value: "Hardcore Pris Prioritet",
+    MatchMode.OWN_BRAND.value: "Egne merkevarer",
+    MatchMode.STRICT_QUALITY.value: "Streng kvalitet",
+}
 
 
 def _build_catalog_for_matching(alc_prices: Optional[dict] = None) -> list[dict]:
@@ -3070,13 +3084,15 @@ def _build_catalog_for_matching(alc_prices: Optional[dict] = None) -> list[dict]
 async def start_match_job(
     request: Request,
     file: UploadFile = File(...),
-    match_mode: str = Query(MatchMode.STANDARD.value, description="Match mode: standard or hardcore_price"),
+    match_mode: str = Query(MatchMode.STANDARD.value, description="Match mode"),
+    job_name: str = Query("", description="Job name"),
+    created_by: str = Query("", description="User who created the job"),
+    job_type: str = Query("standard", description="Job type: standard or anbud"),
 ):
     """Start a product matching job.
 
     Upload an Excel file with input products to match against the catalog.
     Expected columns: product name, specification (optional), article number (optional).
-    Optionally includes ALC prices for catalog products.
     """
     _cleanup_old_jobs()
 
@@ -3086,6 +3102,13 @@ async def start_match_job(
 
     if not _jeeves_index or not _jeeves_index.loaded:
         raise HTTPException(400, "Jeeves-katalog er ikke lastet. Kan ikke kjøre matching.")
+
+    if not job_name.strip():
+        raise HTTPException(400, "Jobbnavn er påkrevd.")
+    if not created_by.strip():
+        raise HTTPException(400, "Brukernavn er påkrevd.")
+    if job_type not in ("standard", "anbud"):
+        raise HTTPException(400, "Ugyldig jobbtype. Bruk 'standard' eller 'anbud'.")
 
     valid_modes = [m.value for m in MatchMode]
     if match_mode not in valid_modes:
@@ -3170,14 +3193,20 @@ async def start_match_job(
 
     # Create match job
     job_id = str(uuid.uuid4())[:8]
+    now = time.time()
     match_job = {
         "job_id": job_id,
+        "job_name": job_name.strip(),
+        "created_by": created_by.strip(),
+        "job_type": job_type,
         "status": "running",
         "match_mode": match_mode,
         "total": len(input_products),
         "processed": 0,
         "results": [],
-        "created_at": time.time(),
+        "created_at": now,
+        "updated_at": now,
+        "last_activity_at": now,
         "source_filename": file.filename or "",
         "input_products": input_products,
         "detected_columns": {
@@ -3187,9 +3216,12 @@ async def start_match_job(
             "alc_price": headers[alc_col] if alc_col is not None else None,
         },
         "output_file": None,
-        "user_selections": {},  # artnr → selected_candidate overrides
+        "user_selections": {},
+        "row_approvals": {},  # {input_row: "approved"|"rejected"|"pending"}
+        "locked": False,
     }
     _match_jobs[job_id] = match_job
+    _persist_job(match_job)
 
     # Run matching in background
     async def _run_matching():
@@ -3217,13 +3249,18 @@ async def start_match_job(
                 )
                 match_job["results"].append(result)
                 match_job["processed"] += 1
+                # Persist progress every 5 products
+                if match_job["processed"] % 5 == 0:
+                    _persist_job(match_job)
 
             # Generate Excel output
             _generate_match_excel(match_job)
 
             match_job["status"] = "completed"
+            match_job["summary"] = _compute_match_summary(match_job)
 
-            # Save to history
+            # Persist final state and save to history
+            _persist_job(match_job)
             _add_match_to_history(match_job)
 
         except Exception as e:
@@ -3235,15 +3272,13 @@ async def start_match_job(
     _background_tasks.add(task)
     task.add_done_callback(_background_tasks.discard)
 
-    mode_label = {
-        MatchMode.STANDARD.value: "Standard",
-        MatchMode.HARDCORE_PRICE.value: "Hardcore Pris Prioritet",
-        MatchMode.OWN_BRAND.value: "Egne merkevarer",
-        MatchMode.STRICT_QUALITY.value: "Streng kvalitet",
-    }.get(match_mode, "Standard")
+    mode_label = _MODE_LABELS.get(match_mode, "Standard")
 
     return {
         "job_id": job_id,
+        "job_name": match_job["job_name"],
+        "created_by": match_job["created_by"],
+        "job_type": job_type,
         "match_mode": match_mode,
         "mode_label": mode_label,
         "total_products": len(input_products),
@@ -3252,49 +3287,69 @@ async def start_match_job(
     }
 
 
+def _get_job(job_id: str) -> Optional[dict]:
+    """Get job from memory or disk."""
+    job = _match_jobs.get(job_id)
+    if job:
+        return job
+    return _load_persisted_job(job_id)
+
+
 @app.get("/api/match/status/{job_id}")
 async def get_match_status(job_id: str):
     """Get status of a matching job."""
-    job = _match_jobs.get(job_id)
+    job = _get_job(job_id)
     if not job:
         raise HTTPException(404, "Matching-jobb ikke funnet")
 
     return {
         "job_id": job["job_id"],
+        "job_name": job.get("job_name", ""),
+        "created_by": job.get("created_by", ""),
         "status": job["status"],
         "match_mode": job["match_mode"],
         "total": job["total"],
         "processed": job["processed"],
         "progress_percent": round(job["processed"] / job["total"] * 100, 1) if job["total"] > 0 else 0,
         "error": job.get("error"),
+        "locked": job.get("locked", False),
     }
 
 
 @app.get("/api/match/results/{job_id}")
 async def get_match_results(job_id: str):
     """Get matching results with all candidates."""
-    job = _match_jobs.get(job_id)
+    job = _get_job(job_id)
     if not job:
         raise HTTPException(404, "Matching-jobb ikke funnet")
 
     if job["status"] not in ("completed", "running"):
         raise HTTPException(400, "Resultater ikke tilgjengelig ennå")
 
+    # Results may be MatchResult objects (in-memory) or dicts (from disk)
+    results = job.get("results", [])
+    serialized = []
+    for r in results:
+        if hasattr(r, "to_dict"):
+            serialized.append(r.to_dict())
+        elif isinstance(r, dict):
+            serialized.append(r)
+
     return {
         "job_id": job["job_id"],
+        "job_name": job.get("job_name", ""),
+        "created_by": job.get("created_by", ""),
+        "job_type": job.get("job_type", "standard"),
         "status": job["status"],
         "match_mode": job["match_mode"],
-        "mode_label": {
-            MatchMode.STANDARD.value: "Standard",
-            MatchMode.HARDCORE_PRICE.value: "Hardcore Pris Prioritet",
-            MatchMode.OWN_BRAND.value: "Egne merkevarer",
-            MatchMode.STRICT_QUALITY.value: "Streng kvalitet",
-        }.get(job["match_mode"], "Standard"),
+        "mode_label": _MODE_LABELS.get(job["match_mode"], "Standard"),
         "total": job["total"],
         "processed": job["processed"],
         "source_filename": job.get("source_filename", ""),
-        "results": [r.to_dict() for r in job["results"]],
-        "summary": _compute_match_summary(job),
+        "results": serialized,
+        "summary": job.get("summary") or _compute_match_summary(job),
+        "row_approvals": job.get("row_approvals", {}),
+        "locked": job.get("locked", False),
     }
 
 
@@ -3336,11 +3391,17 @@ async def select_match_candidate(
 ):
     """Manually select a candidate for a specific input row.
 
-    Body: {"input_row": 2, "article_number": "12345"}
+    Body: {"input_row": 2, "article_number": "12345", "password": "optional"}
     """
     job = _match_jobs.get(job_id)
     if not job:
         raise HTTPException(404, "Matching-jobb ikke funnet")
+
+    # Check lock
+    if job.get("locked"):
+        can_edit, msg = _verify_job_access(job_id, data.get("password"))
+        if not can_edit:
+            raise HTTPException(403, msg)
 
     input_row = data.get("input_row")
     article_number = data.get("article_number")
@@ -3350,13 +3411,21 @@ async def select_match_candidate(
 
     # Find the result for this row
     for result in job["results"]:
-        if result.input_row == input_row:
-            success = select_candidate(result, article_number)
+        row_num = result.input_row if hasattr(result, "input_row") else result.get("input_row")
+        if row_num == input_row:
+            if hasattr(result, "input_row"):
+                success = select_candidate(result, article_number)
+            else:
+                # Result loaded from disk (dict) — update directly
+                result["selected_candidate"] = article_number
+                result["selected_by"] = "manual"
+                result["status"] = "matched"
+                success = True
             if success:
-                # Store user selection
                 job["user_selections"][str(input_row)] = article_number
-                # Regenerate Excel
+                job["last_activity_at"] = time.time()
                 _generate_match_excel(job)
+                _persist_job(job)
                 return {
                     "message": "Kandidat valgt",
                     "input_row": input_row,
@@ -3371,7 +3440,7 @@ async def select_match_candidate(
 @app.get("/api/match/download/{job_id}")
 async def download_match_result(job_id: str):
     """Download the matching result Excel file."""
-    job = _match_jobs.get(job_id)
+    job = _get_job(job_id)
     if not job:
         raise HTTPException(404, "Matching-jobb ikke funnet")
 
@@ -3404,12 +3473,7 @@ def _generate_match_excel(job: dict) -> None:
     results = job.get("results", [])
     match_mode = job.get("match_mode", MatchMode.STANDARD.value)
     is_hardcore = match_mode == MatchMode.HARDCORE_PRICE.value
-    mode_label = {
-        MatchMode.STANDARD.value: "Standard",
-        MatchMode.HARDCORE_PRICE.value: "Hardcore Pris Prioritet",
-        MatchMode.OWN_BRAND.value: "Egne merkevarer",
-        MatchMode.STRICT_QUALITY.value: "Streng kvalitet",
-    }.get(match_mode, "Standard")
+    mode_label = _MODE_LABELS.get(match_mode, "Standard")
 
     # ── Sheet 1: Matching-resultater (main results) ──
     ws = wb.active
@@ -3626,6 +3690,303 @@ async def get_match_history():
     match_entries = [e for e in entries if e.get("analysis_mode", "").startswith("matching_")]
     match_entries.reverse()
     return {"entries": match_entries}
+
+
+# ── Job Management Endpoints ──
+
+
+@app.get("/api/jobs")
+async def list_all_jobs():
+    """List all persistent matching/anbud jobs."""
+    jobs = _list_persisted_jobs()
+    return {"jobs": jobs}
+
+
+@app.get("/api/jobs/{job_id}")
+async def get_job_detail(job_id: str):
+    """Get full job details including results."""
+    job = _get_job(job_id)
+    if not job:
+        raise HTTPException(404, "Jobb ikke funnet")
+
+    results = job.get("results", [])
+    serialized = []
+    for r in results:
+        if hasattr(r, "to_dict"):
+            serialized.append(r.to_dict())
+        elif isinstance(r, dict):
+            serialized.append(r)
+
+    return {
+        "job_id": job["job_id"],
+        "job_name": job.get("job_name", ""),
+        "created_by": job.get("created_by", ""),
+        "job_type": job.get("job_type", "standard"),
+        "status": job.get("status", "unknown"),
+        "match_mode": job.get("match_mode", "standard"),
+        "mode_label": _MODE_LABELS.get(job.get("match_mode", ""), "Standard"),
+        "total": job.get("total", 0),
+        "processed": job.get("processed", 0),
+        "created_at": job.get("created_at", 0),
+        "updated_at": job.get("updated_at", 0),
+        "last_activity_at": job.get("last_activity_at", 0),
+        "source_filename": job.get("source_filename", ""),
+        "detected_columns": job.get("detected_columns", {}),
+        "results": serialized,
+        "summary": job.get("summary") or (_compute_match_summary(job) if results else {}),
+        "row_approvals": job.get("row_approvals", {}),
+        "locked": job.get("locked", False),
+    }
+
+
+@app.post("/api/jobs/{job_id}/approve")
+async def approve_rows(job_id: str, data: dict = Body(...)):
+    """Approve or reject one or more rows.
+
+    Body: {"rows": [2, 3, 5], "action": "approved"|"rejected"|"pending", "password": "optional"}
+    Or for all: {"all": true, "action": "approved", "password": "optional"}
+    """
+    job = _match_jobs.get(job_id)
+    if not job:
+        # Try loading from disk into memory
+        job = _load_persisted_job(job_id)
+        if job:
+            _match_jobs[job_id] = job
+        else:
+            raise HTTPException(404, "Jobb ikke funnet")
+
+    if job.get("locked"):
+        can_edit, msg = _verify_job_access(job_id, data.get("password"))
+        if not can_edit:
+            raise HTTPException(403, msg)
+
+    action = data.get("action", "approved")
+    if action not in ("approved", "rejected", "pending"):
+        raise HTTPException(400, "Ugyldig handling. Bruk 'approved', 'rejected' eller 'pending'.")
+
+    approvals = job.setdefault("row_approvals", {})
+
+    if data.get("all"):
+        results = job.get("results", [])
+        for r in results:
+            row_num = r.input_row if hasattr(r, "input_row") else r.get("input_row")
+            if row_num is not None:
+                approvals[str(row_num)] = action
+        count = len(results)
+    else:
+        rows = data.get("rows", [])
+        if not rows:
+            raise HTTPException(400, "Ingen rader spesifisert")
+        for row_num in rows:
+            approvals[str(row_num)] = action
+        count = len(rows)
+
+    job["last_activity_at"] = time.time()
+    _persist_job(job)
+
+    return {"message": f"{count} rader satt til '{action}'", "row_approvals": approvals}
+
+
+@app.post("/api/jobs/{job_id}/lock")
+async def lock_job_endpoint(job_id: str, data: dict = Body(...)):
+    """Lock a job with a password.
+
+    Body: {"password": "mypassword"}
+    """
+    password = data.get("password", "")
+    if not password or len(password) < 4:
+        raise HTTPException(400, "Passord må være minst 4 tegn.")
+
+    job = _get_job(job_id)
+    if not job:
+        raise HTTPException(404, "Jobb ikke funnet")
+
+    if job.get("locked"):
+        raise HTTPException(400, "Jobben er allerede låst.")
+
+    success = _lock_persisted_job(job_id, password)
+    if not success:
+        raise HTTPException(500, "Kunne ikke låse jobben.")
+
+    # Update in-memory too
+    if job_id in _match_jobs:
+        _match_jobs[job_id]["locked"] = True
+
+    return {"message": "Jobben er nå låst", "locked": True}
+
+
+@app.post("/api/jobs/{job_id}/unlock")
+async def unlock_job_endpoint(job_id: str, data: dict = Body(...)):
+    """Unlock a job with password or admin password.
+
+    Body: {"password": "mypassword"}
+    """
+    password = data.get("password", "")
+    if not password:
+        raise HTTPException(400, "Passord er påkrevd.")
+
+    success, msg = _unlock_persisted_job(job_id, password)
+    if not success:
+        raise HTTPException(403, msg)
+
+    # Update in-memory too
+    if job_id in _match_jobs:
+        _match_jobs[job_id]["locked"] = False
+        _match_jobs[job_id].pop("lock_hash", None)
+
+    return {"message": msg, "locked": False}
+
+
+@app.get("/api/catalog/search")
+async def search_catalog(
+    q: str = Query("", description="Search query"),
+    article_number: str = Query("", description="Article number exact lookup"),
+):
+    """Search the Jeeves catalog for products. Used for manual product selection."""
+    if not _jeeves_index or not _jeeves_index.loaded:
+        raise HTTPException(400, "Katalog ikke lastet.")
+
+    results = []
+    query = q.strip().lower()
+    artnr_query = article_number.strip()
+
+    if not query and not artnr_query:
+        raise HTTPException(400, "Søkeord eller artikkelnummer er påkrevd.")
+
+    # Article number exact lookup
+    if artnr_query:
+        jd = _jeeves_index.get(artnr_query)
+        if jd:
+            results.append({
+                "article_number": jd.article_number,
+                "product_name": jd.item_description or "",
+                "specification": jd.specification or "",
+                "supplier": jd.supplier or "",
+                "product_brand": jd.product_brand or "",
+                "alc_price": None,
+            })
+        return {"results": results, "total": len(results)}
+
+    # Free-text search
+    all_artnrs = _jeeves_index.all_article_numbers()
+    scored = []
+    for artnr in all_artnrs:
+        jd = _jeeves_index.get(artnr)
+        if not jd:
+            continue
+        text = f"{jd.item_description or ''} {jd.specification or ''} {jd.supplier or ''} {artnr}".lower()
+        # Simple relevance: count query words that appear
+        words = query.split()
+        hits = sum(1 for w in words if w in text)
+        if hits > 0:
+            scored.append((hits, len(text), {
+                "article_number": jd.article_number,
+                "product_name": jd.item_description or "",
+                "specification": jd.specification or "",
+                "supplier": jd.supplier or "",
+                "product_brand": jd.product_brand or "",
+                "alc_price": None,
+            }))
+
+    # Sort by hits desc, then text length asc (prefer shorter/more specific)
+    scored.sort(key=lambda x: (-x[0], x[1]))
+    results = [s[2] for s in scored[:20]]
+
+    return {"results": results, "total": len(results)}
+
+
+@app.post("/api/match/select-manual/{job_id}")
+async def select_manual_product(job_id: str, data: dict = Body(...)):
+    """Select a product by article number from the catalog (not from candidates).
+
+    Body: {"input_row": 2, "article_number": "12345", "password": "optional"}
+    """
+    job = _match_jobs.get(job_id)
+    if not job:
+        job = _load_persisted_job(job_id)
+        if job:
+            _match_jobs[job_id] = job
+        else:
+            raise HTTPException(404, "Jobb ikke funnet")
+
+    if job.get("locked"):
+        can_edit, msg = _verify_job_access(job_id, data.get("password"))
+        if not can_edit:
+            raise HTTPException(403, msg)
+
+    input_row = data.get("input_row")
+    article_number = data.get("article_number", "").strip()
+    if input_row is None or not article_number:
+        raise HTTPException(400, "Mangler input_row eller article_number")
+
+    # Look up product in catalog
+    if not _jeeves_index or not _jeeves_index.loaded:
+        raise HTTPException(400, "Katalog ikke lastet.")
+    jd = _jeeves_index.get(article_number)
+    if not jd:
+        raise HTTPException(404, f"Artikkelnummer {article_number} finnes ikke i katalogen.")
+
+    # Update the result
+    for result in job["results"]:
+        row_num = result.input_row if hasattr(result, "input_row") else result.get("input_row")
+        if row_num == input_row:
+            # Create a manual candidate and add it
+            manual_cand = {
+                "article_number": jd.article_number,
+                "product_name": jd.item_description or "",
+                "specification": jd.specification or "",
+                "supplier": jd.supplier or "",
+                "product_brand": jd.product_brand or "",
+                "alc_price": None,
+                "relevance_score": 0,
+                "text_similarity": 0,
+                "category_match": True,
+                "hard_mismatch": False,
+                "mismatch_reason": "",
+                "ai_relevance_score": None,
+                "ai_explanation": "Manuelt valgt fra katalog",
+                "final_score": 0,
+                "is_sufficiently_relevant": True,
+                "rank": 0,
+                "tags": ["manuelt_valgt"],
+            }
+
+            if hasattr(result, "candidates"):
+                # Check if candidate already exists
+                existing = [c for c in result.candidates if c.article_number == article_number]
+                if not existing:
+                    from backend.matcher import MatchCandidate
+                    mc = MatchCandidate(**{k: v for k, v in manual_cand.items() if k != "alc_price_display" and k != "tags"})
+                    mc.tags = ["manuelt_valgt"]
+                    result.candidates.insert(0, mc)
+                result.selected_candidate = article_number
+                result.selected_by = "manual"
+                result.status = "matched"
+            else:
+                # Dict-based result from disk
+                candidates = result.get("candidates", [])
+                existing = [c for c in candidates if c.get("article_number") == article_number]
+                if not existing:
+                    candidates.insert(0, manual_cand)
+                    result["candidates"] = candidates
+                result["selected_candidate"] = article_number
+                result["selected_by"] = "manual"
+                result["status"] = "matched"
+
+            job["user_selections"][str(input_row)] = article_number
+            job["last_activity_at"] = time.time()
+            _persist_job(job)
+
+            return {
+                "message": "Produkt valgt manuelt",
+                "input_row": input_row,
+                "selected": article_number,
+                "product_name": jd.item_description or "",
+                "specification": jd.specification or "",
+                "supplier": jd.supplier or "",
+            }
+
+    raise HTTPException(404, f"Rad {input_row} ikke funnet i resultater")
 
 
 if __name__ == "__main__":

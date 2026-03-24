@@ -722,6 +722,12 @@
             <button class="module-tab" id="tabMatching" onclick="switchModule('matching')">
                 Produktmatching
             </button>
+            <button class="module-tab" id="tabAnbud" onclick="switchModule('anbud')">
+                Anbudsprisark
+            </button>
+            <button class="module-tab" id="tabJobs" onclick="switchModule('jobs')">
+                Jobber
+            </button>
             <button class="module-tab" id="tabRelations" onclick="switchModule('relations')">
                 Produktfamilier
             </button>
@@ -1071,6 +1077,22 @@
                 </div>
             </div>
 
+            <!-- Job Identity -->
+            <div style="margin-bottom:1.25rem;display:grid;grid-template-columns:1fr 1fr;gap:0.75rem">
+                <div>
+                    <label style="font-size:0.85rem;font-weight:600;display:block;margin-bottom:0.3rem">Jobbnavn <span style="color:#ef4444">*</span></label>
+                    <input type="text" id="matchJobName" placeholder="F.eks. Kommune X - mars 2026" required
+                        style="width:100%;padding:0.5rem 0.75rem;border:1px solid var(--border);border-radius:6px;font-size:0.9rem"
+                        oninput="updateMatchStartBtn()">
+                </div>
+                <div>
+                    <label style="font-size:0.85rem;font-weight:600;display:block;margin-bottom:0.3rem">Ditt navn <span style="color:#ef4444">*</span></label>
+                    <input type="text" id="matchCreatedBy" placeholder="Fornavn Etternavn" required
+                        style="width:100%;padding:0.5rem 0.75rem;border:1px solid var(--border);border-radius:6px;font-size:0.9rem"
+                        oninput="updateMatchStartBtn()">
+                </div>
+            </div>
+
             <!-- File Upload -->
             <div class="upload-area" id="matchUploadArea" style="padding:2rem">
                 <svg class="upload-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" style="width:36px;height:36px">
@@ -1109,15 +1131,54 @@
 
         <!-- Match Results -->
         <div class="results-section" id="matchResultsSection">
+            <!-- Job Info Banner -->
+            <div class="card" id="matchJobInfoBanner" style="background:#f0f9ff;border:1px solid #bae6fd">
+                <div style="display:flex;align-items:center;justify-content:space-between;flex-wrap:wrap;gap:0.5rem">
+                    <div>
+                        <span style="font-weight:700;font-size:1rem" id="matchJobNameDisplay"></span>
+                        <span style="color:var(--text-muted);font-size:0.82rem;margin-left:0.75rem">av <span id="matchCreatedByDisplay"></span></span>
+                        <span id="matchJobTypeBadge" style="margin-left:0.5rem;padding:0.15rem 0.5rem;border-radius:10px;font-size:0.72rem;font-weight:600"></span>
+                    </div>
+                    <div style="display:flex;gap:0.5rem;align-items:center">
+                        <span id="matchLockBadge" style="display:none;padding:0.2rem 0.5rem;border-radius:10px;font-size:0.72rem;font-weight:600;background:#fef2f2;color:#991b1b">L&aring;st</span>
+                        <button class="btn" style="font-size:0.75rem;padding:0.25rem 0.6rem" onclick="showLockDialog()">L&aring;s jobb</button>
+                    </div>
+                </div>
+            </div>
+
             <div class="card">
                 <div style="display:flex;align-items:center;justify-content:space-between;flex-wrap:wrap;gap:0.75rem">
                     <h2 style="margin:0">Matching-resultater</h2>
                     <div id="matchModeBadge" style="padding:0.3rem 0.8rem;border-radius:20px;font-size:0.8rem;font-weight:600"></div>
                 </div>
                 <div class="stats-grid" id="matchStatsGrid" style="margin-top:1rem"></div>
-                <div class="actions">
+                <div class="actions" style="flex-wrap:wrap">
                     <button class="btn btn-success" id="matchDownloadBtn">Last ned Excel-rapport</button>
                     <button class="btn btn-primary" id="matchNewBtn" onclick="resetMatchModule()">Ny matching</button>
+                </div>
+            </div>
+
+            <!-- Filters and Batch Actions -->
+            <div class="card" style="padding:0.75rem 1rem">
+                <div style="display:flex;align-items:center;gap:0.5rem;flex-wrap:wrap">
+                    <span style="font-size:0.85rem;font-weight:600;margin-right:0.25rem">Filtrer:</span>
+                    <button class="btn match-filter-btn active" data-filter="all" onclick="setMatchFilter('all')" style="font-size:0.78rem;padding:0.2rem 0.6rem">Alle</button>
+                    <button class="btn match-filter-btn" data-filter="matched" onclick="setMatchFilter('matched')" style="font-size:0.78rem;padding:0.2rem 0.6rem">Matchet</button>
+                    <button class="btn match-filter-btn" data-filter="no_match" onclick="setMatchFilter('no_match')" style="font-size:0.78rem;padding:0.2rem 0.6rem">Ingen match</button>
+                    <button class="btn match-filter-btn" data-filter="manual_review" onclick="setMatchFilter('manual_review')" style="font-size:0.78rem;padding:0.2rem 0.6rem">Manuell vurdering</button>
+                    <button class="btn match-filter-btn" data-filter="approved" onclick="setMatchFilter('approved')" style="font-size:0.78rem;padding:0.2rem 0.6rem;background:#dcfce7;color:#166534">Godkjent</button>
+                    <button class="btn match-filter-btn" data-filter="rejected" onclick="setMatchFilter('rejected')" style="font-size:0.78rem;padding:0.2rem 0.6rem;background:#fef2f2;color:#991b1b">Avsl&aring;tt</button>
+                    <div style="flex:1"></div>
+                    <span style="font-size:0.85rem;font-weight:600;margin-right:0.25rem">Batch:</span>
+                    <button class="btn" style="font-size:0.75rem;padding:0.2rem 0.5rem;background:#dcfce7;color:#166534;border:1px solid #bbf7d0" onclick="batchApproveVisible('approved')">Godkjenn synlige</button>
+                    <button class="btn" style="font-size:0.75rem;padding:0.2rem 0.5rem;background:#fef2f2;color:#991b1b;border:1px solid #fecaca" onclick="batchApproveVisible('rejected')">Avsl&aring; synlige</button>
+                    <button class="btn" style="font-size:0.75rem;padding:0.2rem 0.5rem;background:#dbeafe;color:#1e40af;border:1px solid #bfdbfe" onclick="batchApproveAll('approved')">Godkjenn alle</button>
+                </div>
+                <div style="margin-top:0.5rem;display:flex;gap:0.5rem;align-items:center">
+                    <label style="font-size:0.8rem">Min. relevans:</label>
+                    <input type="range" id="matchRelevanceFilter" min="0" max="100" value="0" style="width:120px" oninput="applyMatchFilters()">
+                    <span id="matchRelevanceFilterVal" style="font-size:0.8rem;color:var(--text-muted)">0%</span>
+                    <span id="matchFilterCount" style="font-size:0.8rem;color:var(--text-muted);margin-left:auto"></span>
                 </div>
             </div>
 
@@ -1128,9 +1189,11 @@
                     <table class="results-table">
                         <thead>
                             <tr>
+                                <th style="width:30px"></th>
                                 <th>Rad</th>
                                 <th>Innprodukt</th>
                                 <th>Status</th>
+                                <th>Godkjenning</th>
                                 <th>Valgt kandidat</th>
                                 <th>ALC-pris</th>
                                 <th>Relevans</th>
@@ -1302,6 +1365,128 @@
         </div><!-- /moduleRelations -->
 
         <!-- ═══════════════════════════════════════════════════════ -->
+        <!-- MODULE: ANBUDSPRISARK                                    -->
+        <!-- ═══════════════════════════════════════════════════════ -->
+        <div id="moduleAnbud" style="display:none">
+
+        <div class="card" id="anbudConfigCard">
+            <h2>Fyll ut anbudsprisark &mdash; Match kommunens produkter mot katalogen</h2>
+            <p style="color:var(--text-muted);font-size:0.9rem;margin-bottom:1.25rem">
+                Last opp anbudsprisarket (Excel). Systemet matcher produktene mot OneMed-katalogen og fyller ut priser.
+                Samme matchinglogikk og profiler som standard produktmatching.
+            </p>
+
+            <!-- Match Mode Selection (shared styling) -->
+            <div style="margin-bottom:1.25rem;padding:1rem;background:#f0f9ff;border-radius:8px;border:1px solid #bae6fd">
+                <div style="font-size:0.95rem;font-weight:600;margin-bottom:0.75rem;color:#0369a1">Matchmodus</div>
+                <div style="display:flex;gap:0.75rem;flex-wrap:wrap" id="anbudModeContainer">
+                    <label class="anbud-mode-label active" data-mode="standard" onclick="setAnbudMode('standard')" style="display:flex;align-items:flex-start;gap:0.5rem;cursor:pointer;background:#fff;padding:0.75rem 1rem;border-radius:8px;border:2px solid var(--primary);flex:1;min-width:220px">
+                        <input type="radio" name="anbudMode" value="standard" checked style="margin-top:3px">
+                        <div>
+                            <div style="font-weight:600;font-size:0.9rem">Standard</div>
+                            <div style="font-size:0.78rem;color:var(--text-muted);margin-top:0.2rem">Beste semantiske match vinner.</div>
+                        </div>
+                    </label>
+                    <label class="anbud-mode-label" data-mode="hardcore_price" onclick="setAnbudMode('hardcore_price')" style="display:flex;align-items:flex-start;gap:0.5rem;cursor:pointer;background:#fff;padding:0.75rem 1rem;border-radius:8px;border:2px solid var(--border);flex:1;min-width:220px">
+                        <input type="radio" name="anbudMode" value="hardcore_price" style="margin-top:3px">
+                        <div>
+                            <div style="font-weight:600;font-size:0.9rem;color:#b45309">Hardcore Pris Prioritet</div>
+                            <div style="font-size:0.78rem;color:var(--text-muted);margin-top:0.2rem">Billigste relevante alternativ.</div>
+                        </div>
+                    </label>
+                    <label class="anbud-mode-label" data-mode="own_brand" onclick="setAnbudMode('own_brand')" style="display:flex;align-items:flex-start;gap:0.5rem;cursor:pointer;background:#fff;padding:0.75rem 1rem;border-radius:8px;border:2px solid var(--border);flex:1;min-width:220px">
+                        <input type="radio" name="anbudMode" value="own_brand" style="margin-top:3px">
+                        <div>
+                            <div style="font-weight:600;font-size:0.9rem;color:#047857">Egne merkevarer</div>
+                            <div style="font-size:0.78rem;color:var(--text-muted);margin-top:0.2rem">Prioriterer husmerkevarer.</div>
+                        </div>
+                    </label>
+                    <label class="anbud-mode-label" data-mode="strict_quality" onclick="setAnbudMode('strict_quality')" style="display:flex;align-items:flex-start;gap:0.5rem;cursor:pointer;background:#fff;padding:0.75rem 1rem;border-radius:8px;border:2px solid var(--border);flex:1;min-width:220px">
+                        <input type="radio" name="anbudMode" value="strict_quality" style="margin-top:3px">
+                        <div>
+                            <div style="font-weight:600;font-size:0.9rem;color:#7c3aed">Streng kvalitet</div>
+                            <div style="font-size:0.78rem;color:var(--text-muted);margin-top:0.2rem">Kun h&oslash;y-relevante matcher.</div>
+                        </div>
+                    </label>
+                </div>
+            </div>
+
+            <!-- Job Identity -->
+            <div style="margin-bottom:1.25rem;display:grid;grid-template-columns:1fr 1fr;gap:0.75rem">
+                <div>
+                    <label style="font-size:0.85rem;font-weight:600;display:block;margin-bottom:0.3rem">Jobbnavn <span style="color:#ef4444">*</span></label>
+                    <input type="text" id="anbudJobName" placeholder="F.eks. Anbud Kommune Y - Q2 2026" required
+                        style="width:100%;padding:0.5rem 0.75rem;border:1px solid var(--border);border-radius:6px;font-size:0.9rem"
+                        oninput="updateAnbudStartBtn()">
+                </div>
+                <div>
+                    <label style="font-size:0.85rem;font-weight:600;display:block;margin-bottom:0.3rem">Ditt navn <span style="color:#ef4444">*</span></label>
+                    <input type="text" id="anbudCreatedBy" placeholder="Fornavn Etternavn" required
+                        style="width:100%;padding:0.5rem 0.75rem;border:1px solid var(--border);border-radius:6px;font-size:0.9rem"
+                        oninput="updateAnbudStartBtn()">
+                </div>
+            </div>
+
+            <!-- File Upload -->
+            <div class="upload-area" id="anbudUploadArea" style="padding:2rem">
+                <svg class="upload-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" style="width:36px;height:36px">
+                    <path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/>
+                    <polyline points="17 8 12 3 7 8"/>
+                    <line x1="12" y1="3" x2="12" y2="15"/>
+                </svg>
+                <p>Dra og slipp anbudsprisark (Excel)</p>
+                <p style="font-size:0.78rem;color:#94a3b8;margin-top:0.3rem">
+                    Forventede kolonner: Produktnavn, Spesifikasjon (valgfri), Artikkelnr (valgfri)
+                </p>
+                <p class="filename hidden" id="anbudFileName"></p>
+                <input type="file" id="anbudFileInput" accept=".xlsx" style="position:absolute;inset:0;opacity:0;cursor:pointer">
+            </div>
+
+            <div class="column-info hidden" id="anbudColumnInfo"></div>
+
+            <div class="actions">
+                <button class="btn btn-primary" id="anbudStartBtn" disabled>Start matching</button>
+                <span id="anbudFileInfo" style="color:var(--text-muted);font-size:0.9rem"></span>
+            </div>
+        </div>
+
+        <!-- Anbud Progress (reuses matching progress display) -->
+        <div class="card progress-section" id="anbudProgressSection">
+            <h2 id="anbudProgressTitle">Matching p&aring;g&aring;r...</h2>
+            <div class="progress-bar-container">
+                <div class="progress-bar" id="anbudProgressBar"></div>
+            </div>
+            <div class="progress-info">
+                <span id="anbudProgressText">0 / 0 produkter</span>
+                <span id="anbudProgressPercent">0%</span>
+            </div>
+            <div class="progress-detail" id="anbudProgressDetail">Starter...</div>
+        </div>
+
+        <!-- Anbud Results (displayed in matching results UI) -->
+        <div class="results-section" id="anbudResultsSection">
+            <div id="anbudResultsContainer"></div>
+        </div>
+
+        </div><!-- /moduleAnbud -->
+
+        <!-- ═══════════════════════════════════════════════════════ -->
+        <!-- MODULE: JOBBER (JOBBLISTE)                             -->
+        <!-- ═══════════════════════════════════════════════════════ -->
+        <div id="moduleJobs" style="display:none">
+            <div class="card">
+                <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:1rem">
+                    <h2 style="margin:0">P&aring;g&aring;ende og fullf&oslash;rte jobber</h2>
+                    <button class="btn btn-primary" style="font-size:0.8rem;padding:0.3rem 0.8rem" onclick="loadJobList()">Oppdater</button>
+                </div>
+                <p style="color:var(--text-muted);font-size:0.85rem;margin-bottom:1rem">
+                    Alle matching- og anbudsjobber. Klikk for &aring; &aring;pne og fortsette. Jobber beholdes i 90 dager.
+                </p>
+                <div id="jobListContainer" style="font-size:0.85rem;color:var(--text-muted)">Laster jobber...</div>
+            </div>
+        </div><!-- /moduleJobs -->
+
+        <!-- ═══════════════════════════════════════════════════════ -->
         <!-- MODULE: HISTORIKK                                       -->
         <!-- ═══════════════════════════════════════════════════════ -->
         <div id="moduleHistory" style="display:none">
@@ -1368,6 +1553,52 @@
         </div>
     </div>
 
+    <!-- Lock Job Modal -->
+    <div id="lockModal" style="display:none;position:fixed;inset:0;background:rgba(0,0,0,0.4);z-index:1000;align-items:center;justify-content:center">
+        <div style="background:#fff;border-radius:12px;padding:1.5rem;max-width:400px;width:90%;box-shadow:0 8px 32px rgba(0,0,0,0.2)">
+            <h3 style="margin:0 0 0.75rem;font-size:1rem" id="lockModalTitle">L&aring;s jobb</h3>
+            <p style="font-size:0.85rem;color:var(--text-muted);margin:0 0 1rem">Sett et passord for &aring; beskytte denne jobben.</p>
+            <input type="password" id="lockPasswordInput" placeholder="Passord (minst 4 tegn)" style="width:100%;padding:0.5rem;border:1px solid var(--border);border-radius:6px;font-size:0.9rem;margin-bottom:0.75rem">
+            <div style="display:flex;gap:0.5rem;justify-content:flex-end">
+                <button class="btn" style="background:#e2e8f0;color:#475569;font-size:0.85rem;padding:0.4rem 1rem" onclick="closeLockModal()">Avbryt</button>
+                <button class="btn btn-primary" style="font-size:0.85rem;padding:0.4rem 1rem" onclick="doLockJob()">L&aring;s</button>
+            </div>
+        </div>
+    </div>
+
+    <!-- Unlock Job Modal -->
+    <div id="unlockModal" style="display:none;position:fixed;inset:0;background:rgba(0,0,0,0.4);z-index:1000;align-items:center;justify-content:center">
+        <div style="background:#fff;border-radius:12px;padding:1.5rem;max-width:400px;width:90%;box-shadow:0 8px 32px rgba(0,0,0,0.2)">
+            <h3 style="margin:0 0 0.75rem;font-size:1rem">L&aring;s opp jobb</h3>
+            <p style="font-size:0.85rem;color:var(--text-muted);margin:0 0 1rem">Skriv inn passord for &aring; l&aring;se opp jobben.</p>
+            <input type="password" id="unlockPasswordInput" placeholder="Passord" style="width:100%;padding:0.5rem;border:1px solid var(--border);border-radius:6px;font-size:0.9rem;margin-bottom:0.75rem">
+            <div style="display:flex;gap:0.5rem;justify-content:flex-end">
+                <button class="btn" style="background:#e2e8f0;color:#475569;font-size:0.85rem;padding:0.4rem 1rem" onclick="closeUnlockModal()">Avbryt</button>
+                <button class="btn btn-primary" style="font-size:0.85rem;padding:0.4rem 1rem" onclick="doUnlockJob()">L&aring;s opp</button>
+            </div>
+        </div>
+    </div>
+
+    <!-- Manual Product Search Modal -->
+    <div id="manualSearchModal" style="display:none;position:fixed;inset:0;background:rgba(0,0,0,0.4);z-index:1000;align-items:center;justify-content:center">
+        <div style="background:#fff;border-radius:12px;padding:1.5rem;max-width:700px;width:95%;box-shadow:0 8px 32px rgba(0,0,0,0.2);max-height:80vh;overflow-y:auto">
+            <h3 style="margin:0 0 0.75rem;font-size:1rem">S&oslash;k i katalog &mdash; manuelt produktvalg</h3>
+            <p style="font-size:0.82rem;color:var(--text-muted);margin:0 0 0.75rem">Rad: <span id="manualSearchRow"></span></p>
+            <div style="display:flex;gap:0.5rem;margin-bottom:0.75rem">
+                <input type="text" id="manualSearchInput" placeholder="S&oslash;k p&aring; produktnavn, spesifikasjon eller artikkelnr..." style="flex:1;padding:0.5rem;border:1px solid var(--border);border-radius:6px;font-size:0.9rem" onkeydown="if(event.key==='Enter')doManualSearch()">
+                <button class="btn btn-primary" style="font-size:0.85rem;padding:0.4rem 0.8rem" onclick="doManualSearch()">S&oslash;k</button>
+            </div>
+            <div style="display:flex;gap:0.5rem;margin-bottom:0.75rem">
+                <input type="text" id="manualArtnrInput" placeholder="Eller skriv inn artikkelnummer direkte..." style="flex:1;padding:0.5rem;border:1px solid var(--border);border-radius:6px;font-size:0.9rem;font-family:monospace" onkeydown="if(event.key==='Enter')doManualArtnrSelect()">
+                <button class="btn" style="font-size:0.85rem;padding:0.4rem 0.8rem;background:#dcfce7;color:#166534;border:1px solid #bbf7d0" onclick="doManualArtnrSelect()">Velg art.nr</button>
+            </div>
+            <div id="manualSearchResults" style="font-size:0.82rem;color:var(--text-muted)"></div>
+            <div style="display:flex;gap:0.5rem;justify-content:flex-end;margin-top:0.75rem">
+                <button class="btn" style="background:#e2e8f0;color:#475569;font-size:0.85rem;padding:0.4rem 1rem" onclick="closeManualSearchModal()">Lukk</button>
+            </div>
+        </div>
+    </div>
+
     <script>
         const API_BASE = '';
         let currentJobId = null;
@@ -1381,15 +1612,17 @@
         let currentModule = 'masterdata';
         function switchModule(mod) {
             currentModule = mod;
-            document.getElementById('moduleMasterdata').style.display = mod === 'masterdata' ? '' : 'none';
-            document.getElementById('moduleMatching').style.display = mod === 'matching' ? '' : 'none';
-            document.getElementById('moduleRelations').style.display = mod === 'relations' ? '' : 'none';
-            document.getElementById('moduleHistory').style.display = mod === 'history' ? '' : 'none';
+            const modules = ['moduleMasterdata', 'moduleMatching', 'moduleAnbud', 'moduleJobs', 'moduleRelations', 'moduleHistory'];
+            const modMap = {masterdata: 'moduleMasterdata', matching: 'moduleMatching', anbud: 'moduleAnbud', jobs: 'moduleJobs', relations: 'moduleRelations', history: 'moduleHistory'};
+            modules.forEach(m => { const el = document.getElementById(m); if (el) el.style.display = 'none'; });
+            const target = document.getElementById(modMap[mod]);
+            if (target) target.style.display = '';
             document.querySelectorAll('.module-tab').forEach(t => t.classList.remove('active'));
-            const tabMap = {masterdata: 'tabMasterdata', matching: 'tabMatching', relations: 'tabRelations', history: 'tabHistory'};
+            const tabMap = {masterdata: 'tabMasterdata', matching: 'tabMatching', anbud: 'tabAnbud', jobs: 'tabJobs', relations: 'tabRelations', history: 'tabHistory'};
             document.getElementById(tabMap[mod])?.classList.add('active');
             if (mod === 'relations') initRelModule();
             if (mod === 'history') loadHistory();
+            if (mod === 'jobs') loadJobList();
         }
 
         // ── Cross-module handoff (Task 3: uses data model, not DOM) ──
@@ -3390,6 +3623,29 @@
         let matchPollInterval = null;
         let matchMode = 'standard';
         let matchResultsData = [];
+        let matchRowApprovals = {};  // {input_row: "approved"|"rejected"|"pending"}
+        let matchFilter = 'all';
+        let matchMinRelevance = 0;
+        let matchJobMeta = {};  // {job_name, created_by, job_type, locked}
+
+        // Anbud module state
+        let anbudFile = null;
+        let anbudJobId = null;
+        let anbudPollInterval = null;
+        let anbudMode = 'standard';
+
+        // Persisted username (convenience)
+        try {
+            const savedUser = localStorage.getItem('masterdata_username');
+            if (savedUser) {
+                document.addEventListener('DOMContentLoaded', () => {
+                    const el1 = document.getElementById('matchCreatedBy');
+                    const el2 = document.getElementById('anbudCreatedBy');
+                    if (el1 && !el1.value) el1.value = savedUser;
+                    if (el2 && !el2.value) el2.value = savedUser;
+                });
+            }
+        } catch(e) {}
 
         const MATCH_MODE_STYLES = {
             standard: { color: 'var(--primary)', bg: '#fff' },
@@ -3437,6 +3693,12 @@
             if (f) selectMatchFile(f);
         });
 
+        function updateMatchStartBtn() {
+            const name = document.getElementById('matchJobName').value.trim();
+            const user = document.getElementById('matchCreatedBy').value.trim();
+            document.getElementById('matchStartBtn').disabled = !(matchFile && name && user);
+        }
+
         function selectMatchFile(file) {
             if (!file.name.endsWith('.xlsx')) {
                 alert('Kun .xlsx-filer st\u00f8ttes.');
@@ -3446,12 +3708,20 @@
             document.getElementById('matchFileName').textContent = file.name;
             document.getElementById('matchFileName').classList.remove('hidden');
             document.getElementById('matchFileInfo').textContent = `${(file.size / 1024).toFixed(1)} KB`;
-            document.getElementById('matchStartBtn').disabled = false;
+            updateMatchStartBtn();
         }
 
         // Start matching
         document.getElementById('matchStartBtn').addEventListener('click', async () => {
             if (!matchFile) return;
+            const jobName = document.getElementById('matchJobName').value.trim();
+            const createdBy = document.getElementById('matchCreatedBy').value.trim();
+            if (!jobName || !createdBy) {
+                alert('Jobbnavn og ditt navn er p\u00e5krevd.');
+                return;
+            }
+            // Save username for convenience
+            try { localStorage.setItem('masterdata_username', createdBy); } catch(e) {}
 
             const btn = document.getElementById('matchStartBtn');
             btn.disabled = true;
@@ -3460,7 +3730,8 @@
             try {
                 const formData = new FormData();
                 formData.append('file', matchFile);
-                const url = `${API_BASE}/api/match/start?match_mode=${matchMode}`;
+                const params = new URLSearchParams({match_mode: matchMode, job_name: jobName, created_by: createdBy, job_type: 'standard'});
+                const url = `${API_BASE}/api/match/start?${params}`;
                 const resp = await fetch(url, { method: 'POST', body: formData });
 
                 if (!resp.ok) {
@@ -3538,6 +3809,29 @@
                 const resp = await fetch(`${API_BASE}/api/match/results/${matchJobId}`);
                 const data = await resp.json();
                 matchResultsData = data.results || [];
+                matchRowApprovals = data.row_approvals || {};
+                matchJobMeta = {
+                    job_name: data.job_name || '',
+                    created_by: data.created_by || '',
+                    job_type: data.job_type || 'standard',
+                    locked: data.locked || false,
+                };
+
+                // Job info banner
+                document.getElementById('matchJobNameDisplay').textContent = matchJobMeta.job_name || matchJobId;
+                document.getElementById('matchCreatedByDisplay').textContent = matchJobMeta.created_by || 'Ukjent';
+                const typeBadge = document.getElementById('matchJobTypeBadge');
+                if (matchJobMeta.job_type === 'anbud') {
+                    typeBadge.textContent = 'Anbud';
+                    typeBadge.style.background = '#fef3c7';
+                    typeBadge.style.color = '#92400e';
+                } else {
+                    typeBadge.textContent = 'Standard';
+                    typeBadge.style.background = '#dbeafe';
+                    typeBadge.style.color = '#1e40af';
+                }
+                const lockBadge = document.getElementById('matchLockBadge');
+                lockBadge.style.display = matchJobMeta.locked ? '' : 'none';
 
                 const isHardcore = data.match_mode === 'hardcore_price';
                 const modeLabel = data.mode_label || MATCH_MODE_LABELS[data.match_mode] || 'Standard';
@@ -3580,38 +3874,103 @@
             }
         }
 
+        const TAG_STYLES = {
+            'billigst': {bg:'#dcfce7',color:'#166534',label:'Billigst'},
+            'best_match': {bg:'#dbeafe',color:'#1e40af',label:'Best match'},
+            'anbefalt_hardcore': {bg:'#fef3c7',color:'#92400e',label:'Anbefalt'},
+            'eget_merke': {bg:'#ecfdf5',color:'#047857',label:'Eget merke'},
+            'manuelt_valgt': {bg:'#e0e7ff',color:'#3730a3',label:'Manuelt valgt'},
+        };
+
+        function getFilteredResults() {
+            let filtered = matchResultsData;
+            if (matchFilter === 'approved') {
+                filtered = filtered.filter(r => matchRowApprovals[String(r.input_row)] === 'approved');
+            } else if (matchFilter === 'rejected') {
+                filtered = filtered.filter(r => matchRowApprovals[String(r.input_row)] === 'rejected');
+            } else if (matchFilter !== 'all') {
+                filtered = filtered.filter(r => r.status === matchFilter);
+            }
+            if (matchMinRelevance > 0) {
+                filtered = filtered.filter(r => (r.selected_relevance_score || 0) >= matchMinRelevance);
+            }
+            return filtered;
+        }
+
+        function setMatchFilter(f) {
+            matchFilter = f;
+            document.querySelectorAll('.match-filter-btn').forEach(b => {
+                b.classList.toggle('active', b.dataset.filter === f);
+                if (b.dataset.filter === f) {
+                    b.style.border = '2px solid var(--primary)';
+                    b.style.fontWeight = '700';
+                } else {
+                    b.style.border = '1px solid var(--border)';
+                    b.style.fontWeight = '';
+                }
+            });
+            applyMatchFilters();
+        }
+
+        function applyMatchFilters() {
+            matchMinRelevance = parseInt(document.getElementById('matchRelevanceFilter').value) || 0;
+            document.getElementById('matchRelevanceFilterVal').textContent = matchMinRelevance + '%';
+            const filtered = getFilteredResults();
+            document.getElementById('matchFilterCount').textContent = `Viser ${filtered.length} av ${matchResultsData.length}`;
+            renderMatchResults(filtered, matchMode === 'hardcore_price');
+        }
+
         function renderMatchResults(results, isHardcore) {
             const tbody = document.getElementById('matchResultsBody');
             let html = '';
+            const isLocked = matchJobMeta.locked;
 
             for (const r of results) {
                 const statusBadge = getMatchStatusBadge(r.status);
                 const selectedName = r.selected_product_name || '-';
                 const alcDisplay = r.selected_alc_price != null
-                    ? `kr ${r.selected_alc_price.toFixed(2)}`
+                    ? `kr ${Number(r.selected_alc_price).toFixed(2)}`
                     : '<span style="color:#94a3b8">Mangler</span>';
                 const relevanceDisplay = r.selected_relevance_score != null
                     ? `${r.selected_relevance_score}%`
                     : '-';
 
+                // Approval status
+                const approval = matchRowApprovals[String(r.input_row)] || 'pending';
+                let approvalBadge = '';
+                if (approval === 'approved') approvalBadge = '<span style="background:#dcfce7;color:#166534;padding:0.15rem 0.4rem;border-radius:10px;font-size:0.72rem;font-weight:600">Godkjent</span>';
+                else if (approval === 'rejected') approvalBadge = '<span style="background:#fef2f2;color:#991b1b;padding:0.15rem 0.4rem;border-radius:10px;font-size:0.72rem;font-weight:600">Avsl\u00e5tt</span>';
+                else approvalBadge = '<span style="background:#f1f5f9;color:#64748b;padding:0.15rem 0.4rem;border-radius:10px;font-size:0.72rem">Venter</span>';
+
                 // Main row
                 html += `<tr class="expandable" onclick="toggleMatchDetail(this, ${r.input_row})">`;
+                html += `<td style="text-align:center"><input type="checkbox" class="match-row-check" data-row="${r.input_row}" onclick="event.stopPropagation()"></td>`;
                 html += `<td>${r.input_row}</td>`;
                 html += `<td title="${escapeHtml(r.input_specification || '')}">${escapeHtml(r.input_product_name || '')}</td>`;
                 html += `<td>${statusBadge}</td>`;
+                html += `<td>${approvalBadge}</td>`;
                 html += `<td title="${r.selected_candidate || ''}">${escapeHtml(selectedName.substring(0, 40))}</td>`;
                 html += `<td style="font-weight:600">${alcDisplay}</td>`;
                 html += `<td>${relevanceDisplay}</td>`;
-                html += `<td>${r.candidate_count}</td>`;
+                html += `<td>${r.candidate_count || (r.candidates ? r.candidates.length : 0)}</td>`;
                 html += `</tr>`;
 
                 // Detail row with candidates
-                html += `<tr class="detail-row" id="matchDetail_${r.input_row}"><td colspan="7"><div class="detail-content">`;
-                html += `<div style="margin-bottom:0.5rem">`;
-                html += `<strong>Innprodukt:</strong> ${escapeHtml(r.input_product_name || '')}`;
+                html += `<tr class="detail-row" id="matchDetail_${r.input_row}"><td colspan="9"><div class="detail-content">`;
+                html += `<div style="margin-bottom:0.5rem;display:flex;align-items:center;justify-content:space-between;flex-wrap:wrap;gap:0.5rem">`;
+                html += `<div><strong>Innprodukt:</strong> ${escapeHtml(r.input_product_name || '')}`;
                 if (r.input_specification) html += ` &mdash; <em>${escapeHtml(r.input_specification)}</em>`;
-                if (r.comment) html += `<br><span style="color:var(--text-muted);font-size:0.8rem">${escapeHtml(r.comment)}</span>`;
                 html += `</div>`;
+                // Action buttons for this row
+                if (!isLocked) {
+                    html += `<div style="display:flex;gap:0.3rem">`;
+                    html += `<button class="btn" style="font-size:0.72rem;padding:0.2rem 0.5rem;background:#dcfce7;color:#166534;border:1px solid #bbf7d0" onclick="event.stopPropagation();approveRow(${r.input_row},'approved')">Godkjenn</button>`;
+                    html += `<button class="btn" style="font-size:0.72rem;padding:0.2rem 0.5rem;background:#fef2f2;color:#991b1b;border:1px solid #fecaca" onclick="event.stopPropagation();approveRow(${r.input_row},'rejected')">Avsl\u00e5</button>`;
+                    html += `<button class="btn" style="font-size:0.72rem;padding:0.2rem 0.5rem;background:#e0e7ff;color:#3730a3;border:1px solid #c7d2fe" onclick="event.stopPropagation();openManualSearch(${r.input_row})">S\u00f8k produkt</button>`;
+                    html += `</div>`;
+                }
+                html += `</div>`;
+                if (r.comment) html += `<div style="color:var(--text-muted);font-size:0.8rem;margin-bottom:0.3rem">${escapeHtml(r.comment)}</div>`;
 
                 if (r.candidates && r.candidates.length > 0) {
                     html += `<table style="width:100%;border-collapse:collapse;font-size:0.82rem;margin-top:0.5rem">`;
@@ -3631,19 +3990,12 @@
                     for (const c of r.candidates) {
                         const isSelected = c.article_number === r.selected_candidate;
                         const rowBg = isSelected ? 'background:#e8f5e9;' : '';
-                        const priceStr = c.alc_price != null ? `kr ${c.alc_price.toFixed(2)}` : '<span style="color:#94a3b8">-</span>';
+                        const priceStr = c.alc_price != null ? `kr ${Number(c.alc_price).toFixed(2)}` : '<span style="color:#94a3b8">-</span>';
 
-                        // Tags display
                         let tagsHtml = '';
                         if (c.tags && c.tags.length > 0) {
                             for (const tag of c.tags) {
-                                const tagStyles = {
-                                    'billigst': {bg:'#dcfce7',color:'#166534',label:'Billigst'},
-                                    'best_match': {bg:'#dbeafe',color:'#1e40af',label:'Best match'},
-                                    'anbefalt_hardcore': {bg:'#fef3c7',color:'#92400e',label:'Anbefalt'},
-                                    'eget_merke': {bg:'#ecfdf5',color:'#047857',label:'Eget merke'},
-                                };
-                                const ts = tagStyles[tag];
+                                const ts = TAG_STYLES[tag];
                                 if (ts) tagsHtml += `<span style="background:${ts.bg};color:${ts.color};padding:0.1rem 0.4rem;border-radius:10px;font-size:0.72rem;font-weight:600;margin-right:0.2rem">${ts.label}</span>`;
                             }
                         }
@@ -3659,14 +4011,13 @@
                         html += `<td style="padding:0.4rem">${c.relevance_score}%</td>`;
                         html += `<td style="padding:0.4rem">${tagsHtml}</td>`;
                         html += `<td style="padding:0.4rem">`;
-                        if (!isSelected) {
+                        if (!isSelected && !isLocked) {
                             html += `<button class="btn" style="font-size:0.72rem;padding:0.2rem 0.5rem;background:#eff6ff;color:var(--primary);border:1px solid #bfdbfe;cursor:pointer" onclick="event.stopPropagation();selectMatchCandidate(${r.input_row},'${c.article_number}')">Velg</button>`;
-                        } else {
+                        } else if (isSelected) {
                             html += '<span style="color:#16a34a;font-size:0.78rem;font-weight:600">Valgt</span>';
                         }
                         html += `</td></tr>`;
 
-                        // AI explanation row
                         if (c.ai_explanation) {
                             html += `<tr style="${rowBg}"><td></td><td colspan="9" style="padding:0.2rem 0.4rem 0.5rem;font-size:0.75rem;color:var(--text-muted);font-style:italic">${escapeHtml(c.ai_explanation)}</td></tr>`;
                         }
@@ -3744,6 +4095,10 @@
             matchFile = null;
             matchJobId = null;
             matchResultsData = [];
+            matchRowApprovals = {};
+            matchJobMeta = {};
+            matchFilter = 'all';
+            matchMinRelevance = 0;
             document.getElementById('matchFileName').classList.add('hidden');
             document.getElementById('matchFileInfo').textContent = '';
             document.getElementById('matchColumnInfo').classList.add('hidden');
@@ -3753,7 +4108,384 @@
             document.getElementById('matchResultsSection').classList.remove('active');
             document.getElementById('matchProgressBar').style.width = '0%';
             document.getElementById('matchFileInput').value = '';
+            document.getElementById('matchJobName').value = '';
+            document.getElementById('matchConfigCard').style.display = '';
             if (matchPollInterval) { clearInterval(matchPollInterval); matchPollInterval = null; }
+        }
+
+        // ── Row Approval ──
+
+        async function approveRow(inputRow, action) {
+            if (!matchJobId) return;
+            try {
+                const resp = await fetch(`${API_BASE}/api/jobs/${matchJobId}/approve`, {
+                    method: 'POST',
+                    headers: {'Content-Type': 'application/json'},
+                    body: JSON.stringify({rows: [inputRow], action}),
+                });
+                if (!resp.ok) { alert('Kunne ikke oppdatere godkjenning.'); return; }
+                matchRowApprovals[String(inputRow)] = action;
+                applyMatchFilters();
+            } catch (e) { alert('Nettverksfeil: ' + e.message); }
+        }
+
+        async function batchApproveVisible(action) {
+            const filtered = getFilteredResults();
+            if (!filtered.length) return;
+            if (!confirm(`Sett ${filtered.length} rader til "${action === 'approved' ? 'godkjent' : 'avsl\u00e5tt'}"?`)) return;
+            const rows = filtered.map(r => r.input_row);
+            try {
+                const resp = await fetch(`${API_BASE}/api/jobs/${matchJobId}/approve`, {
+                    method: 'POST',
+                    headers: {'Content-Type': 'application/json'},
+                    body: JSON.stringify({rows, action}),
+                });
+                if (!resp.ok) { alert('Kunne ikke oppdatere.'); return; }
+                rows.forEach(r => matchRowApprovals[String(r)] = action);
+                applyMatchFilters();
+            } catch (e) { alert('Nettverksfeil: ' + e.message); }
+        }
+
+        async function batchApproveAll(action) {
+            if (!matchJobId) return;
+            if (!confirm(`Sett ALLE ${matchResultsData.length} rader til "${action === 'approved' ? 'godkjent' : 'avsl\u00e5tt'}"?`)) return;
+            try {
+                const resp = await fetch(`${API_BASE}/api/jobs/${matchJobId}/approve`, {
+                    method: 'POST',
+                    headers: {'Content-Type': 'application/json'},
+                    body: JSON.stringify({all: true, action}),
+                });
+                if (!resp.ok) { alert('Kunne ikke oppdatere.'); return; }
+                matchResultsData.forEach(r => matchRowApprovals[String(r.input_row)] = action);
+                applyMatchFilters();
+            } catch (e) { alert('Nettverksfeil: ' + e.message); }
+        }
+
+        // ── Lock / Unlock ──
+
+        function showLockDialog() {
+            if (matchJobMeta.locked) {
+                document.getElementById('unlockModal').style.display = 'flex';
+                document.getElementById('unlockPasswordInput').value = '';
+                document.getElementById('unlockPasswordInput').focus();
+            } else {
+                document.getElementById('lockModal').style.display = 'flex';
+                document.getElementById('lockPasswordInput').value = '';
+                document.getElementById('lockPasswordInput').focus();
+            }
+        }
+        function closeLockModal() { document.getElementById('lockModal').style.display = 'none'; }
+        function closeUnlockModal() { document.getElementById('unlockModal').style.display = 'none'; }
+
+        async function doLockJob() {
+            const pw = document.getElementById('lockPasswordInput').value;
+            if (pw.length < 4) { alert('Passord m\u00e5 v\u00e6re minst 4 tegn.'); return; }
+            try {
+                const resp = await fetch(`${API_BASE}/api/jobs/${matchJobId}/lock`, {
+                    method: 'POST',
+                    headers: {'Content-Type': 'application/json'},
+                    body: JSON.stringify({password: pw}),
+                });
+                if (!resp.ok) { const e = await resp.json(); alert(e.detail || 'Feil'); return; }
+                matchJobMeta.locked = true;
+                document.getElementById('matchLockBadge').style.display = '';
+                closeLockModal();
+                applyMatchFilters();
+            } catch (e) { alert('Nettverksfeil: ' + e.message); }
+        }
+
+        async function doUnlockJob() {
+            const pw = document.getElementById('unlockPasswordInput').value;
+            if (!pw) { alert('Skriv inn passord.'); return; }
+            try {
+                const resp = await fetch(`${API_BASE}/api/jobs/${matchJobId}/unlock`, {
+                    method: 'POST',
+                    headers: {'Content-Type': 'application/json'},
+                    body: JSON.stringify({password: pw}),
+                });
+                if (!resp.ok) { const e = await resp.json(); alert(e.detail || 'Feil passord'); return; }
+                matchJobMeta.locked = false;
+                document.getElementById('matchLockBadge').style.display = 'none';
+                closeUnlockModal();
+                applyMatchFilters();
+            } catch (e) { alert('Nettverksfeil: ' + e.message); }
+        }
+
+        // ── Manual Product Search ──
+
+        let _manualSearchRow = null;
+
+        function openManualSearch(inputRow) {
+            _manualSearchRow = inputRow;
+            document.getElementById('manualSearchRow').textContent = inputRow;
+            document.getElementById('manualSearchInput').value = '';
+            document.getElementById('manualArtnrInput').value = '';
+            document.getElementById('manualSearchResults').innerHTML = '';
+            document.getElementById('manualSearchModal').style.display = 'flex';
+            document.getElementById('manualSearchInput').focus();
+        }
+        function closeManualSearchModal() { document.getElementById('manualSearchModal').style.display = 'none'; }
+
+        async function doManualSearch() {
+            const q = document.getElementById('manualSearchInput').value.trim();
+            if (!q) return;
+            const container = document.getElementById('manualSearchResults');
+            container.innerHTML = '<span class="spinner"></span> S\u00f8ker...';
+            try {
+                const resp = await fetch(`${API_BASE}/api/catalog/search?q=${encodeURIComponent(q)}`);
+                const data = await resp.json();
+                if (!data.results || !data.results.length) {
+                    container.innerHTML = '<p style="color:var(--text-muted)">Ingen resultater.</p>';
+                    return;
+                }
+                let html = '<table style="width:100%;border-collapse:collapse;margin-top:0.5rem"><thead><tr style="border-bottom:2px solid var(--border);text-align:left">';
+                html += '<th style="padding:0.4rem">Art.nr</th><th style="padding:0.4rem">Produktnavn</th><th style="padding:0.4rem">Spesifikasjon</th><th style="padding:0.4rem">Produsent</th><th style="padding:0.4rem">Velg</th>';
+                html += '</tr></thead><tbody>';
+                for (const p of data.results) {
+                    html += `<tr style="border-bottom:1px solid #f1f5f9">`;
+                    html += `<td style="padding:0.4rem;font-family:monospace;font-size:0.78rem">${escapeHtml(p.article_number)}</td>`;
+                    html += `<td style="padding:0.4rem">${escapeHtml(p.product_name || '')}</td>`;
+                    html += `<td style="padding:0.4rem;max-width:150px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap" title="${escapeHtml(p.specification || '')}">${escapeHtml(p.specification || '')}</td>`;
+                    html += `<td style="padding:0.4rem;font-size:0.78rem">${escapeHtml(p.supplier || '')}</td>`;
+                    html += `<td style="padding:0.4rem"><button class="btn" style="font-size:0.72rem;padding:0.2rem 0.5rem;background:#dcfce7;color:#166534;border:1px solid #bbf7d0;cursor:pointer" onclick="doSelectManual('${p.article_number}')">Velg</button></td>`;
+                    html += `</tr>`;
+                }
+                html += '</tbody></table>';
+                container.innerHTML = html;
+            } catch (e) {
+                container.innerHTML = `<p style="color:#ef4444">Feil: ${e.message}</p>`;
+            }
+        }
+
+        async function doManualArtnrSelect() {
+            const artnr = document.getElementById('manualArtnrInput').value.trim();
+            if (!artnr) return;
+            await doSelectManual(artnr);
+        }
+
+        async function doSelectManual(articleNumber) {
+            if (!matchJobId || _manualSearchRow === null) return;
+            try {
+                const resp = await fetch(`${API_BASE}/api/match/select-manual/${matchJobId}`, {
+                    method: 'POST',
+                    headers: {'Content-Type': 'application/json'},
+                    body: JSON.stringify({input_row: _manualSearchRow, article_number: articleNumber}),
+                });
+                if (!resp.ok) {
+                    const e = await resp.json();
+                    alert(e.detail || 'Kunne ikke velge produkt');
+                    return;
+                }
+                const data = await resp.json();
+                // Update local data
+                for (const r of matchResultsData) {
+                    if (r.input_row === _manualSearchRow) {
+                        r.selected_candidate = articleNumber;
+                        r.selected_by = 'manual';
+                        r.status = 'matched';
+                        r.selected_product_name = data.product_name || articleNumber;
+                        r.selected_alc_price = null;
+                        r.selected_relevance_score = 0;
+                        break;
+                    }
+                }
+                closeManualSearchModal();
+                applyMatchFilters();
+            } catch (e) { alert('Nettverksfeil: ' + e.message); }
+        }
+
+        // ── Job List ──
+
+        async function loadJobList() {
+            const container = document.getElementById('jobListContainer');
+            container.innerHTML = '<span class="spinner"></span> Laster...';
+            try {
+                const resp = await fetch(`${API_BASE}/api/jobs`);
+                const data = await resp.json();
+                const jobs = data.jobs || [];
+                if (!jobs.length) {
+                    container.innerHTML = '<p style="color:var(--text-muted)">Ingen jobber funnet.</p>';
+                    return;
+                }
+                let html = '<table style="width:100%;border-collapse:collapse"><thead><tr style="border-bottom:2px solid var(--border);text-align:left">';
+                html += '<th style="padding:0.5rem">Jobbnavn</th>';
+                html += '<th style="padding:0.5rem">Opprettet av</th>';
+                html += '<th style="padding:0.5rem">Type</th>';
+                html += '<th style="padding:0.5rem">Modus</th>';
+                html += '<th style="padding:0.5rem">Status</th>';
+                html += '<th style="padding:0.5rem">Produkter</th>';
+                html += '<th style="padding:0.5rem">Opprettet</th>';
+                html += '<th style="padding:0.5rem">Sist aktiv</th>';
+                html += '<th style="padding:0.5rem">L\u00e5st</th>';
+                html += '<th style="padding:0.5rem"></th>';
+                html += '</tr></thead><tbody>';
+                for (const j of jobs) {
+                    const created = j.created_at ? new Date(j.created_at * 1000).toLocaleString('nb-NO') : '-';
+                    const lastActive = j.last_activity_at ? new Date(j.last_activity_at * 1000).toLocaleString('nb-NO') : '-';
+                    const typeBg = j.job_type === 'anbud' ? 'background:#fef3c7;color:#92400e' : 'background:#dbeafe;color:#1e40af';
+                    const statusBadge = getMatchStatusBadge(j.status);
+                    const lockIcon = j.locked ? '<span style="color:#991b1b" title="L\u00e5st">&#128274;</span>' : '';
+                    html += `<tr style="border-bottom:1px solid #f1f5f9;cursor:pointer" onclick="openJob('${j.job_id}')">`;
+                    html += `<td style="padding:0.5rem;font-weight:600">${escapeHtml(j.job_name || j.job_id)}</td>`;
+                    html += `<td style="padding:0.5rem">${escapeHtml(j.created_by || '-')}</td>`;
+                    html += `<td style="padding:0.5rem"><span style="${typeBg};padding:0.1rem 0.4rem;border-radius:10px;font-size:0.72rem;font-weight:600">${j.job_type === 'anbud' ? 'Anbud' : 'Standard'}</span></td>`;
+                    html += `<td style="padding:0.5rem;font-size:0.82rem">${MATCH_MODE_LABELS[j.match_mode] || j.match_mode}</td>`;
+                    html += `<td style="padding:0.5rem">${statusBadge}</td>`;
+                    html += `<td style="padding:0.5rem">${j.processed || 0} / ${j.total || 0}</td>`;
+                    html += `<td style="padding:0.5rem;font-size:0.82rem">${created}</td>`;
+                    html += `<td style="padding:0.5rem;font-size:0.82rem">${lastActive}</td>`;
+                    html += `<td style="padding:0.5rem;text-align:center">${lockIcon}</td>`;
+                    html += `<td style="padding:0.5rem"><button class="btn btn-primary" style="font-size:0.75rem;padding:0.2rem 0.5rem" onclick="event.stopPropagation();openJob('${j.job_id}')">Åpne</button></td>`;
+                    html += `</tr>`;
+                }
+                html += '</tbody></table>';
+                container.innerHTML = html;
+            } catch (e) {
+                container.innerHTML = `<p style="color:#ef4444">Feil: ${e.message}</p>`;
+            }
+        }
+
+        async function openJob(jobId) {
+            // Load job and switch to matching view
+            matchJobId = jobId;
+            // Hide config, show progress/results
+            document.getElementById('matchConfigCard').style.display = 'none';
+            switchModule('matching');
+            document.getElementById('matchProgressSection').classList.add('active');
+            document.getElementById('matchProgressTitle').textContent = 'Laster jobb...';
+            try {
+                const resp = await fetch(`${API_BASE}/api/match/status/${jobId}`);
+                const data = await resp.json();
+                if (data.status === 'completed') {
+                    document.getElementById('matchProgressTitle').textContent = 'Fullf\u00f8rt';
+                    await loadMatchResults();
+                } else if (data.status === 'running') {
+                    document.getElementById('matchProgressTitle').textContent = `Matching p\u00e5g\u00e5r...`;
+                    matchPollInterval = setInterval(pollMatchStatus, 2000);
+                    pollMatchStatus();
+                } else {
+                    document.getElementById('matchProgressTitle').textContent = `Status: ${data.status}`;
+                    if (data.error) document.getElementById('matchProgressDetail').textContent = data.error;
+                }
+            } catch (e) {
+                document.getElementById('matchProgressDetail').textContent = 'Kunne ikke laste jobb: ' + e.message;
+            }
+        }
+
+        // ── Anbud Module ──
+
+        function setAnbudMode(mode) {
+            anbudMode = mode;
+            document.querySelectorAll('.anbud-mode-label').forEach(label => {
+                const labelMode = label.dataset.mode;
+                const isActive = labelMode === mode;
+                const style = MATCH_MODE_STYLES[labelMode] || MATCH_MODE_STYLES.standard;
+                label.style.border = isActive ? `2px solid ${style.color}` : '2px solid var(--border)';
+                label.style.background = isActive ? style.bg : '#fff';
+                label.classList.toggle('active', isActive);
+            });
+            const radio = document.querySelector(`input[name="anbudMode"][value="${mode}"]`);
+            if (radio) radio.checked = true;
+        }
+
+        function updateAnbudStartBtn() {
+            const name = document.getElementById('anbudJobName').value.trim();
+            const user = document.getElementById('anbudCreatedBy').value.trim();
+            document.getElementById('anbudStartBtn').disabled = !(anbudFile && name && user);
+        }
+
+        // Anbud file handling
+        const anbudFileInput = document.getElementById('anbudFileInput');
+        const anbudUploadArea = document.getElementById('anbudUploadArea');
+        if (anbudFileInput) {
+            anbudFileInput.addEventListener('change', (e) => { const f = e.target.files[0]; if (f) selectAnbudFile(f); });
+        }
+        if (anbudUploadArea) {
+            anbudUploadArea.addEventListener('dragover', (e) => { e.preventDefault(); anbudUploadArea.classList.add('dragover'); });
+            anbudUploadArea.addEventListener('dragleave', () => anbudUploadArea.classList.remove('dragover'));
+            anbudUploadArea.addEventListener('drop', (e) => {
+                e.preventDefault(); anbudUploadArea.classList.remove('dragover');
+                const f = e.dataTransfer.files[0]; if (f) selectAnbudFile(f);
+            });
+        }
+
+        function selectAnbudFile(file) {
+            if (!file.name.endsWith('.xlsx')) { alert('Kun .xlsx-filer st\u00f8ttes.'); return; }
+            anbudFile = file;
+            document.getElementById('anbudFileName').textContent = file.name;
+            document.getElementById('anbudFileName').classList.remove('hidden');
+            document.getElementById('anbudFileInfo').textContent = `${(file.size / 1024).toFixed(1)} KB`;
+            updateAnbudStartBtn();
+        }
+
+        // Start anbud matching — uses same backend endpoint with job_type=anbud
+        document.getElementById('anbudStartBtn')?.addEventListener('click', async () => {
+            if (!anbudFile) return;
+            const jobName = document.getElementById('anbudJobName').value.trim();
+            const createdBy = document.getElementById('anbudCreatedBy').value.trim();
+            if (!jobName || !createdBy) { alert('Jobbnavn og ditt navn er p\u00e5krevd.'); return; }
+            try { localStorage.setItem('masterdata_username', createdBy); } catch(e) {}
+
+            const btn = document.getElementById('anbudStartBtn');
+            btn.disabled = true;
+            btn.innerHTML = '<span class="spinner"></span> Starter...';
+
+            try {
+                const formData = new FormData();
+                formData.append('file', anbudFile);
+                const params = new URLSearchParams({match_mode: anbudMode, job_name: jobName, created_by: createdBy, job_type: 'anbud'});
+                const url = `${API_BASE}/api/match/start?${params}`;
+                const resp = await fetch(url, { method: 'POST', body: formData });
+
+                if (!resp.ok) {
+                    const err = await resp.json();
+                    alert(`Feil: ${err.detail || 'Ukjent feil'}`);
+                    btn.disabled = false; btn.textContent = 'Start matching'; return;
+                }
+
+                const data = await resp.json();
+                // Switch to matching module to show results (shared UI)
+                matchJobId = data.job_id;
+                matchMode = anbudMode;
+                btn.textContent = 'Start matching';
+
+                document.getElementById('anbudProgressSection').classList.add('active');
+                document.getElementById('anbudProgressTitle').textContent = `Matching p\u00e5g\u00e5r (${data.mode_label})...`;
+                document.getElementById('anbudProgressDetail').textContent = data.message || 'Starter...';
+
+                anbudPollInterval = setInterval(pollAnbudStatus, 2000);
+                pollAnbudStatus();
+
+            } catch (e) {
+                alert(`Nettverksfeil: ${e.message}`);
+                btn.disabled = false; btn.textContent = 'Start matching';
+            }
+        });
+
+        async function pollAnbudStatus() {
+            if (!matchJobId) return;
+            try {
+                const resp = await fetch(`${API_BASE}/api/match/status/${matchJobId}`);
+                const data = await resp.json();
+                document.getElementById('anbudProgressBar').style.width = `${data.progress_percent}%`;
+                document.getElementById('anbudProgressText').textContent = `${data.processed} / ${data.total} produkter`;
+                document.getElementById('anbudProgressPercent').textContent = `${data.progress_percent}%`;
+
+                if (data.status === 'completed' || data.status === 'failed') {
+                    clearInterval(anbudPollInterval);
+                    anbudPollInterval = null;
+                    if (data.status === 'completed') {
+                        // Switch to matching module to show shared results UI
+                        switchModule('matching');
+                        document.getElementById('matchConfigCard').style.display = 'none';
+                        document.getElementById('matchProgressSection').classList.remove('active');
+                        await loadMatchResults();
+                    } else {
+                        document.getElementById('anbudProgressTitle').textContent = 'Matching feilet';
+                        document.getElementById('anbudProgressDetail').textContent = data.error || 'Ukjent feil';
+                    }
+                }
+            } catch (e) { console.error('Anbud poll error:', e); }
         }
 
         // ═══════════════════════════════════════════════════════
