@@ -627,7 +627,7 @@ async def _search_manufacturer_site(
 ) -> list[tuple[str, str, str]]:
     """Search a manufacturer's website directly for product images.
 
-    Tries to construct the manufacturer's website URL and search for the product.
+    Tries multiple domain patterns and search strategies.
     Returns list of (image_url, page_text_snippet, source_url) tuples.
     """
     results = []
@@ -640,16 +640,13 @@ async def _search_manufacturer_site(
         if clean.endswith(suffix):
             clean = clean[:-len(suffix)].strip()
 
-    # Try common domain patterns
+    # Try many common domain patterns
     domains = []
     if clean and len(clean) >= 2:
         base = re.sub(r'[^a-z0-9]', '', clean)
         if base:
-            domains.extend([
-                f"www.{base}.com",
-                f"www.{base}.no",
-                f"www.{base}.eu",
-            ])
+            for tld in [".com", ".de", ".no", ".eu", ".se", ".dk", ".co.uk", ".net"]:
+                domains.append(f"www.{base}{tld}")
 
     norm_artnr = _normalize_artnr(manufacturer_artnr)
     queries = []
@@ -659,9 +656,13 @@ async def _search_manufacturer_site(
         words = [w for w in product_name.split() if len(w) >= 3][:3]
         if words:
             queries.append(f"{norm_artnr} {' '.join(words)}")
+    if product_name:
+        words = [w for w in product_name.split() if len(w) >= 3][:4]
+        if words:
+            queries.append(" ".join(words))
 
-    for domain in domains[:2]:
-        for query in queries[:2]:
+    for domain in domains[:5]:
+        for query in queries[:3]:
             search_url = f"https://{domain}/search?q={quote_plus(query)}"
             try:
                 logger.info(f"Image search: manufacturer site={domain} query='{query}'")
@@ -674,14 +675,93 @@ async def _search_manufacturer_site(
                 for img_url, alt_text in images:
                     results.append((img_url, page_text, str(response.url)))
 
-                if results:
-                    return results  # Found on first working domain — stop
-
             except Exception as e:
                 logger.debug(f"Manufacturer site search error ({domain}): {e}")
                 continue
 
+        if results:
+            break  # Found on this domain, no need to try others
+
     return results
+
+
+def _build_search_queries(
+    manufacturer_name: str,
+    manufacturer_artnr: str,
+    product_description: str,
+    specification: str,
+    our_artnr: str,
+) -> list[str]:
+    """Build a comprehensive list of search queries from most specific to most generic.
+
+    This is the core of the fallback strategy — we generate many query variants
+    so that even if the first few fail, later ones may succeed.
+    """
+    queries = []
+    norm_mfr_artnr = _normalize_artnr(manufacturer_artnr)
+    mfr_clean = ""
+    if manufacturer_name:
+        mfr_clean = manufacturer_name.strip()
+        for suffix in [" AS", " Ab", " GmbH", " Inc", " Ltd", " AG", " SA", " Norge", " Norway"]:
+            if mfr_clean.endswith(suffix):
+                mfr_clean = mfr_clean[:-len(suffix)].strip()
+
+    desc_words = [w for w in (product_description or "").split() if len(w) >= 3]
+
+    # Strategy 1: Full combo — manufacturer + art.nr + product name
+    if mfr_clean and norm_mfr_artnr and desc_words:
+        queries.append(f"{' '.join(desc_words[:4])} {mfr_clean} {norm_mfr_artnr}")
+
+    # Strategy 2: Manufacturer + art.nr
+    if mfr_clean and norm_mfr_artnr:
+        queries.append(f"{mfr_clean} {norm_mfr_artnr}")
+
+    # Strategy 3: Product name + manufacturer
+    if mfr_clean and desc_words:
+        queries.append(f"{' '.join(desc_words[:5])} {mfr_clean}")
+
+    # Strategy 4: Product name + art.nr (no manufacturer)
+    if desc_words and norm_mfr_artnr:
+        queries.append(f"{' '.join(desc_words[:4])} {norm_mfr_artnr}")
+
+    # Strategy 5: Art.nr alone + "product image"
+    if norm_mfr_artnr:
+        queries.append(f"{norm_mfr_artnr} product image")
+
+    # Strategy 6: Manufacturer + product description only (no art.nr)
+    if mfr_clean and desc_words:
+        queries.append(f"{mfr_clean} {' '.join(desc_words[:3])} product image")
+
+    # Strategy 7: Specification-based (dimensions, ml, etc.)
+    if specification and mfr_clean:
+        spec_short = specification[:50].strip()
+        queries.append(f"{mfr_clean} {spec_short}")
+
+    # Strategy 8: Generic product description (no manufacturer, no art.nr)
+    if desc_words:
+        queries.append(f"{' '.join(desc_words[:5])} product image")
+
+    # Strategy 9: Translated/English variants for common medical terms
+    if desc_words:
+        # Build an English-style generic query from the Norwegian description
+        generic = " ".join(desc_words[:4])
+        queries.append(f"{generic} medical product")
+
+    # Strategy 10: Our article number as last resort
+    if our_artnr and mfr_clean:
+        norm_our = _normalize_artnr(our_artnr)
+        if norm_our:
+            queries.append(f"{mfr_clean} {norm_our}")
+
+    # Deduplicate while preserving order
+    seen = set()
+    unique = []
+    for q in queries:
+        q_lower = q.strip().lower()
+        if q_lower and q_lower not in seen:
+            seen.add(q_lower)
+            unique.append(q.strip())
+    return unique
 
 
 async def _search_web_broad(
@@ -694,13 +774,13 @@ async def _search_web_broad(
 ) -> list[tuple[str, str, str, str]]:
     """Perform broad web search for product images.
 
-    Uses multiple search query strategies to find product images from
-    any source. Results are verified separately.
+    Uses many search query strategies with progressive fallback.
+    Tries DuckDuckGo HTML search (no API key needed).
+    Follows result links to extract product images from pages.
 
     Returns list of (image_url, page_text, source_url, source_type) tuples.
     """
     results = []
-    norm_mfr_artnr = _normalize_artnr(manufacturer_artnr)
     mfr_clean = ""
     if manufacturer_name:
         mfr_clean = manufacturer_name.strip()
@@ -708,47 +788,51 @@ async def _search_web_broad(
             if mfr_clean.endswith(suffix):
                 mfr_clean = mfr_clean[:-len(suffix)].strip()
 
-    # Build search queries — most specific first, many strategies
-    search_queries = []
-    if mfr_clean and norm_mfr_artnr:
-        search_queries.append(f"{mfr_clean} {norm_mfr_artnr} product image")
-        search_queries.append(f"{mfr_clean} {norm_mfr_artnr}")
-    if product_description and norm_mfr_artnr:
-        # Use first few words of description + art.nr
-        desc_words = product_description.split()[:4]
-        search_queries.append(f"{' '.join(desc_words)} {norm_mfr_artnr}")
-    if mfr_clean and product_description:
-        desc_short = " ".join(product_description.split()[:5])
-        search_queries.append(f"{mfr_clean} {desc_short}")
-    # Additional: specification-based queries
-    if norm_mfr_artnr and specification:
-        spec_short = specification[:40].strip()
-        search_queries.append(f"{norm_mfr_artnr} {spec_short}")
-    # Additional: our article number as last resort
-    if our_artnr and mfr_clean:
-        norm_our = _normalize_artnr(our_artnr)
-        if norm_our:
-            search_queries.append(f"{mfr_clean} {norm_our} product")
+    search_queries = _build_search_queries(
+        manufacturer_name, manufacturer_artnr,
+        product_description, specification, our_artnr,
+    )
 
-    # Try DuckDuckGo HTML search (no API key needed)
-    for query in search_queries[:4]:
+    # Log all planned queries for debugging
+    logger.info(
+        f"Image search: planning {len(search_queries)} queries for "
+        f"mfr='{manufacturer_name}', artnr='{manufacturer_artnr}', "
+        f"desc='{(product_description or '')[:40]}'"
+    )
+    for i, q in enumerate(search_queries):
+        logger.debug(f"  Query #{i+1}: '{q}'")
+
+    pages_followed = 0
+    max_pages = 12  # Total pages to follow across all queries
+
+    # Try each query in order — stop when we have enough results
+    for qi, query in enumerate(search_queries[:8]):
+        if len(results) >= 8:
+            break
         try:
             ddg_url = f"https://html.duckduckgo.com/html/?q={quote_plus(query)}"
-            logger.info(f"Image search: web query='{query}'")
+            logger.info(f"Image search: web query #{qi+1}='{query}'")
             response = await client.get(ddg_url, headers=HEADERS, follow_redirects=True, timeout=15)
             if response.status_code != 200:
+                logger.debug(f"  DDG returned {response.status_code}")
                 continue
 
             soup = BeautifulSoup(response.text, "lxml")
 
             # Extract result links
+            links_found = 0
             for link in soup.select("a.result__a"):
+                if pages_followed >= max_pages or len(results) >= 10:
+                    break
+
                 href = link.get("href", "")
                 if not href or "duckduckgo" in href:
                     continue
+                links_found += 1
 
                 # Follow the result link to find images
                 try:
+                    pages_followed += 1
                     page_response = await client.get(
                         href, headers=HEADERS, follow_redirects=True, timeout=10
                     )
@@ -762,27 +846,34 @@ async def _search_web_broad(
 
                     domain = urlparse(str(page_response.url)).netloc
                     source_type = "web_search"
-                    # Upgrade source type if it's a known trustworthy domain
-                    if manufacturer_name and any(
+                    # Upgrade source type if domain matches manufacturer
+                    if mfr_clean and any(
                         frag in domain.lower() for frag in mfr_clean.lower().split()
                         if len(frag) >= 3
                     ):
                         source_type = "manufacturer_website"
+                    # Also check for known distributor patterns
+                    elif any(d in domain.lower() for d in [
+                        "mediq", "onemed", "norengros", "medline", "cardinal",
+                        "henry-schein", "patterson", "mckesson", "staples",
+                    ]):
+                        source_type = "official_distributor"
 
-                    for img_url, alt_text in images[:3]:
+                    for img_url, alt_text in images[:4]:
                         results.append((img_url, page_text, str(page_response.url), source_type))
 
-                    if len(results) >= 6:
-                        return results
-
                 except Exception as e:
-                    logger.debug(f"Error following search result {href}: {e}")
+                    logger.debug(f"Error following search result {href[:60]}: {e}")
                     continue
+
+            if links_found == 0:
+                logger.debug(f"  No DDG results for query '{query}'")
 
         except Exception as e:
             logger.debug(f"Web search error for query '{query}': {e}")
             continue
 
+    logger.info(f"Image search: web broad returned {len(results)} raw results from {pages_followed} pages")
     return results
 
 
@@ -951,10 +1042,27 @@ async def search_product_images(
             except Exception as e:
                 logger.debug(f"Broad web search error: {e}")
 
-    # Filter: only include candidates with minimum identity score
-    # Lower threshold to be more permissive — this is a manual review tool,
-    # not an auto-approve system. Better to show more candidates for human judgment.
-    MIN_IDENTITY_SCORE = 0.10
+    # Ensure all candidates have a minimum score based on source trust.
+    # This is a review tool — it's better to show a low-confidence candidate
+    # for human judgment than to show nothing at all.
+    for c in all_candidates:
+        if c.identity_score == 0.0:
+            # Give a small base score depending on source type
+            source_base = {
+                "manufacturer_mediabank": 0.15,
+                "manufacturer_website": 0.12,
+                "official_distributor": 0.08,
+                "catalog_site": 0.06,
+                "web_search": 0.05,
+            }
+            c.identity_score = source_base.get(c.source_type, 0.03)
+            c.confidence = c.identity_score * SOURCE_CONFIDENCE.get(c.source_type, 0.5)
+            c.verification_details = c.verification_details or ["source_type_baseline"]
+            if not c.reason:
+                c.reason = "Ingen sterke verifiseringssignaler, men bilde fra relevant kilde."
+
+    # Filter: include all candidates with any positive signal
+    MIN_IDENTITY_SCORE = 0.03
     valid_candidates = [c for c in all_candidates if c.identity_score >= MIN_IDENTITY_SCORE]
 
     # Deduplicate by image URL (keep highest confidence)
@@ -968,23 +1076,25 @@ async def search_product_images(
     # Sort by confidence descending
     valid_candidates.sort(key=lambda c: -c.confidence)
 
-    # Log results
-    if valid_candidates:
+    # Log results with full search audit trail
+    logger.info(
+        f"Image search for {article_number}: "
+        f"{len(valid_candidates)} candidates from {len(all_candidates)} raw "
+        f"(stages: banks={len(banks)}, mfr_site={'tried' if not any(c.confidence >= 0.7 for c in all_candidates[:len(banks)]) else 'skipped'}, "
+        f"web={'tried' if len(all_candidates) > len(banks) else 'skipped'})"
+    )
+    for i, c in enumerate(valid_candidates[:5]):
         logger.info(
-            f"Image search for {article_number}: {len(valid_candidates)} verified candidates found "
-            f"(best confidence: {valid_candidates[0].confidence:.2f}, "
-            f"source: {valid_candidates[0].source_name})"
+            f"  #{i+1}: {c.image_url[:80]}... "
+            f"identity={c.identity_score:.2f} conf={c.confidence:.2f} "
+            f"source={c.source_type} signals={c.verification_details}"
         )
-        for i, c in enumerate(valid_candidates[:3]):
-            logger.info(
-                f"  #{i+1}: {c.image_url[:80]}... "
-                f"identity={c.identity_score:.2f} conf={c.confidence:.2f} "
-                f"source={c.source_type} signals={c.verification_details}"
-            )
-    else:
-        logger.info(
-            f"Image search for {article_number}: no verified candidates found "
-            f"(total raw candidates: {len(all_candidates)})"
+    if not valid_candidates:
+        logger.warning(
+            f"Image search for {article_number}: NO candidates found at all. "
+            f"Raw candidates scanned: {len(all_candidates)}. "
+            f"Inputs: mfr='{manufacturer_name}', artnr='{manufacturer_artnr}', "
+            f"desc='{(product_description or '')[:50]}'"
         )
 
     return valid_candidates[:5]  # Return top 5
