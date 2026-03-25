@@ -685,6 +685,167 @@ async def _search_manufacturer_site(
     return results
 
 
+async def _search_images_direct(
+    queries: list[str],
+    manufacturer_artnr: str,
+    client: httpx.AsyncClient,
+) -> list[tuple[str, str, str, str]]:
+    """Search for product images using image-specific search endpoints.
+
+    Uses DuckDuckGo image search and Bing image search HTML endpoints.
+    These return image URLs directly rather than requiring page scraping.
+
+    Returns list of (image_url, page_text, source_url, source_type) tuples.
+    """
+    results = []
+    seen_urls = set()
+
+    for query in queries[:5]:
+        # DuckDuckGo image search (lite endpoint)
+        try:
+            ddg_img_url = f"https://duckduckgo.com/?q={quote_plus(query)}&iax=images&ia=images"
+            logger.info(f"Image search (DDG images): query='{query}'")
+            resp = await client.get(
+                ddg_img_url, headers=HEADERS, follow_redirects=True, timeout=12
+            )
+            if resp.status_code == 200:
+                # DDG images page contains vqd tokens and image data in scripts
+                # Extract image URLs from the page content
+                text = resp.text
+                # Look for image URLs in the response
+                img_urls = re.findall(
+                    r'(?:https?://[^\s"\'<>]+\.(?:jpg|jpeg|png|webp)(?:\?[^\s"\'<>]*)?)',
+                    text
+                )
+                for img_url in img_urls[:8]:
+                    if img_url in seen_urls:
+                        continue
+                    # Skip tiny images, icons, DDG's own assets
+                    if any(skip in img_url.lower() for skip in [
+                        "duckduckgo", "icon", "logo", "pixel", "1x1", "favicon",
+                        "sprite", "widget", "badge"
+                    ]):
+                        continue
+                    seen_urls.add(img_url)
+                    source_domain = urlparse(img_url).netloc
+                    results.append((img_url, query, img_url, "web_search"))
+        except Exception as e:
+            logger.debug(f"DDG image search error: {e}")
+
+        # Bing image search (HTML)
+        try:
+            bing_url = f"https://www.bing.com/images/search?q={quote_plus(query)}&form=HDRSC2"
+            logger.info(f"Image search (Bing images): query='{query}'")
+            resp = await client.get(
+                bing_url,
+                headers={**HEADERS, "Accept": "text/html"},
+                follow_redirects=True,
+                timeout=12,
+            )
+            if resp.status_code == 200:
+                soup = BeautifulSoup(resp.text, "lxml")
+                # Bing stores image URLs in data attributes on img tags and in murl params
+                for img in soup.find_all("img", src=True):
+                    src = img.get("src", "")
+                    # Bing thumbnail src
+                    if src.startswith("http") and _is_product_image(src):
+                        if src not in seen_urls:
+                            seen_urls.add(src)
+                            results.append((src, query, src, "web_search"))
+
+                # Also check for data-src (lazy loaded) and high-res URLs
+                for a_tag in soup.find_all("a", {"class": "iusc"}):
+                    m_attr = a_tag.get("m", "")
+                    # Extract murl (media URL) from the JSON-like attribute
+                    murl_match = re.search(r'"murl":"(https?://[^"]+)"', m_attr)
+                    if murl_match:
+                        img_url = murl_match.group(1).replace("\\u0026", "&")
+                        if img_url not in seen_urls and _is_product_image(img_url):
+                            seen_urls.add(img_url)
+                            purl_match = re.search(r'"purl":"(https?://[^"]+)"', m_attr)
+                            page_url = purl_match.group(1).replace("\\u0026", "&") if purl_match else img_url
+                            results.append((img_url, query, page_url, "web_search"))
+
+                if len(results) >= 10:
+                    break
+        except Exception as e:
+            logger.debug(f"Bing image search error: {e}")
+
+        if len(results) >= 10:
+            break
+
+    logger.info(f"Direct image search found {len(results)} raw image URLs")
+    return results
+
+
+async def _search_manufacturer_direct_urls(
+    manufacturer_name: str,
+    manufacturer_artnr: str,
+    product_description: str,
+    client: httpx.AsyncClient,
+) -> list[tuple[str, str, str]]:
+    """Try to directly construct and fetch likely product page URLs on manufacturer sites.
+
+    Many manufacturer sites follow predictable URL patterns like:
+    /products/{artnr}, /product/{artnr}, /p/{artnr}, etc.
+
+    Returns list of (image_url, page_text, source_url) tuples.
+    """
+    results = []
+    if not manufacturer_name:
+        return results
+
+    clean = manufacturer_name.lower().strip()
+    for suffix in [" as", " ab", " gmbh", " inc", " ltd", " ag", " sa", " norge", " norway"]:
+        if clean.endswith(suffix):
+            clean = clean[:-len(suffix)].strip()
+
+    base = re.sub(r'[^a-z0-9]', '', clean)
+    if not base or len(base) < 2:
+        return results
+
+    norm_artnr = _normalize_artnr(manufacturer_artnr)
+    if not norm_artnr:
+        return results
+
+    # Try common product page URL patterns across multiple TLDs
+    url_patterns = []
+    for tld in [".com", ".de", ".no", ".eu", ".se"]:
+        domain = f"www.{base}{tld}"
+        url_patterns.extend([
+            f"https://{domain}/products/{norm_artnr}",
+            f"https://{domain}/product/{norm_artnr}",
+            f"https://{domain}/p/{norm_artnr}",
+            f"https://{domain}/{norm_artnr}",
+        ])
+        # Also try with the original (non-normalized) artnr
+        if manufacturer_artnr and manufacturer_artnr.strip() != norm_artnr:
+            raw = manufacturer_artnr.strip()
+            url_patterns.append(f"https://{domain}/products/{raw}")
+            url_patterns.append(f"https://{domain}/product/{raw}")
+
+    for url in url_patterns[:12]:
+        try:
+            resp = await client.get(url, headers=HEADERS, follow_redirects=True, timeout=8)
+            if resp.status_code != 200:
+                continue
+            # Check if page actually contains the article number
+            page_text = resp.text[:5000]
+            if norm_artnr not in page_text.replace(" ", "").replace("-", ""):
+                continue
+            logger.info(f"Image search: found manufacturer product page at {url}")
+            page_text_clean = BeautifulSoup(page_text, "lxml").get_text(" ", strip=True)[:2000]
+            images = _extract_images_from_page(resp.text, str(resp.url), manufacturer_artnr)
+            for img_url, alt_text in images:
+                results.append((img_url, page_text_clean, str(resp.url)))
+            if results:
+                return results
+        except Exception:
+            continue
+
+    return results
+
+
 def _build_search_queries(
     manufacturer_name: str,
     manufacturer_artnr: str,
@@ -927,22 +1088,18 @@ async def search_product_images(
 ) -> list[ImageCandidate]:
     """Search broadly for product images across multiple sources.
 
-    This is the main entry point for the image search module.
+    5-stage pipeline:
+    1. Known manufacturer media banks (highest trust)
+    2. Direct manufacturer product page URL construction
+    3. Manufacturer website search
+    4. Broad web search (DDG text search → follow links → extract images)
+    5. Direct image search (DDG Images + Bing Images)
 
-    Args:
-        article_number: Our internal article number
-        manufacturer_name: Producer/supplier name
-        manufacturer_artnr: Producer's article number (key identifier)
-        product_description: Product description / name
-        specification: Product specification (dimensions, materials, etc.)
-        current_image_status: Current image status (missing, low_quality, etc.)
-        gid: Internal GID identifier
-
-    Returns:
-        List of ImageCandidate objects sorted by confidence (highest first).
-        Only candidates with identity_score >= 0.25 are included.
+    Each stage always runs unless we already have very high-confidence results.
+    This ensures maximum candidate variety for human review.
     """
     all_candidates: list[ImageCandidate] = []
+    stage_counts = {}
 
     logger.info(
         f"Image search started: art={article_number}, mfr={manufacturer_name}, "
@@ -950,9 +1107,18 @@ async def search_product_images(
         f"status={current_image_status}"
     )
 
+    # Pre-build search queries for stages 4 and 5
+    search_queries = _build_search_queries(
+        manufacturer_name, manufacturer_artnr,
+        product_description, specification, article_number,
+    )
+    logger.info(f"Search queries prepared ({len(search_queries)}): {search_queries[:5]}")
+
     async with httpx.AsyncClient(timeout=15, follow_redirects=True) as client:
-        # Stage 1: Known media banks for this manufacturer
+
+        # ── Stage 1: Known media banks ──
         banks = _find_media_banks(manufacturer_name)
+        stage1_count = 0
         for bank in banks:
             try:
                 raw_results = await _search_media_bank(
@@ -961,60 +1127,81 @@ async def search_product_images(
                 )
                 for img_url, page_text, source_url in raw_results:
                     candidate = ImageCandidate(
-                        image_url=img_url,
-                        source_url=source_url,
+                        image_url=img_url, source_url=source_url,
                         source_domain=urlparse(source_url).netloc,
                         source_type=bank.get("source_type", "manufacturer_mediabank"),
                         source_name=bank["name"],
                     )
                     candidate = _verify_candidate(
-                        candidate,
-                        manufacturer_artnr=manufacturer_artnr,
-                        our_artnr=article_number,
-                        manufacturer_name=manufacturer_name,
+                        candidate, manufacturer_artnr=manufacturer_artnr,
+                        our_artnr=article_number, manufacturer_name=manufacturer_name,
                         product_description=product_description,
-                        specification=specification,
-                        page_text=page_text,
+                        specification=specification, page_text=page_text,
                     )
                     _compute_improvement_score(current_image_status, candidate)
                     all_candidates.append(candidate)
-                    logger.debug(
-                        f"  Media bank candidate: {img_url[:80]} "
-                        f"identity={candidate.identity_score:.2f} conf={candidate.confidence:.2f}"
-                    )
+                    stage1_count += 1
             except Exception as e:
                 logger.debug(f"Media bank search error ({bank['name']}): {e}")
+        stage_counts["media_banks"] = stage1_count
 
-        # Stage 2: Manufacturer website direct search (always try for more candidates)
-        if not any(c.confidence >= 0.7 for c in all_candidates):
+        # ── Stage 2: Direct manufacturer product page URLs ──
+        stage2_count = 0
+        if manufacturer_name and manufacturer_artnr:
+            try:
+                raw_results = await _search_manufacturer_direct_urls(
+                    manufacturer_name, manufacturer_artnr, product_description, client
+                )
+                for img_url, page_text, source_url in raw_results:
+                    candidate = ImageCandidate(
+                        image_url=img_url, source_url=source_url,
+                        source_domain=urlparse(source_url).netloc,
+                        source_type="manufacturer_website",
+                        source_name=f"{manufacturer_name} produktside",
+                    )
+                    candidate = _verify_candidate(
+                        candidate, manufacturer_artnr=manufacturer_artnr,
+                        our_artnr=article_number, manufacturer_name=manufacturer_name,
+                        product_description=product_description,
+                        specification=specification, page_text=page_text,
+                    )
+                    _compute_improvement_score(current_image_status, candidate)
+                    all_candidates.append(candidate)
+                    stage2_count += 1
+            except Exception as e:
+                logger.debug(f"Manufacturer direct URL error: {e}")
+        stage_counts["mfr_direct"] = stage2_count
+
+        # ── Stage 3: Manufacturer website search ──
+        stage3_count = 0
+        if not any(c.confidence >= 0.8 for c in all_candidates):
             try:
                 raw_results = await _search_manufacturer_site(
                     manufacturer_name, manufacturer_artnr, product_description, client
                 )
                 for img_url, page_text, source_url in raw_results:
                     candidate = ImageCandidate(
-                        image_url=img_url,
-                        source_url=source_url,
+                        image_url=img_url, source_url=source_url,
                         source_domain=urlparse(source_url).netloc,
                         source_type="manufacturer_website",
                         source_name=f"{manufacturer_name} nettside",
                     )
                     candidate = _verify_candidate(
-                        candidate,
-                        manufacturer_artnr=manufacturer_artnr,
-                        our_artnr=article_number,
-                        manufacturer_name=manufacturer_name,
+                        candidate, manufacturer_artnr=manufacturer_artnr,
+                        our_artnr=article_number, manufacturer_name=manufacturer_name,
                         product_description=product_description,
-                        specification=specification,
-                        page_text=page_text,
+                        specification=specification, page_text=page_text,
                     )
                     _compute_improvement_score(current_image_status, candidate)
                     all_candidates.append(candidate)
+                    stage3_count += 1
             except Exception as e:
                 logger.debug(f"Manufacturer site search error: {e}")
+        stage_counts["mfr_search"] = stage3_count
 
-        # Stage 3: Broad web search (always try for variety of candidates)
-        if not any(c.confidence >= 0.6 for c in all_candidates):
+        # ── Stage 4: Broad web search (DDG text → follow links) ──
+        stage4_count = 0
+        if not any(c.confidence >= 0.7 for c in all_candidates):
             try:
                 raw_results = await _search_web_broad(
                     manufacturer_name, manufacturer_artnr,
@@ -1022,32 +1209,60 @@ async def search_product_images(
                 )
                 for img_url, page_text, source_url, source_type in raw_results:
                     candidate = ImageCandidate(
-                        image_url=img_url,
-                        source_url=source_url,
+                        image_url=img_url, source_url=source_url,
                         source_domain=urlparse(source_url).netloc,
                         source_type=source_type,
                         source_name=urlparse(source_url).netloc,
                     )
                     candidate = _verify_candidate(
-                        candidate,
-                        manufacturer_artnr=manufacturer_artnr,
-                        our_artnr=article_number,
-                        manufacturer_name=manufacturer_name,
+                        candidate, manufacturer_artnr=manufacturer_artnr,
+                        our_artnr=article_number, manufacturer_name=manufacturer_name,
                         product_description=product_description,
-                        specification=specification,
-                        page_text=page_text,
+                        specification=specification, page_text=page_text,
                     )
                     _compute_improvement_score(current_image_status, candidate)
                     all_candidates.append(candidate)
+                    stage4_count += 1
             except Exception as e:
                 logger.debug(f"Broad web search error: {e}")
+        stage_counts["web_broad"] = stage4_count
+
+        # ── Stage 5: Direct image search (DDG Images + Bing Images) ──
+        # This is the most reliable fallback — image search engines
+        # return image URLs directly without needing to scrape pages.
+        stage5_count = 0
+        if len(all_candidates) < 3:
+            try:
+                raw_results = await _search_images_direct(
+                    search_queries, manufacturer_artnr, client
+                )
+                for img_url, page_text, source_url, source_type in raw_results:
+                    candidate = ImageCandidate(
+                        image_url=img_url, source_url=source_url,
+                        source_domain=urlparse(img_url).netloc,
+                        source_type=source_type,
+                        source_name=urlparse(img_url).netloc,
+                    )
+                    candidate = _verify_candidate(
+                        candidate, manufacturer_artnr=manufacturer_artnr,
+                        our_artnr=article_number, manufacturer_name=manufacturer_name,
+                        product_description=product_description,
+                        specification=specification, page_text=page_text,
+                    )
+                    _compute_improvement_score(current_image_status, candidate)
+                    all_candidates.append(candidate)
+                    stage5_count += 1
+            except Exception as e:
+                logger.debug(f"Direct image search error: {e}")
+        stage_counts["image_search"] = stage5_count
+
+    # ── Post-processing ──
 
     # Ensure all candidates have a minimum score based on source trust.
-    # This is a review tool — it's better to show a low-confidence candidate
+    # This is a review tool — better to show low-confidence candidates
     # for human judgment than to show nothing at all.
     for c in all_candidates:
         if c.identity_score == 0.0:
-            # Give a small base score depending on source type
             source_base = {
                 "manufacturer_mediabank": 0.15,
                 "manufacturer_website": 0.12,
@@ -1062,8 +1277,7 @@ async def search_product_images(
                 c.reason = "Ingen sterke verifiseringssignaler, men bilde fra relevant kilde."
 
     # Filter: include all candidates with any positive signal
-    MIN_IDENTITY_SCORE = 0.03
-    valid_candidates = [c for c in all_candidates if c.identity_score >= MIN_IDENTITY_SCORE]
+    valid_candidates = [c for c in all_candidates if c.identity_score >= 0.03]
 
     # Deduplicate by image URL (keep highest confidence)
     seen_urls: dict[str, ImageCandidate] = {}
@@ -1076,12 +1290,11 @@ async def search_product_images(
     # Sort by confidence descending
     valid_candidates.sort(key=lambda c: -c.confidence)
 
-    # Log results with full search audit trail
+    # ── Full audit log ──
     logger.info(
         f"Image search for {article_number}: "
-        f"{len(valid_candidates)} candidates from {len(all_candidates)} raw "
-        f"(stages: banks={len(banks)}, mfr_site={'tried' if not any(c.confidence >= 0.7 for c in all_candidates[:len(banks)]) else 'skipped'}, "
-        f"web={'tried' if len(all_candidates) > len(banks) else 'skipped'})"
+        f"{len(valid_candidates)} final candidates from {len(all_candidates)} raw. "
+        f"Stages: {stage_counts}"
     )
     for i, c in enumerate(valid_candidates[:5]):
         logger.info(
@@ -1091,10 +1304,10 @@ async def search_product_images(
         )
     if not valid_candidates:
         logger.warning(
-            f"Image search for {article_number}: NO candidates found at all. "
-            f"Raw candidates scanned: {len(all_candidates)}. "
+            f"Image search for {article_number}: NO candidates found. "
+            f"Raw={len(all_candidates)}, stages={stage_counts}. "
             f"Inputs: mfr='{manufacturer_name}', artnr='{manufacturer_artnr}', "
-            f"desc='{(product_description or '')[:50]}'"
+            f"desc='{(product_description or '')[:50]}', queries={search_queries[:3]}"
         )
 
-    return valid_candidates[:5]  # Return top 5
+    return valid_candidates[:5]
