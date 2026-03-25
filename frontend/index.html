@@ -18,6 +18,60 @@
             --text-muted: #64748b;
             --border: #e2e8f0;
             --radius: 12px;
+            --heading-color: var(--text);
+            --input-bg: #ffffff;
+            --input-border: #e2e8f0;
+            --hover-bg: #f1f5f9;
+            --accent: #7c3aed;
+            --accent-bg: #faf5ff;
+            --accent-border: #e9d5ff;
+            --info-bg: #eff6ff;
+            --info-border: #bfdbfe;
+            --info-text: #1e40af;
+            --success-bg: #f0fdf4;
+            --success-border: #bbf7d0;
+            --success-text: #166534;
+            --warning-bg: #fefce8;
+            --warning-border: #fde68a;
+            --warning-text: #854d0e;
+            --danger-bg: #fee2e2;
+            --danger-text: #991b1b;
+            --tab-active: #7c3aed;
+            --tab-active-border: #7c3aed;
+        }
+
+        [data-theme="dark"] {
+            --primary: #60a5fa;
+            --primary-dark: #3b82f6;
+            --success: #4ade80;
+            --warning: #fbbf24;
+            --danger: #f87171;
+            --info: #60a5fa;
+            --bg: #0f0f0f;
+            --card-bg: #1a1a1a;
+            --text: #f0f0f0;
+            --text-muted: #a0a0a0;
+            --border: #333333;
+            --heading-color: #facc15;
+            --input-bg: #222222;
+            --input-border: #444444;
+            --hover-bg: #252525;
+            --accent: #a78bfa;
+            --accent-bg: #1e1333;
+            --accent-border: #4c3080;
+            --info-bg: #0c1929;
+            --info-border: #1e3a5f;
+            --info-text: #93c5fd;
+            --success-bg: #0a1f0f;
+            --success-border: #166534;
+            --success-text: #86efac;
+            --warning-bg: #1a1400;
+            --warning-border: #854d0e;
+            --warning-text: #fde68a;
+            --danger-bg: #1f0a0a;
+            --danger-text: #fca5a5;
+            --tab-active: #facc15;
+            --tab-active-border: #facc15;
         }
 
         * { box-sizing: border-box; margin: 0; padding: 0; }
@@ -43,7 +97,7 @@
         header h1 {
             font-size: 1.75rem;
             font-weight: 700;
-            color: var(--text);
+            color: var(--heading-color);
             margin-bottom: 0.5rem;
         }
 
@@ -65,7 +119,7 @@
             font-size: 1.15rem;
             font-weight: 600;
             margin-bottom: 1rem;
-            color: var(--text);
+            color: var(--heading-color);
         }
 
         /* Upload area */
@@ -482,8 +536,8 @@
         }
         .module-tab:hover { color: var(--text); }
         .module-tab.active {
-            color: #7c3aed;
-            border-bottom-color: #7c3aed;
+            color: var(--tab-active);
+            border-bottom-color: var(--tab-active-border);
         }
         /* ── Image Analysis Module ── */
         .ia-source-btn {
@@ -792,9 +846,266 @@
             .results-table { font-size: 0.75rem; }
             .field-grid { grid-template-columns: 1fr; }
         }
+
+        /* ── Theme toggle button ── */
+        .theme-toggle {
+            position: fixed;
+            top: 1rem;
+            right: 1rem;
+            z-index: 999;
+            background: var(--card-bg);
+            border: 1px solid var(--border);
+            border-radius: 8px;
+            padding: 0.4rem 0.7rem;
+            cursor: pointer;
+            font-size: 0.85rem;
+            color: var(--text);
+            display: flex;
+            align-items: center;
+            gap: 0.35rem;
+            box-shadow: 0 2px 8px rgba(0,0,0,0.1);
+            transition: all 0.2s;
+        }
+        .theme-toggle:hover { background: var(--hover-bg); }
+
+        /* ── Dark mode comprehensive overrides ── */
+
+        /* All headings in dark mode get yellow */
+        [data-theme="dark"] h1,
+        [data-theme="dark"] h2,
+        [data-theme="dark"] h3 {
+            color: var(--heading-color) !important;
+        }
+
+        /* Inputs, selects, textareas */
+        [data-theme="dark"] input,
+        [data-theme="dark"] select,
+        [data-theme="dark"] textarea {
+            background: var(--input-bg) !important;
+            color: var(--text) !important;
+            border-color: var(--input-border) !important;
+        }
+
+        /* Upload area */
+        [data-theme="dark"] .upload-area {
+            border-color: var(--border);
+            background: var(--card-bg);
+        }
+        [data-theme="dark"] .upload-area:hover,
+        [data-theme="dark"] .upload-area.dragover {
+            border-color: var(--primary);
+            background: var(--info-bg);
+        }
+
+        /* Result tables */
+        [data-theme="dark"] .results-table th {
+            background: #222 !important;
+            color: var(--heading-color) !important;
+            border-color: var(--border) !important;
+        }
+        [data-theme="dark"] .results-table td {
+            border-color: var(--border) !important;
+        }
+        [data-theme="dark"] .results-table tr:hover td {
+            background: var(--hover-bg) !important;
+        }
+
+        /* Member/standalone tables */
+        [data-theme="dark"] .member-table th,
+        [data-theme="dark"] .standalone-table th {
+            border-color: var(--border) !important;
+            color: var(--text-muted) !important;
+        }
+        [data-theme="dark"] .member-table td,
+        [data-theme="dark"] .standalone-table td {
+            border-color: var(--border) !important;
+        }
+
+        /* Buttons with hardcoded colors */
+        [data-theme="dark"] .btn-outline {
+            background: var(--card-bg) !important;
+            color: var(--text) !important;
+            border-color: var(--border) !important;
+        }
+        [data-theme="dark"] .btn-outline:hover {
+            background: var(--hover-bg) !important;
+        }
+
+        /* QA source/preset buttons */
+        [data-theme="dark"] .qa-source-btn,
+        [data-theme="dark"] .ia-source-btn,
+        [data-theme="dark"] .preset-btn {
+            background: var(--card-bg) !important;
+            color: var(--text) !important;
+            border-color: var(--border) !important;
+        }
+        [data-theme="dark"] .qa-source-btn.active {
+            background: var(--info-bg) !important;
+            color: var(--primary) !important;
+            border-color: var(--primary) !important;
+        }
+        [data-theme="dark"] .ia-source-btn.active {
+            background: var(--accent-bg) !important;
+            color: var(--accent) !important;
+            border-color: var(--accent) !important;
+        }
+
+        /* Inline info/success/warning/danger panels */
+        [data-theme="dark"] [style*="background:#f0fdf4"],
+        [data-theme="dark"] [style*="background:#dcfce7"] {
+            background: var(--success-bg) !important;
+            border-color: var(--success-border) !important;
+            color: var(--success-text) !important;
+        }
+        [data-theme="dark"] [style*="background:#eff6ff"],
+        [data-theme="dark"] [style*="background:#f0f9ff"] {
+            background: var(--info-bg) !important;
+            border-color: var(--info-border) !important;
+            color: var(--info-text) !important;
+        }
+        [data-theme="dark"] [style*="background:#fefce8"],
+        [data-theme="dark"] [style*="background:#fef3c7"] {
+            background: var(--warning-bg) !important;
+            border-color: var(--warning-border) !important;
+            color: var(--warning-text) !important;
+        }
+        [data-theme="dark"] [style*="background:#fee2e2"] {
+            background: var(--danger-bg) !important;
+            color: var(--danger-text) !important;
+        }
+        [data-theme="dark"] [style*="background:#faf5ff"] {
+            background: var(--accent-bg) !important;
+            border-color: var(--accent-border) !important;
+        }
+        [data-theme="dark"] [style*="background:#f8fafc"],
+        [data-theme="dark"] [style*="background:#f1f5f9"] {
+            background: var(--hover-bg) !important;
+        }
+        [data-theme="dark"] [style*="background:#fff"] {
+            background: var(--card-bg) !important;
+        }
+
+        /* Progress bar */
+        [data-theme="dark"] [style*="background:#e2e8f0"] {
+            background: #333 !important;
+        }
+
+        /* Analysis mode labels in dark */
+        [data-theme="dark"] label {
+            color: var(--text);
+        }
+
+        /* Family cards */
+        [data-theme="dark"] .family-card {
+            background: var(--card-bg);
+            border-color: var(--border);
+        }
+
+        /* Image analysis */
+        [data-theme="dark"] .ia-review-card {
+            background: var(--card-bg);
+            border-color: var(--border);
+        }
+        [data-theme="dark"] .ia-img-thumb {
+            background: #222;
+            border-color: var(--border);
+        }
+        [data-theme="dark"] .ia-img-placeholder {
+            border-color: var(--border);
+            color: var(--text-muted);
+        }
+        [data-theme="dark"] .ia-toolbar {
+            background: var(--card-bg);
+            border-color: var(--border);
+        }
+
+        /* Score/status badges in dark mode */
+        [data-theme="dark"] .ia-score-badge.good { background: #0a2e12; color: #86efac; }
+        [data-theme="dark"] .ia-score-badge.warning { background: #2e1a00; color: #fde68a; }
+        [data-theme="dark"] .ia-score-badge.bad { background: #2e0a0a; color: #fca5a5; }
+        [data-theme="dark"] .ia-score-badge.missing { background: #1e1e1e; color: #a0a0a0; }
+        [data-theme="dark"] .ia-status-badge.approved { background: #0a2e12; color: #86efac; }
+        [data-theme="dark"] .ia-status-badge.rejected { background: #2e0a0a; color: #fca5a5; }
+        [data-theme="dark"] .ia-status-badge.pending { background: #1e1e1e; color: #a0a0a0; }
+
+        /* Review buttons in family module */
+        [data-theme="dark"] .review-btn {
+            background: var(--card-bg) !important;
+            border-color: var(--border) !important;
+            color: var(--text) !important;
+        }
+        [data-theme="dark"] .review-btn.active-accepted { background: #0a2e12 !important; color: #86efac !important; border-color: #166534 !important; }
+        [data-theme="dark"] .review-btn.active-rejected { background: #2e0a0a !important; color: #fca5a5 !important; border-color: #991b1b !important; }
+        [data-theme="dark"] .review-btn.active-reject { background: #2e0a0a !important; color: #fca5a5 !important; border-color: #991b1b !important; }
+        [data-theme="dark"] .review-btn.active-needs_review { background: #2e1a00 !important; color: #fde68a !important; border-color: #854d0e !important; }
+
+        /* Modals in dark mode */
+        [data-theme="dark"] [style*="background:#fff;border-radius:12px"],
+        [data-theme="dark"] [style*="background:#fff;border-radius"] {
+            background: var(--card-bg) !important;
+            color: var(--text) !important;
+        }
+
+        /* Fix scroll/code areas */
+        [data-theme="dark"] pre, [data-theme="dark"] code {
+            background: #1e1e1e !important;
+            color: #e0e0e0 !important;
+        }
+
+        /* Tab bar for family subtabs */
+        [data-theme="dark"] .tab-btn {
+            color: var(--text-muted);
+        }
+        [data-theme="dark"] .tab-btn:hover {
+            color: var(--text);
+        }
+        [data-theme="dark"] .tab-btn.active {
+            color: var(--tab-active);
+            border-bottom-color: var(--tab-active-border);
+        }
+
+        /* Module nav in dark mode */
+        [data-theme="dark"] .module-nav {
+            border-bottom-color: var(--border);
+        }
+        [data-theme="dark"] .module-tab {
+            color: var(--text-muted);
+        }
+        [data-theme="dark"] .module-tab:hover {
+            color: var(--text);
+        }
+
+        /* Links */
+        [data-theme="dark"] a {
+            color: var(--primary);
+        }
+
+        /* Column info box */
+        [data-theme="dark"] .column-info {
+            background: var(--info-bg) !important;
+            color: var(--info-text) !important;
+        }
+
+        /* Rel mode buttons */
+        [data-theme="dark"] .rel-mode-btn {
+            background: var(--card-bg) !important;
+            color: var(--text) !important;
+            border-color: var(--border) !important;
+        }
+        [data-theme="dark"] .rel-mode-btn.active {
+            background: var(--accent-bg) !important;
+            color: var(--accent) !important;
+            border-color: var(--accent) !important;
+        }
     </style>
 </head>
 <body>
+    <!-- Theme toggle -->
+    <button class="theme-toggle" id="themeToggle" onclick="toggleTheme()" title="Bytt mellom lys og mørk modus">
+        <span id="themeIcon">&#9790;</span>
+        <span id="themeLabel">Dark</span>
+    </button>
+
     <div class="container">
         <header>
             <h1>Masterdata Kvalitetssjekk</h1>
@@ -1502,6 +1813,32 @@
     </div>
 
     <script>
+        // ── Theme management ──
+        function applyTheme(theme) {
+            document.documentElement.setAttribute('data-theme', theme);
+            const icon = document.getElementById('themeIcon');
+            const label = document.getElementById('themeLabel');
+            if (theme === 'dark') {
+                icon.innerHTML = '&#9788;';
+                label.textContent = 'Light';
+            } else {
+                icon.innerHTML = '&#9790;';
+                label.textContent = 'Dark';
+            }
+            localStorage.setItem('masterdata-theme', theme);
+        }
+
+        function toggleTheme() {
+            const current = document.documentElement.getAttribute('data-theme') || 'light';
+            applyTheme(current === 'dark' ? 'light' : 'dark');
+        }
+
+        // Apply saved theme on load
+        (function() {
+            const saved = localStorage.getItem('masterdata-theme') || 'light';
+            applyTheme(saved);
+        })();
+
         const API_BASE = '';
         let currentJobId = null;
         let pollInterval = null;
