@@ -109,40 +109,80 @@ async def run_image_analysis(
                 # Look up Jeeves data for product info
                 product_name = ""
                 supplier = ""
+                supplier_item_no = ""
+                specification = ""
+                gid = ""
                 if jeeves_index and jeeves_index.loaded:
                     j = jeeves_index.get(artnr)
                     if j:
                         product_name = j.item_description or j.web_title or ""
                         supplier = j.supplier or ""
+                        supplier_item_no = j.supplier_item_no or ""
+                        specification = j.specification or ""
+                        gid = j.gid or ""
 
                 # Determine current image URL
                 current_image_url = _build_cdn_url(artnr)
                 current_image_exists = summary.main_image_exists
 
-                # Build suggested image from external sources
-                # For now, we search manufacturer/norengros sources
-                suggested_image_url = None
-                suggested_source = None
-                suggested_source_url = None
-                suggestion_reason = None
-
                 # Check if image needs improvement
                 needs_review = False
+                suggestion_reason = None
+                current_status = "ok"
                 if not current_image_exists:
                     needs_review = True
                     suggestion_reason = "Hovedbilde mangler"
+                    current_status = "missing"
                 elif summary.main_image_score < 70:
                     needs_review = True
                     suggestion_reason = f"Lav bildescore ({summary.main_image_score:.0f}/100)"
+                    current_status = "low_quality"
                 elif summary.image_quality_status in ("FAIL", "REVIEW"):
                     needs_review = True
                     suggestion_reason = f"Bildekvalitet: {summary.image_quality_status}"
+                    current_status = "review"
+
+                # Search for better images if product needs review
+                candidates = []
+                if needs_review:
+                    try:
+                        from backend.image_search import search_product_images
+                        raw_candidates = await search_product_images(
+                            article_number=artnr,
+                            manufacturer_name=supplier,
+                            manufacturer_artnr=supplier_item_no,
+                            product_description=product_name,
+                            specification=specification,
+                            current_image_status=current_status,
+                            gid=gid,
+                        )
+                        for c in raw_candidates:
+                            candidates.append({
+                                "image_url": c.image_url,
+                                "source_url": c.source_url,
+                                "source_domain": c.source_domain,
+                                "source_type": c.source_type,
+                                "source_name": c.source_name,
+                                "identity_score": round(c.identity_score, 2),
+                                "improvement_score": round(c.improvement_score, 2),
+                                "confidence": round(c.confidence, 2),
+                                "reason": c.reason,
+                                "verification_details": c.verification_details,
+                                "is_manufacturer": c.source_type in (
+                                    "manufacturer_mediabank", "manufacturer_website"
+                                ),
+                            })
+                    except Exception as e:
+                        logger.warning(f"Image search failed for {artnr}: {e}")
 
                 # Build the item
+                best_candidate = candidates[0] if candidates else None
                 item = {
                     "article_number": artnr,
                     "product_name": product_name,
                     "supplier": supplier,
+                    "supplier_item_no": supplier_item_no,
+                    "specification": specification,
                     "current_image_url": current_image_url if current_image_exists else None,
                     "current_image_exists": current_image_exists,
                     "image_score": round(summary.main_image_score, 1),
@@ -152,9 +192,11 @@ async def run_image_analysis(
                     "secondary_images": summary.secondary_images_found,
                     "needs_review": needs_review,
                     "suggestion_reason": suggestion_reason,
-                    "suggested_image_url": suggested_image_url,
-                    "suggested_source": suggested_source,
-                    "suggested_source_url": suggested_source_url,
+                    "suggested_image_url": best_candidate["image_url"] if best_candidate else None,
+                    "suggested_source": best_candidate["source_name"] if best_candidate else None,
+                    "suggested_source_url": best_candidate["source_url"] if best_candidate else None,
+                    "candidates": candidates,
+                    "selected_candidate_index": 0 if candidates else None,
                     "review_status": ImageReviewStatus.PENDING.value,
                     "review_timestamp": None,
                     "image_analyses": summary_dict.get("image_analyses", []),
@@ -166,6 +208,8 @@ async def run_image_analysis(
                     "article_number": artnr,
                     "product_name": "",
                     "supplier": "",
+                    "supplier_item_no": "",
+                    "specification": "",
                     "current_image_url": None,
                     "current_image_exists": False,
                     "image_score": 0,
@@ -178,6 +222,8 @@ async def run_image_analysis(
                     "suggested_image_url": None,
                     "suggested_source": None,
                     "suggested_source_url": None,
+                    "candidates": [],
+                    "selected_candidate_index": None,
                     "review_status": ImageReviewStatus.PENDING.value,
                     "review_timestamp": None,
                     "image_analyses": [],
@@ -265,6 +311,7 @@ def update_review_status(
     article_number: str,
     status: str,
     suggested_image_url: Optional[str] = None,
+    selected_candidate_index: Optional[int] = None,
 ) -> dict:
     """Update review status for a single item."""
     session = load_session(session_id)
@@ -279,6 +326,16 @@ def update_review_status(
     old_status = item["review_status"]
     item["review_status"] = status
     item["review_timestamp"] = time.time()
+
+    # If selecting a specific candidate, update the selected image
+    if selected_candidate_index is not None:
+        candidates = item.get("candidates", [])
+        if 0 <= selected_candidate_index < len(candidates):
+            chosen = candidates[selected_candidate_index]
+            item["selected_candidate_index"] = selected_candidate_index
+            item["suggested_image_url"] = chosen["image_url"]
+            item["suggested_source"] = chosen["source_name"]
+            item["suggested_source_url"] = chosen["source_url"]
 
     # If approving with a custom suggested image URL, store it
     if suggested_image_url:

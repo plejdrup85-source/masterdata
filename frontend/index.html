@@ -3945,54 +3945,86 @@
                 const artnr = item.article_number;
                 const statusClass = item.review_status;
                 const scoreBadge = getScoreBadge(item.image_score, item.current_image_exists);
+                const candidates = item.candidates || [];
+                const selectedIdx = item.selected_candidate_index != null ? item.selected_candidate_index : 0;
 
                 const currentImg = item.current_image_exists && item.current_image_url
-                    ? `<img src="${item.current_image_url}" class="ia-img-thumb" alt="Nåværende bilde" onclick="openLightbox('${item.current_image_url}')" loading="lazy" onerror="this.style.display='none';this.nextElementSibling.style.display='flex'">`
-                      + `<div class="ia-img-placeholder" style="display:none">Bilde ikke tilgjengelig</div>`
+                    ? `<img src="${item.current_image_url}" class="ia-img-thumb" alt="Nåværende" onclick="openLightbox('${item.current_image_url}')" loading="lazy" onerror="this.style.display='none';this.nextElementSibling.style.display='flex'">`
+                      + `<div class="ia-img-placeholder" style="display:none">Ikke tilgjengelig</div>`
                     : `<div class="ia-img-placeholder">Mangler bilde</div>`;
 
-                const suggestedImg = item.suggested_image_url
-                    ? `<img src="${item.suggested_image_url}" class="ia-img-thumb" alt="Foreslått bilde" onclick="openLightbox('${item.suggested_image_url}')" loading="lazy" onerror="this.style.display='none';this.nextElementSibling.style.display='flex'">`
-                      + `<div class="ia-img-placeholder" style="display:none">Bilde ikke tilgjengelig</div>`
-                    : `<div class="ia-img-placeholder">Ingen forslag</div>`;
-
-                const sourceInfo = item.suggested_source
-                    ? `<div style="font-size:0.72rem;color:var(--text-muted);margin-top:0.2rem">Kilde: ${item.suggested_source}${item.suggested_source_url ? ` <a href="${item.suggested_source_url}" target="_blank" style="color:var(--primary)">↗</a>` : ''}</div>`
-                    : '';
+                // Render candidate images (multiple)
+                let candidatesHtml = '';
+                if (candidates.length > 0) {
+                    candidatesHtml = candidates.map((c, idx) => {
+                        const isSelected = idx === selectedIdx;
+                        const trustBadge = c.is_manufacturer
+                            ? '<span style="background:#dcfce7;color:#166534;padding:0.1rem 0.3rem;border-radius:3px;font-size:0.65rem;font-weight:600">PRODUSENT</span>'
+                            : '';
+                        const confColor = c.confidence >= 0.7 ? '#16a34a' : c.confidence >= 0.4 ? '#d97706' : '#64748b';
+                        const border = isSelected ? '3px solid var(--primary)' : '1px solid var(--border)';
+                        return `<div style="display:inline-block;text-align:center;margin:0.2rem;vertical-align:top;cursor:pointer;border:${border};border-radius:8px;padding:0.3rem;background:var(--card-bg)" onclick="iaSelectCandidate('${artnr}',${idx})">
+                            <img src="${c.image_url}" style="width:100px;height:100px;object-fit:contain;border-radius:4px;display:block" loading="lazy" onclick="event.stopPropagation();openLightbox('${c.image_url}')" onerror="this.src='';this.alt='Feil'">
+                            <div style="font-size:0.65rem;color:var(--text-muted);margin-top:0.2rem;max-width:100px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap" title="${c.source_domain}">${c.source_domain}</div>
+                            <div style="font-size:0.6rem;margin-top:0.1rem">${trustBadge} <span style="color:${confColor};font-weight:600">${Math.round(c.confidence*100)}%</span></div>
+                            ${c.source_url ? `<a href="${c.source_url}" target="_blank" onclick="event.stopPropagation()" style="font-size:0.6rem;color:var(--primary)">Kilde ↗</a>` : ''}
+                        </div>`;
+                    }).join('');
+                } else {
+                    candidatesHtml = '<div class="ia-img-placeholder" style="width:100px;height:100px">Ingen forslag funnet</div>';
+                }
 
                 const statusBadge = `<span class="ia-status-badge ${statusClass}">${
                     statusClass === 'approved' ? 'Godkjent' : statusClass === 'rejected' ? 'Avslått' : 'Venter'
                 }</span>`;
 
                 return `
-                <div class="ia-review-card status-${statusClass}" data-artnr="${artnr}">
-                    <div>
-                        <input type="checkbox" class="ia-item-cb" data-artnr="${artnr}" onchange="iaToggleItem('${artnr}', this.checked)" ${iaSelectedItems.has(artnr) ? 'checked' : ''}>
-                        <strong style="font-size:0.9rem">${artnr}</strong>
-                        ${item.product_name ? `<div style="font-size:0.82rem;color:var(--text-muted);margin-top:0.15rem;max-width:200px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap" title="${item.product_name}">${item.product_name}</div>` : ''}
-                        ${item.supplier ? `<div style="font-size:0.75rem;color:var(--text-muted)">${item.supplier}</div>` : ''}
-                        <div style="margin-top:0.3rem">${scoreBadge} ${statusBadge}</div>
-                        ${item.suggestion_reason ? `<div style="font-size:0.72rem;color:#92400e;margin-top:0.2rem">${item.suggestion_reason}</div>` : ''}
-                    </div>
-                    <div style="text-align:center">
-                        <div style="font-size:0.72rem;color:var(--text-muted);margin-bottom:0.2rem">Nåværende</div>
-                        ${currentImg}
-                    </div>
-                    <div style="text-align:center">
-                        <div style="font-size:0.72rem;color:var(--text-muted);margin-bottom:0.2rem">Forslag</div>
-                        ${suggestedImg}
-                        ${sourceInfo}
-                    </div>
-                    <div style="font-size:0.78rem;color:var(--text-muted)">
-                        ${item.image_issues && item.image_issues !== 'Ingen problemer' ? `<div style="margin-bottom:0.3rem"><strong>Problemer:</strong> ${item.image_issues}</div>` : ''}
-                        <div>Bilder funnet: ${item.image_count}${item.secondary_images > 0 ? ` (${item.secondary_images} sekundære)` : ''}</div>
-                    </div>
-                    <div style="display:flex;flex-direction:column;gap:0.3rem">
-                        <button class="btn btn-success" style="font-size:0.75rem;padding:0.3rem 0.6rem" onclick="iaReviewSingle('${artnr}','approved')" ${item.review_status === 'approved' ? 'disabled' : ''}>Godkjenn</button>
-                        <button class="btn btn-danger" style="font-size:0.75rem;padding:0.3rem 0.6rem" onclick="iaReviewSingle('${artnr}','rejected')" ${item.review_status === 'rejected' ? 'disabled' : ''}>Avslå</button>
+                <div style="background:var(--card-bg);border:1px solid var(--border);border-radius:var(--radius);padding:1rem;margin-bottom:0.75rem;border-left:4px solid ${statusClass==='approved'?'var(--success)':statusClass==='rejected'?'var(--danger)':'var(--border)'}" data-artnr="${artnr}">
+                    <div style="display:flex;align-items:flex-start;gap:1rem;flex-wrap:wrap">
+                        <!-- Product info -->
+                        <div style="min-width:180px;flex:0 0 auto">
+                            <div style="display:flex;align-items:center;gap:0.3rem">
+                                <input type="checkbox" class="ia-item-cb" data-artnr="${artnr}" onchange="iaToggleItem('${artnr}', this.checked)" ${iaSelectedItems.has(artnr) ? 'checked' : ''}>
+                                <strong style="font-size:0.95rem">${artnr}</strong>
+                            </div>
+                            ${item.product_name ? `<div style="font-size:0.82rem;color:var(--text);margin-top:0.2rem">${item.product_name}</div>` : ''}
+                            ${item.supplier ? `<div style="font-size:0.78rem;color:var(--text-muted);margin-top:0.15rem">Produsent: <strong>${item.supplier}</strong></div>` : ''}
+                            ${item.supplier_item_no ? `<div style="font-size:0.75rem;color:var(--text-muted)">Prod. art.nr: <strong style="font-family:monospace">${item.supplier_item_no}</strong></div>` : ''}
+                            <div style="margin-top:0.3rem">${scoreBadge} ${statusBadge}</div>
+                            ${item.suggestion_reason ? `<div style="font-size:0.72rem;color:var(--warning);margin-top:0.2rem">${item.suggestion_reason}</div>` : ''}
+                            ${item.image_issues && item.image_issues !== 'Ingen problemer' ? `<div style="font-size:0.7rem;color:var(--text-muted);margin-top:0.15rem">${item.image_issues}</div>` : ''}
+                        </div>
+                        <!-- Current image -->
+                        <div style="text-align:center;flex:0 0 auto">
+                            <div style="font-size:0.72rem;color:var(--text-muted);margin-bottom:0.2rem;font-weight:600">Nåværende bilde</div>
+                            ${currentImg}
+                        </div>
+                        <!-- Candidates -->
+                        <div style="flex:1;min-width:200px">
+                            <div style="font-size:0.72rem;color:var(--text-muted);margin-bottom:0.2rem;font-weight:600">Foreslåtte bilder (${candidates.length} funnet) ${candidates.length > 0 ? '— klikk for å velge' : ''}</div>
+                            <div style="display:flex;flex-wrap:wrap;gap:0.2rem">${candidatesHtml}</div>
+                        </div>
+                        <!-- Actions -->
+                        <div style="display:flex;flex-direction:column;gap:0.3rem;flex:0 0 auto">
+                            <button class="btn btn-success" style="font-size:0.75rem;padding:0.3rem 0.6rem" onclick="iaReviewSingle('${artnr}','approved',${selectedIdx})" ${item.review_status === 'approved' ? 'disabled' : ''}>Godkjenn</button>
+                            <button class="btn btn-danger" style="font-size:0.75rem;padding:0.3rem 0.6rem" onclick="iaReviewSingle('${artnr}','rejected')" ${item.review_status === 'rejected' ? 'disabled' : ''}>Avslå</button>
+                        </div>
                     </div>
                 </div>`;
             }).join('');
+        }
+
+        function iaSelectCandidate(artnr, candidateIdx) {
+            // Visually select a candidate (updates backend on approve)
+            const card = document.querySelector(`[data-artnr="${artnr}"]`);
+            if (!card) return;
+            // Update the stored selection for this item
+            card.dataset.selectedCandidate = candidateIdx;
+            // Visual feedback — highlight selected
+            const candidates = card.querySelectorAll('[onclick*="iaSelectCandidate"]');
+            candidates.forEach((el, i) => {
+                el.style.border = i === candidateIdx ? '3px solid var(--primary)' : '1px solid var(--border)';
+            });
         }
 
         function getScoreBadge(score, exists) {
@@ -4035,12 +4067,23 @@
             });
         }
 
-        async function iaReviewSingle(artnr, status) {
+        async function iaReviewSingle(artnr, status, candidateIdx) {
             try {
+                // Check if user has selected a different candidate via clicking
+                const card = document.querySelector(`[data-artnr="${artnr}"]`);
+                const selectedIdx = card && card.dataset.selectedCandidate != null
+                    ? parseInt(card.dataset.selectedCandidate)
+                    : (candidateIdx != null ? candidateIdx : undefined);
+
+                const body = { review_status: status };
+                if (status === 'approved' && selectedIdx != null) {
+                    body.selected_candidate_index = selectedIdx;
+                }
+
                 const resp = await fetch(`${API_BASE}/api/image-analysis/${iaSessionId}/review/${artnr}`, {
                     method: 'PUT',
                     headers: {'Content-Type': 'application/json'},
-                    body: JSON.stringify({ review_status: status }),
+                    body: JSON.stringify(body),
                 });
                 if (!resp.ok) { const e = await resp.json().catch(()=>({})); throw new Error(e.detail || 'Feil'); }
                 loadIaResults();

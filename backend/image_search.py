@@ -894,8 +894,8 @@ async def search_product_images(
             except Exception as e:
                 logger.debug(f"Media bank search error ({bank['name']}): {e}")
 
-        # Stage 2: Manufacturer website direct search (if no media bank hits)
-        if not any(c.confidence >= 0.4 for c in all_candidates):
+        # Stage 2: Manufacturer website direct search (always try for more candidates)
+        if not any(c.confidence >= 0.7 for c in all_candidates):
             try:
                 raw_results = await _search_manufacturer_site(
                     manufacturer_name, manufacturer_artnr, product_description, client
@@ -922,8 +922,8 @@ async def search_product_images(
             except Exception as e:
                 logger.debug(f"Manufacturer site search error: {e}")
 
-        # Stage 3: Broad web search (if still no good candidates)
-        if not any(c.confidence >= 0.35 for c in all_candidates):
+        # Stage 3: Broad web search (always try for variety of candidates)
+        if not any(c.confidence >= 0.6 for c in all_candidates):
             try:
                 raw_results = await _search_web_broad(
                     manufacturer_name, manufacturer_artnr,
@@ -952,7 +952,9 @@ async def search_product_images(
                 logger.debug(f"Broad web search error: {e}")
 
     # Filter: only include candidates with minimum identity score
-    MIN_IDENTITY_SCORE = 0.25
+    # Lower threshold to be more permissive — this is a manual review tool,
+    # not an auto-approve system. Better to show more candidates for human judgment.
+    MIN_IDENTITY_SCORE = 0.10
     valid_candidates = [c for c in all_candidates if c.identity_score >= MIN_IDENTITY_SCORE]
 
     # Deduplicate by image URL (keep highest confidence)

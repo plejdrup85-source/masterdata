@@ -3293,7 +3293,11 @@ async def review_image(session_id: str, article_number: str, data: dict = Body(.
     if not status:
         raise HTTPException(400, "review_status er påkrevd")
     try:
-        result = _update_ia_review(session_id, article_number, status, data.get("suggested_image_url"))
+        result = _update_ia_review(
+            session_id, article_number, status,
+            data.get("suggested_image_url"),
+            data.get("selected_candidate_index"),
+        )
         return {"status": "ok", **result}
     except ValueError as e:
         raise HTTPException(400 if "Invalid" in str(e) else 404, str(e))
