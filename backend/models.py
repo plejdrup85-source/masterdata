@@ -8,24 +8,44 @@ from pydantic import BaseModel, Field
 
 
 class QualityStatus(str, Enum):
-    """Field quality classification — drives whether suggestions are created.
+    """Field quality classification — drives suggestions and user prioritization.
 
-    Hierarchy (best → worst):
-      STRONG → OK → WEAK → SHOULD_IMPROVE → PROBABLE_ERROR → MISSING → REQUIRES_MANUFACTURER
+    Each status answers a distinct question for the user:
+      "What is the state of this field, and what action (if any) is needed?"
+
+    Hierarchy (best → worst, for overall scoring):
+      STRONG → OK → IMPROVEMENT_READY → WEAK → SOURCE_CONFLICT →
+      SHOULD_IMPROVE → PROBABLE_ERROR → MISSING →
+      NO_RELIABLE_SOURCE → MANUAL_REVIEW → REQUIRES_MANUFACTURER
+
     Suggestion policy:
-      STRONG/OK: no suggestion unless dramatically better evidence exists
+      STRONG/OK: no suggestion
+      IMPROVEMENT_READY: suggestion already attached, user just approves/rejects
       WEAK: suggestion only if materially better source found
+      SOURCE_CONFLICT: flag conflict, let user choose
       SHOULD_IMPROVE/PROBABLE_ERROR/MISSING: suggestion if any evidence available
+      NO_RELIABLE_SOURCE: no suggestion possible, flag for manual action
+      MANUAL_REVIEW: ambiguous, human must decide
       REQUIRES_MANUFACTURER: always flag for manufacturer contact
     """
-    STRONG = "Sterk"                            # Present, well-structured, no action needed
-    OK = "OK"                                   # Acceptable quality, no enrichment
-    WEAK = "Svak"                               # Present but thin/short — only improve with strong evidence
-    SHOULD_IMPROVE = "B\u00f8r forbedres"       # Clear quality issues
-    PROBABLE_ERROR = "Sannsynlig feil"          # Likely incorrect data
-    MISSING = "Mangler"                         # Field is empty/absent
-    REQUIRES_MANUFACTURER = "Krever produsent"  # Cannot resolve without manufacturer
-    MANUAL_REVIEW = "Manuell vurdering"         # Ambiguous — human must decide
+    # ── Good states (no action needed) ──
+    STRONG = "Sterk"                            # Present, well-structured, rich content
+    OK = "OK"                                   # Acceptable quality, no action needed
+
+    # ── Actionable states (specific action available) ──
+    IMPROVEMENT_READY = "Forbedring klar"       # Value exists, but enrichment found a better version
+    WEAK = "Svak"                               # Present but thin/short/minimal
+    SOURCE_CONFLICT = "Avvik fra kilde"         # Value differs between sources (website vs Jeeves vs PDF)
+    SHOULD_IMPROVE = "B\u00f8r forbedres"       # Clear quality issues (formatting, language, structure)
+
+    # ── Problem states (issue needs resolution) ──
+    PROBABLE_ERROR = "Sannsynlig feil"          # Likely incorrect data (placeholder, gibberish)
+    MISSING = "Mangler"                         # Field is completely empty/absent
+
+    # ── Blocked states (cannot resolve automatically) ──
+    NO_RELIABLE_SOURCE = "Ingen sikker kilde"   # No reference data available to evaluate against
+    MANUAL_REVIEW = "Manuell vurdering"         # Ambiguous/conflicting signals — human must decide
+    REQUIRES_MANUFACTURER = "Krever produsent"  # Cannot resolve without manufacturer contact
 
 
 class VerificationStatus(str, Enum):
@@ -109,6 +129,15 @@ class EnrichmentResult(BaseModel):
     review_status: str = "auto"  # "auto", "needs_review", "conflict"
 
 
+class ApprovalStatus(str, Enum):
+    """Approval status for enrichment suggestions."""
+    NOT_REVIEWED = "Ikke gjennomgått"     # Default — not yet looked at
+    APPROVED = "Godkjent"                  # Human approved for use
+    AUTO_APPROVED = "Auto-godkjent"        # System auto-approved (high conf + low risk)
+    REJECTED = "Avvist"                    # Human rejected
+    NEEDS_REVIEW = "Krever vurdering"      # Flagged for manual review
+
+
 class EnrichmentSuggestion(BaseModel):
     """A single field enrichment suggestion with source traceability.
 
@@ -120,10 +149,16 @@ class EnrichmentSuggestion(BaseModel):
     original_suggested_value: Optional[str] = None  # Pre-AI-review value for diff trail
     source: Optional[str] = None  # Human-readable source label
     source_url: Optional[str] = None
-    evidence: Optional[str] = None  # Quote / snippet proving the value
+    evidence: Optional[str] = None  # Human-readable explanation (legacy)
+    evidence_structured: Optional[dict] = None  # Machine-readable evidence tags
     confidence: float = 0.0  # 0.0-1.0
     review_required: bool = True  # Must a human verify this?
     ai_modified: bool = False  # True if AI review changed the value
+    # Approval workflow
+    approval_status: ApprovalStatus = ApprovalStatus.NOT_REVIEWED
+    approval_comment: Optional[str] = None  # Reviewer note
+    approved_by: Optional[str] = None       # Who approved (if tracked)
+    approved_at: Optional[str] = None       # ISO timestamp of approval action
 
 
 class FieldAnalysis(BaseModel):
@@ -131,7 +166,8 @@ class FieldAnalysis(BaseModel):
     current_value: Optional[str] = None
     suggested_value: Optional[str] = None
     source: Optional[str] = None
-    confidence: Optional[float] = None
+    confidence: Optional[float] = None          # 0-100 composite confidence score
+    confidence_details: Optional[str] = None    # Human-readable breakdown of score components
     status: QualityStatus = QualityStatus.OK
     comment: Optional[str] = None
     # P1 FIX: Traceability fields — explain WHY each result exists
@@ -141,6 +177,12 @@ class FieldAnalysis(BaseModel):
     status_reason: Optional[str] = None         # Why this status was assigned
     suggestion_reason: Optional[str] = None     # Why suggestion was/wasn't created
     suggestion_source: Optional[str] = None     # What evidence supports the suggestion
+    # Two-dimensional quality scoring
+    content_quality: Optional[int] = None       # 0-100: how well-written for webshop
+    content_quality_details: Optional[str] = None
+    conformity_quality: Optional[int] = None    # 0-100: how well it matches sources
+    conformity_quality_details: Optional[str] = None
+    quality_label: Optional[str] = None         # Quadrant label (e.g., "Klar for produksjon")
 
 
 class JeevesData(BaseModel):
@@ -224,16 +266,32 @@ class ImageSuggestion(BaseModel):
     current_image_url: Optional[str] = None
     current_image_status: str = "unknown"  # ok, missing, low_quality, poor_background
     suggested_image_url: Optional[str] = None
-    suggested_source: Optional[str] = None  # "manufacturer", "norengros"
+    suggested_source: Optional[str] = None  # "manufacturer", "norengros", "producer_search"
     suggested_source_url: Optional[str] = None
+    source_type: Optional[str] = None  # "produsent", "distributør", "annen", "manuelt_søk"
+    source_domain: Optional[str] = None  # e.g. "icumed.com"
     confidence: float = 0.0
+    confidence_label: Optional[str] = None  # "Høy tillit", "Middels tillit", etc.
     review_required: bool = True
     reason: Optional[str] = None
+    # Improvement scoring
+    improvement_score: Optional[int] = None  # 0-100, how much better is the new image
+    improvement_reason: Optional[str] = None  # Why this image is better
+    # Approval workflow
+    approval_status: str = "ikke_vurdert"  # "ikke_vurdert", "godkjent", "avvist", "manuell_kontroll"
+    approved_by: Optional[str] = None
+    # Download support
+    download_filename: Optional[str] = None  # e.g. "N245100189090.jpg"
+    # Search metadata
+    search_terms_used: Optional[str] = None
+    producer_search_url: Optional[str] = None
+    google_search_url: Optional[str] = None
 
 
 class ProductAnalysis(BaseModel):
     """Complete analysis result for a single product."""
     article_number: str
+    analyzed_at: Optional[str] = None  # ISO 8601 timestamp when this product was analyzed
     product_data: ProductData
     jeeves_data: Optional[JeevesData] = None
     manufacturer_lookup: ManufacturerLookup = ManufacturerLookup()
@@ -256,6 +314,20 @@ class ProductAnalysis(BaseModel):
     enrichment_suggestions: list[EnrichmentSuggestion] = []
     pdf_available: bool = False
     pdf_url: Optional[str] = None
+    # Webshop readiness (populated by webshop_readiness module)
+    webshop_status: Optional[str] = None          # "Klar" / "Delvis klar" / "Ikke klar"
+    webshop_summary: Optional[str] = None         # One-line summary
+    webshop_missing: Optional[str] = None         # Comma-separated missing items
+    # Category intelligence (populated by category_intelligence module)
+    category_status: Optional[str] = None           # OK / SHOULD_SIMPLIFY / ATTRIBUTE_AS_CATEGORY / etc.
+    category_suggestion: Optional[str] = None       # Suggested simplified category path
+    category_summary: Optional[str] = None          # Norwegian summary
+    # Human-readable explanation (populated by human_explainer module)
+    human_summary: Optional[str] = None             # Plain-language one-line summary
+    # Priority scoring (populated by priority_scoring module)
+    priority_score: Optional[int] = None            # 0-100, higher = fix sooner
+    priority_label: Optional[str] = None            # "Høy" / "Middels" / "Lav"
+    priority_reasons: Optional[str] = None          # Semicolon-separated reasons
     # AI scoring results (populated by ai_scorer)
     ai_score: Optional[dict] = None
     ai_enrichment: Optional[dict] = None

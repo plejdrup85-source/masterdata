@@ -34,8 +34,8 @@ from backend.manufacturer import (
     search_norengros,
 )
 from backend.models import (
-    AnalysisJob, AnalysisMode, BatchMode, ImageSuggestion, JobStatus,
-    ProductAnalysis, ProductData, QualityStatus, VerificationStatus,
+    AnalysisJob, AnalysisMode, ApprovalStatus, BatchMode, ImageSuggestion,
+    JobStatus, ProductAnalysis, ProductData, QualityStatus, VerificationStatus,
 )
 from backend.scoring import score_product_areas, FOCUS_AREAS, ALL_AREAS, AREA_LABELS, ANALYSIS_PRESETS
 from backend.pdf_enricher import run_enrichment_pipeline
@@ -91,7 +91,11 @@ def _find_jeeves_file() -> Optional[str]:
 
 @app.on_event("startup")
 async def preload_data():
-    """Pre-load sitemap and Jeeves data on startup."""
+    """Pre-load sitemap and Jeeves data on startup.
+
+    IMPORTANT: This does NOT trigger a full index rebuild unless the catalog
+    content has actually changed. Deploy with unchanged catalog = no rebuild.
+    """
     global _jeeves_index
 
     # Load Jeeves ERP data
@@ -99,34 +103,51 @@ async def preload_data():
     if jeeves_path:
         try:
             _jeeves_index = load_jeeves(jeeves_path)
-            logger.info(f"Jeeves data loaded: {_jeeves_index.count} products from {jeeves_path}")
+            logger.info(f"[startup] Jeeves data loaded: {_jeeves_index.count} products from {jeeves_path}")
         except Exception as e:
-            logger.warning(f"Failed to load Jeeves data from {jeeves_path}: {e}")
+            logger.warning(f"[startup] Failed to load Jeeves data from {jeeves_path}: {e}")
     else:
         logger.warning(
-            "Jeeves Excel file not found. Set JEEVES_FILE_PATH env var or place "
+            "[startup] Jeeves Excel file not found. Set JEEVES_FILE_PATH env var or place "
             "'Masterdata 2103.xlsx' in the project root. Two-source comparison disabled."
         )
 
     # Pre-load sitemap XML and cached SKU→URL index on startup.
-    # This downloads ONE sitemap XML file and loads the cached SKU index from disk.
-    # It does NOT scan/crawl product pages — that only happens in discovery mode.
+    # Uses persistent cache at CACHE_DIR — does NOT rebuild unless content changed.
+    from backend.scraper import CACHE_DIR
+    logger.info(f"[startup] CACHE_DIR={CACHE_DIR} (persistent={'data' in str(CACHE_DIR).lower()})")
+
     try:
         import httpx
         async with httpx.AsyncClient() as client:
             await _load_sitemap(client)
-        logger.info("Sitemap index pre-loaded on startup (no page scanning)")
+        logger.info("[startup] Sitemap og indeks lastet")
     except Exception as e:
-        logger.warning(f"Failed to pre-load sitemap on startup: {e}")
+        logger.warning(f"[startup] Kunne ikke laste sitemap: {e}")
 
-    # Auto-start full index build if index coverage is low.
-    # This runs in the background and doesn't block startup.
+    # ── Fingerprint-based rebuild decision ──
+    # This is the key mechanism that prevents unnecessary rebuilds after deploy.
+    from backend.index_fingerprint import should_rebuild_index
+    from backend.scraper import _sitemap_urls, _sku_to_url, _checked_no_sku
+
     idx = get_index_stats()
-    if idx["sitemap_url_count"] > 0 and idx["coverage_pct"] < 80:
+    decision = should_rebuild_index(
+        CACHE_DIR, _sitemap_urls, len(_sku_to_url), len(_checked_no_sku),
+    )
+
+    logger.info(
+        f"[startup] Indeks-status: {idx['sku_index_count']} SKU / "
+        f"{idx['sitemap_url_count']} URLer = {idx['coverage_pct']}% dekning"
+    )
+    logger.info(
+        f"[startup] Rebuild-beslutning: {decision.action.upper()} — {decision.reason}"
+    )
+
+    if decision.needs_rebuild:
+        # FULL rebuild — only when catalog content genuinely changed or cache is missing
         logger.info(
-            f"SKU index coverage is {idx['coverage_pct']}% "
-            f"({idx['sku_index_count']}/{idx['sitemap_url_count']}). "
-            f"Starting background index build..."
+            f"[startup] ⚠ Starter FULL bakgrunns-indeksering "
+            f"(grunn: {decision.reason})"
         )
 
         async def _auto_build():
@@ -136,6 +157,7 @@ async def preload_data():
                 "started_at": datetime.now().isoformat(),
                 "checked": 0, "total": 0, "new_indexed": 0,
                 "trigger": "auto_startup",
+                "reason": decision.reason,
             }
 
             async def _progress(checked, total, new_in_batch):
@@ -146,19 +168,51 @@ async def preload_data():
             try:
                 result = await build_full_index(on_progress=_progress)
                 _index_build_status.update({"status": "completed", **result})
-                logger.info(f"Auto index build completed: {result}")
+                logger.info(f"[startup] Full indeksering fullført: {result}")
             except Exception as exc:
                 _index_build_status["status"] = "failed"
                 _index_build_status["error"] = str(exc)
-                logger.error(f"Auto index build failed: {exc}")
+                logger.error(f"[startup] Full indeksering feilet: {exc}")
 
         _index_build_task = asyncio.create_task(_auto_build())
         _background_tasks.add(_index_build_task)
         _index_build_task.add_done_callback(_background_tasks.discard)
-    else:
+
+    elif decision.needs_incremental:
+        # Minor sitemap change — run lightweight incremental scan in background
         logger.info(
-            f"SKU index coverage OK: {idx['coverage_pct']}% "
-            f"({idx['sku_index_count']}/{idx['sitemap_url_count']})"
+            f"[startup] Sitemap endret minimalt — kjører inkrementell skanning "
+            f"i bakgrunnen (grunn: {decision.reason})"
+        )
+
+        async def _auto_incremental():
+            try:
+                new_count = await scan_index_incremental(max_pages=100)
+                # Save updated fingerprint after incremental scan
+                from backend.index_fingerprint import (
+                    compute_sitemap_fingerprint, save_index_fingerprint,
+                )
+                fp = compute_sitemap_fingerprint(_sitemap_urls)
+                save_index_fingerprint(
+                    CACHE_DIR, fp, len(_sku_to_url),
+                    len(_checked_no_sku), len(_sitemap_urls),
+                )
+                logger.info(
+                    f"[startup] Inkrementell skanning fullført: "
+                    f"{new_count} nye SKU-er funnet"
+                )
+            except Exception as exc:
+                logger.warning(f"[startup] Inkrementell skanning feilet: {exc}")
+
+        task = asyncio.create_task(_auto_incremental())
+        _background_tasks.add(task)
+        task.add_done_callback(_background_tasks.discard)
+
+    else:
+        # Cache is valid — no rebuild needed
+        logger.info(
+            f"[startup] ✓ Ny indeksering IKKE nødvendig — "
+            f"gjenbruker eksisterende cache ({decision.reason})"
         )
 
 # In-memory job storage
@@ -201,6 +255,7 @@ def _save_history(entries: list[dict]) -> None:
         evicted = entries[:-HISTORY_MAX_ENTRIES]
         entries = entries[-HISTORY_MAX_ENTRIES:]
         for e in evicted:
+            jid = e.get("job_id", "")
             old_file = HISTORY_EXCEL_DIR / e.get("excel_filename", "")
             if old_file.exists():
                 try:
@@ -208,6 +263,9 @@ def _save_history(entries: list[dict]) -> None:
                     logger.info(f"History FIFO: deleted evicted Excel {old_file.name}")
                 except OSError:
                     pass
+            # Also delete results JSON
+            old_results = HISTORY_RESULTS_DIR / f"results_{jid}.json"
+            old_results.unlink(missing_ok=True)
     try:
         HISTORY_INDEX_FILE.write_text(
             json.dumps(entries, ensure_ascii=False, indent=2),
@@ -253,6 +311,16 @@ def _add_to_history(job: "AnalysisJob", source_filename: str = "") -> None:
                 critical_count += 1
         avg_score = round(sum(scores) / len(scores), 1)
 
+    # Webshop readiness distribution
+    ws_ready = sum(1 for r in job.results if r.webshop_status == "Klar")
+    ws_partial = sum(1 for r in job.results if r.webshop_status == "Delvis klar")
+    ws_not_ready = sum(1 for r in job.results if r.webshop_status == "Ikke klar")
+
+    # Priority distribution
+    prio_high = sum(1 for r in job.results if r.priority_label == "Høy")
+    prio_med = sum(1 for r in job.results if r.priority_label == "Middels")
+    prio_low = sum(1 for r in job.results if r.priority_label == "Lav")
+
     entry = {
         "job_id": job.job_id,
         "timestamp": datetime.fromtimestamp(job.created_at).isoformat(),
@@ -265,11 +333,113 @@ def _add_to_history(job: "AnalysisJob", source_filename: str = "") -> None:
         "batch_info": job.batch_info or "",
         "avg_score": avg_score,
         "critical_count": critical_count,
+        # Enhanced traceability — added for history/comparison
+        "webshop_ready": ws_ready,
+        "webshop_partial": ws_partial,
+        "webshop_not_ready": ws_not_ready,
+        "priority_high": prio_high,
+        "priority_medium": prio_med,
+        "priority_low": prio_low,
     }
 
     entries = _load_history()
     entries.append(entry)
     _save_history(entries)
+
+
+# ── Full results persistence for UI reopening ──
+HISTORY_RESULTS_DIR = HISTORY_DIR / "results"
+HISTORY_RESULTS_DIR.mkdir(parents=True, exist_ok=True)
+
+
+def _save_job_results(job_id: str, job: "AnalysisJob") -> None:
+    """Save full ProductAnalysis results as JSON for later UI reopening.
+
+    This is the key mechanism that allows historical jobs to be reopened
+    in the treatment interface, not just downloaded as Excel.
+    """
+    results_path = HISTORY_RESULTS_DIR / f"results_{job_id}.json"
+    try:
+        results_data = {
+            "job_id": job_id,
+            "status": job.status.value,
+            "total_products": job.total_products,
+            "processed_products": job.processed_products,
+            "analysis_mode": job.analysis_mode,
+            "focus_areas": job.focus_areas,
+            "source_filename": job.source_filename,
+            "batch_info": job.batch_info,
+            "created_at": job.created_at,
+            "results": [r.model_dump(mode="json") for r in job.results],
+        }
+        results_path.write_text(
+            json.dumps(results_data, default=str, ensure_ascii=False),
+            encoding="utf-8",
+        )
+        logger.info(
+            f"[history] Lagret full resultat-JSON for jobb {job_id} "
+            f"({len(job.results)} produkter, {results_path.stat().st_size // 1024} KB)"
+        )
+    except Exception as e:
+        logger.error(f"[history] Kunne ikke lagre resultat-JSON for {job_id}: {e}")
+
+
+def _load_job_results(job_id: str) -> Optional[dict]:
+    """Load full results JSON from disk. Returns raw dict or None."""
+    results_path = HISTORY_RESULTS_DIR / f"results_{job_id}.json"
+    if not results_path.exists():
+        return None
+    try:
+        return json.loads(results_path.read_text(encoding="utf-8"))
+    except Exception as e:
+        logger.warning(f"[history] Kunne ikke laste resultat-JSON for {job_id}: {e}")
+        return None
+
+
+def _rehydrate_job(job_id: str) -> Optional["AnalysisJob"]:
+    """Rehydrate a full AnalysisJob from saved results JSON.
+
+    Returns the job with all ProductAnalysis objects restored,
+    or None if the data is unavailable or incompatible.
+    """
+    raw = _load_job_results(job_id)
+    if not raw:
+        return None
+
+    try:
+        results = [ProductAnalysis(**r) for r in raw.get("results", [])]
+        job = AnalysisJob(
+            job_id=job_id,
+            status=JobStatus.COMPLETED,
+            total_products=raw.get("total_products", len(results)),
+            processed_products=raw.get("processed_products", len(results)),
+            results=results,
+            analysis_mode=raw.get("analysis_mode", "full_enrichment"),
+            focus_areas=raw.get("focus_areas", []),
+            source_filename=raw.get("source_filename", ""),
+            batch_info=raw.get("batch_info"),
+            created_at=raw.get("created_at", time.time()),
+        )
+        # Set output file reference if Excel exists in history
+        excel_path = HISTORY_EXCEL_DIR / f"kvalitetssjekk_{job_id}.xlsx"
+        if excel_path.exists():
+            job.output_file = str(excel_path)
+        logger.info(
+            f"[history] Jobb {job_id} rehydrert: {len(results)} produkter"
+        )
+        return job
+    except Exception as e:
+        logger.warning(f"[history] Kunne ikke rehydrere jobb {job_id}: {e}")
+        return None
+
+
+def _save_review_decisions(job_id: str, job: "AnalysisJob") -> None:
+    """Persist current review decisions (approvals, rejections) to disk.
+
+    Updates the results JSON so that manual decisions survive restart.
+    """
+    _save_job_results(job_id, job)
+
 
 # Jeeves ERP data file path — auto-detected from repo or configured via env
 JEEVES_FILE_PATH = os.environ.get("JEEVES_FILE_PATH", "")
@@ -333,12 +503,15 @@ async def root():
 async def health_check():
     """Health check endpoint with feature status."""
     idx = get_index_stats()
+    supplier_stats = _jeeves_index.supplier_stats() if _jeeves_index and _jeeves_index.loaded else {}
     return {
         "status": "ok",
-        "version": "2.1.0",
+        "version": "2.2.0",
         "active_jobs": len(jobs),
         "jeeves_loaded": _jeeves_index is not None and _jeeves_index.loaded,
         "jeeves_product_count": _jeeves_index.count if _jeeves_index else 0,
+        "jeeves_supplier_count": supplier_stats.get("with_supplier", 0),
+        "jeeves_without_supplier_count": supplier_stats.get("without_supplier", 0),
         "ai_scoring_available": bool(os.environ.get("ANTHROPIC_API_KEY")),
         "sku_index": idx,
         "analysis_modes": [
@@ -737,6 +910,19 @@ async def analyze_from_catalog(
         batch_info = f"Tilfeldig utvalg: {sample_size} av {catalog_total} (seed={seed})"
         source_filename = f"jeeves_katalog_random_{sample_size}"
 
+    elif source_mode == "catalog_supplier":
+        # Filter to only products that have a known supplier/manufacturer
+        supplier_articles = _jeeves_index.articles_with_supplier()
+        if not supplier_articles:
+            raise HTTPException(400, "Ingen produkter med supplier/produsent funnet i katalogen")
+        stats = _jeeves_index.supplier_stats()
+        selected_articles = supplier_articles
+        batch_info = (
+            f"Produkter med produsent: {len(supplier_articles)} av {stats['total']} "
+            f"({stats['without_supplier']} uten produsent filtrert bort)"
+        )
+        source_filename = f"jeeves_katalog_supplier_{len(supplier_articles)}"
+
     elif source_mode == "manual_articles":
         raw_articles = data.get("article_numbers", [])
         if not raw_articles:
@@ -756,7 +942,7 @@ async def analyze_from_catalog(
         source_filename = f"manuell_{len(selected_articles)}_artikler"
 
     else:
-        raise HTTPException(400, f"Ugyldig source_mode: {source_mode}. Bruk: catalog_full, catalog_random, manual_articles")
+        raise HTTPException(400, f"Ugyldig source_mode: {source_mode}. Bruk: catalog_full, catalog_random, catalog_supplier, manual_articles")
 
     if not selected_articles:
         raise HTTPException(400, "Ingen artikler å analysere")
@@ -831,14 +1017,492 @@ async def get_catalog_info():
         return {
             "loaded": False,
             "count": 0,
+            "supplierCount": 0,
             "sample": [],
         }
     all_arts = _jeeves_index.all_article_numbers()
+    stats = _jeeves_index.supplier_stats()
     return {
         "loaded": True,
         "count": len(all_arts),
+        "supplierCount": stats.get("with_supplier", 0),
+        "withoutSupplierCount": stats.get("without_supplier", 0),
         "sample": all_arts[:5],
     }
+
+
+@app.post("/api/recheck/{job_id}")
+async def recheck_products(
+    job_id: str,
+    request: Request,
+    data: dict = Body(...),
+):
+    """Start a targeted re-check for a subset of products from a previous job.
+
+    Selects products from the previous job's results using filters or presets,
+    then launches a new analysis for just those products.
+
+    Body: {
+        "preset": "not_webshop_ready",   // Optional preset name
+        "filters": {"priority": "Høy"},  // Optional custom filters
+        "analysis_mode": "full_enrichment",
+        "skip_cache": true               // Usually true for re-check
+    }
+    """
+    _cleanup_old_jobs()
+
+    client_ip = request.client.host if request.client else "unknown"
+    if not _check_rate_limit(client_ip):
+        raise HTTPException(429, f"For mange analyser. Maks {RATE_LIMIT_MAX} per {RATE_LIMIT_WINDOW} sekunder.")
+
+    active_jobs = sum(1 for j in jobs.values() if j.status in (JobStatus.PENDING, JobStatus.RUNNING))
+    if active_jobs >= MAX_CONCURRENT_JOBS:
+        raise HTTPException(429, f"For mange samtidige analyser ({active_jobs}).")
+
+    # Get previous results
+    source_job = jobs.get(job_id)
+    if not source_job or source_job.status != JobStatus.COMPLETED:
+        raise HTTPException(404, f"Jobb {job_id} er ikke fullført eller finnes ikke")
+    if not source_job.results:
+        raise HTTPException(400, "Jobben har ingen resultater å re-sjekke")
+
+    # Extract re-check candidates
+    from backend.recheck import get_recheck_candidates, RECHECK_PRESETS
+
+    preset = data.get("preset")
+    filters = data.get("filters", {})
+    candidates = get_recheck_candidates(source_job.results, filters=filters, preset=preset)
+
+    if not candidates:
+        filter_desc = preset or ", ".join(f"{k}={v}" for k, v in filters.items())
+        raise HTTPException(400, f"Ingen produkter matcher filtrene: {filter_desc}")
+
+    if len(candidates) > MAX_ARTICLES:
+        raise HTTPException(400, f"For mange artikler ({len(candidates)}). Maks {MAX_ARTICLES}.")
+
+    analysis_mode = data.get("analysis_mode", AnalysisMode.FULL_ENRICHMENT.value)
+    skip_cache = data.get("skip_cache", True)  # Default true for re-check
+    focus_areas_raw = data.get("focus_areas", [])
+
+    valid_modes = [m.value for m in AnalysisMode]
+    if analysis_mode not in valid_modes:
+        analysis_mode = AnalysisMode.FULL_ENRICHMENT.value
+    parsed_focus_areas = []
+    if analysis_mode == AnalysisMode.FOCUSED_SCAN.value and focus_areas_raw:
+        from backend.scoring import ALL_AREAS
+        parsed_focus_areas = [a for a in focus_areas_raw if a in ALL_AREAS]
+
+    # Build batch info
+    preset_label = RECHECK_PRESETS[preset]["label"] if preset and preset in RECHECK_PRESETS else None
+    filter_desc = preset_label or ", ".join(f"{k}={v}" for k, v in filters.items()) or "egendefinert"
+    batch_info = f"Re-sjekk fra {job_id}: {len(candidates)} produkter ({filter_desc})"
+
+    # Create job
+    new_job_id = str(uuid.uuid4())[:8]
+    job = AnalysisJob(
+        job_id=new_job_id,
+        status=JobStatus.PENDING,
+        total_products=len(candidates),
+        created_at=time.time(),
+        batch_mode="recheck",
+        batch_info=batch_info,
+        analysis_mode=analysis_mode,
+        focus_areas=parsed_focus_areas,
+        source_filename=f"recheck_{job_id}_{filter_desc[:30]}",
+    )
+    jobs[new_job_id] = job
+
+    task = asyncio.create_task(
+        _run_analysis(new_job_id, candidates, skip_cache,
+                      analysis_mode=analysis_mode, focus_areas=parsed_focus_areas)
+    )
+    _background_tasks.add(task)
+    task.add_done_callback(_background_tasks.discard)
+
+    mode_labels = {
+        AnalysisMode.FULL_ENRICHMENT.value: "Full berikelse",
+        AnalysisMode.AUDIT_ONLY.value: "Kvalitetsrevisjon",
+        AnalysisMode.FOCUSED_SCAN.value: "Fokusert sjekk",
+    }
+
+    return {
+        "job_id": new_job_id,
+        "total_products": len(candidates),
+        "source_job_id": job_id,
+        "batch_info": batch_info,
+        "analysis_mode": analysis_mode,
+        "message": f"Re-sjekk startet: {len(candidates)} produkter fra jobb {job_id} ({filter_desc})",
+    }
+
+
+@app.get("/api/recheck/{job_id}/presets")
+async def get_recheck_presets(job_id: str):
+    """Get available re-check presets with counts for a completed job."""
+    source_job = jobs.get(job_id)
+    if not source_job or source_job.status != JobStatus.COMPLETED:
+        raise HTTPException(404, f"Jobb {job_id} er ikke fullført eller finnes ikke")
+
+    from backend.recheck import get_recheck_summary
+    summary = get_recheck_summary(source_job.results)
+    return {
+        "job_id": job_id,
+        "total_products": len(source_job.results),
+        "presets": summary,
+    }
+
+
+# ── Approval Workflow API ──
+
+
+@app.put("/api/approve/{job_id}/{article_number}/{suggestion_index}")
+async def approve_suggestion(
+    job_id: str,
+    article_number: str,
+    suggestion_index: int,
+    data: dict = Body(...),
+):
+    """Set approval status for a specific suggestion.
+
+    Body: {"status": "Godkjent"|"Avvist"|"Krever vurdering", "comment": "", "reviewer": ""}
+    """
+    job = jobs.get(job_id)
+    if not job or job.status != JobStatus.COMPLETED:
+        raise HTTPException(404, "Jobb ikke funnet eller ikke fullført")
+
+    from backend.approval import set_approval
+    status = data.get("status", "")
+    comment = data.get("comment", "")
+    reviewer = data.get("reviewer", "")
+
+    success = set_approval(job.results, article_number, suggestion_index, status, comment, reviewer)
+    if not success:
+        raise HTTPException(400, "Kunne ikke oppdatere godkjenningsstatus")
+
+    # Log feedback for learning loop
+    from backend.feedback_learning import log_suggestion_feedback
+    from backend.models import ApprovalStatus
+    for r in job.results:
+        if r.article_number == article_number:
+            if 0 <= suggestion_index < len(r.enrichment_suggestions):
+                es = r.enrichment_suggestions[suggestion_index]
+                outcome_map = {
+                    ApprovalStatus.APPROVED.value: "approved",
+                    ApprovalStatus.REJECTED.value: "rejected",
+                    ApprovalStatus.NEEDS_REVIEW.value: "modified",
+                }
+                outcome = outcome_map.get(status, "modified")
+                log_suggestion_feedback(
+                    article_number=article_number,
+                    field_name=es.field_name,
+                    source=es.source or "ukjent",
+                    confidence=es.confidence,
+                    outcome=outcome,
+                    comment=comment,
+                    was_auto_approved=es.approval_status == ApprovalStatus.AUTO_APPROVED,
+                    reviewer=reviewer,
+                )
+            break
+
+    return {"message": "Godkjenningsstatus oppdatert", "article_number": article_number, "index": suggestion_index, "status": status}
+
+
+@app.put("/api/approve/{job_id}/{article_number}")
+async def approve_product_suggestions(
+    job_id: str,
+    article_number: str,
+    data: dict = Body(...),
+):
+    """Set approval status for ALL suggestions of a product.
+
+    Body: {"status": "Godkjent"|"Avvist", "comment": "", "reviewer": ""}
+    """
+    job = jobs.get(job_id)
+    if not job or job.status != JobStatus.COMPLETED:
+        raise HTTPException(404, "Jobb ikke funnet eller ikke fullført")
+
+    from backend.approval import bulk_set_approval
+    from backend.models import ApprovalStatus
+    status = data.get("status", "")
+    comment = data.get("comment", "")
+    reviewer = data.get("reviewer", "")
+
+    # Capture pre-approval state for feedback logging
+    pre_states = {}
+    for r in job.results:
+        if r.article_number == article_number:
+            for i, es in enumerate(r.enrichment_suggestions):
+                if es.suggested_value:
+                    pre_states[i] = es.approval_status == ApprovalStatus.AUTO_APPROVED
+            break
+
+    count = bulk_set_approval(job.results, article_number, status, comment, reviewer)
+    if count == 0:
+        raise HTTPException(400, "Ingen forslag funnet for dette produktet")
+
+    # Log feedback for all affected suggestions
+    from backend.feedback_learning import log_suggestion_feedback
+    outcome_map = {
+        ApprovalStatus.APPROVED.value: "approved",
+        ApprovalStatus.REJECTED.value: "rejected",
+        ApprovalStatus.NEEDS_REVIEW.value: "modified",
+    }
+    outcome = outcome_map.get(status, "modified")
+    for r in job.results:
+        if r.article_number == article_number:
+            for i, es in enumerate(r.enrichment_suggestions):
+                if es.suggested_value:
+                    log_suggestion_feedback(
+                        article_number=article_number,
+                        field_name=es.field_name,
+                        source=es.source or "ukjent",
+                        confidence=es.confidence,
+                        outcome=outcome,
+                        comment=comment,
+                        was_auto_approved=pre_states.get(i, False),
+                        reviewer=reviewer,
+                    )
+            break
+
+    return {"message": f"{count} forslag oppdatert", "article_number": article_number, "status": status, "count": count}
+
+
+@app.get("/api/approve/{job_id}/summary")
+async def get_approval_summary_endpoint(job_id: str):
+    """Get approval status summary for a job."""
+    job = jobs.get(job_id)
+    if not job or job.status != JobStatus.COMPLETED:
+        raise HTTPException(404, "Jobb ikke funnet eller ikke fullført")
+
+    from backend.approval import get_approval_summary
+    return get_approval_summary(job.results)
+
+
+@app.get("/api/feedback/summary")
+async def get_feedback_summary_endpoint():
+    """Get aggregate feedback statistics and learning status.
+
+    Shows acceptance/rejection rates by field and source,
+    detected low-quality patterns, and whether confidence
+    adjustments are active.
+    """
+    from backend.feedback_learning import get_feedback_summary
+    return get_feedback_summary()
+
+
+@app.get("/api/feedback/low-quality-patterns")
+async def get_low_quality_patterns():
+    """Get field+source combinations with high rejection rates.
+
+    These are patterns where the system consistently produces
+    suggestions that users reject — candidates for confidence
+    reduction or deactivation.
+    """
+    from backend.feedback_learning import identify_low_quality_patterns
+    patterns = identify_low_quality_patterns()
+    return {"patterns": patterns}
+
+
+@app.get("/api/results/{job_id}/explain/{article_number}")
+async def explain_product(job_id: str, article_number: str):
+    """Get a detailed human-readable explanation for a single product.
+
+    Returns plain-language summary of what's good, what's wrong,
+    suggestions, manual review needs, and recommended next steps.
+    """
+    job = jobs.get(job_id)
+    if not job or job.status != JobStatus.COMPLETED:
+        raise HTTPException(404, "Jobb ikke funnet eller ikke fullført")
+
+    from backend.human_explainer import explain_product_like_a_human
+
+    for r in job.results:
+        if r.article_number == article_number:
+            explanation = explain_product_like_a_human(r)
+            return {
+                "article_number": explanation.article_number,
+                "product_name": explanation.product_name,
+                "overall_verdict": explanation.overall_verdict,
+                "confidence_note": explanation.confidence_note,
+                "whats_good": explanation.whats_good,
+                "whats_wrong": explanation.whats_wrong,
+                "suggestions": explanation.suggestions,
+                "needs_manual_review": explanation.needs_manual_review,
+                "next_steps": explanation.next_steps,
+            }
+
+    raise HTTPException(404, f"Produkt {article_number} ikke funnet")
+
+
+# ── Image Suggestion API ──
+
+
+@app.get("/api/results/{job_id}/image-suggestions")
+async def get_image_suggestions(job_id: str):
+    """Get all image suggestions for a completed job."""
+    job = jobs.get(job_id)
+    if not job or job.status != JobStatus.COMPLETED:
+        raise HTTPException(404, "Jobb ikke funnet eller ikke fullført")
+
+    suggestions = []
+    for r in job.results:
+        sugg = r.image_suggestion
+        if not sugg:
+            continue
+        producer, producer_artnr = (None, None)
+        try:
+            from backend.content_validator import get_best_producer_info
+            producer, producer_artnr = get_best_producer_info(
+                r.product_data, r.jeeves_data, r.manufacturer_lookup
+            )
+        except Exception:
+            pass
+        suggestions.append({
+            "article_number": r.article_number,
+            "product_name": r.product_data.product_name,
+            "producer": producer,
+            "producer_article_number": producer_artnr,
+            "current_image_url": sugg.current_image_url,
+            "current_image_status": sugg.current_image_status,
+            "suggested_image_url": sugg.suggested_image_url,
+            "suggested_source": sugg.suggested_source,
+            "source_type": sugg.source_type,
+            "source_domain": sugg.source_domain,
+            "improvement_score": sugg.improvement_score,
+            "confidence": sugg.confidence,
+            "confidence_label": sugg.confidence_label,
+            "reason": sugg.reason,
+            "improvement_reason": sugg.improvement_reason,
+            "approval_status": sugg.approval_status,
+            "download_filename": sugg.download_filename,
+            "search_terms_used": sugg.search_terms_used,
+            "producer_search_url": sugg.producer_search_url,
+            "google_search_url": sugg.google_search_url,
+        })
+
+    return {
+        "job_id": job_id,
+        "total_suggestions": len(suggestions),
+        "with_url": sum(1 for s in suggestions if s["suggested_image_url"]),
+        "suggestions": suggestions,
+    }
+
+
+@app.put("/api/results/{job_id}/image-approve/{article_number}")
+async def approve_image(
+    job_id: str,
+    article_number: str,
+    status: str = Query(default="godkjent"),
+    approved_by: str = Query(default=None),
+):
+    """Approve or reject an image suggestion for a specific product.
+
+    Valid statuses: godkjent, avvist, manuell_kontroll, ikke_vurdert
+    """
+    job = jobs.get(job_id)
+    if not job or job.status != JobStatus.COMPLETED:
+        raise HTTPException(404, "Jobb ikke funnet eller ikke fullført")
+
+    from backend.image_search import approve_image_suggestion
+    ok = approve_image_suggestion(job.results, article_number, status, approved_by)
+    if not ok:
+        raise HTTPException(404, f"Bildeforslag for {article_number} ikke funnet")
+
+    return {"article_number": article_number, "status": status, "approved_by": approved_by}
+
+
+@app.get("/api/results/{job_id}/download-images")
+async def download_approved_images(job_id: str):
+    """Download all approved image suggestions as a ZIP file.
+
+    Only images with approval_status='godkjent' are included.
+    File names follow the pattern: {article_number}.{ext}
+    """
+    job = jobs.get(job_id)
+    if not job or job.status != JobStatus.COMPLETED:
+        raise HTTPException(404, "Jobb ikke funnet eller ikke fullført")
+
+    from backend.image_search import download_approved_images_as_zip, get_approved_images
+
+    approved = get_approved_images(job.results)
+    if not approved:
+        raise HTTPException(400, "Ingen godkjente bildeforslag å laste ned")
+
+    zip_filename = f"godkjente_bilder_{job_id}.zip"
+    zip_path = str(OUTPUT_DIR / zip_filename)
+
+    result = await download_approved_images_as_zip(job.results, zip_path)
+
+    if not result["zip_path"]:
+        raise HTTPException(500, f"Nedlasting feilet. Feil: {result['failed']}")
+
+    return FileResponse(
+        result["zip_path"],
+        media_type="application/zip",
+        filename=zip_filename,
+        headers={
+            "X-Downloaded-Count": str(len(result["downloaded"])),
+            "X-Failed-Count": str(len(result["failed"])),
+        },
+    )
+
+
+@app.get("/api/results/{job_id}/category-analysis")
+async def get_category_analysis(job_id: str):
+    """Get aggregate category structure analysis for a completed job.
+
+    Returns per-category-path recommendations for simplification,
+    filter conversion, and structure improvements.
+    """
+    job = jobs.get(job_id)
+    if not job or job.status != JobStatus.COMPLETED:
+        raise HTTPException(404, "Jobb ikke funnet eller ikke fullført")
+
+    from backend.category_intelligence import build_ecommerce_category_recommendations
+
+    recommendations = build_ecommerce_category_recommendations(job.results)
+
+    # Category status distribution
+    status_counts = {}
+    for r in job.results:
+        s = r.category_status or "unknown"
+        status_counts[s] = status_counts.get(s, 0) + 1
+
+    return {
+        "total_products": len(job.results),
+        "status_distribution": status_counts,
+        "recommendations": [
+            {
+                "original_path": rec.original_path,
+                "suggested_path": rec.suggested_path,
+                "product_count": rec.product_count,
+                "issue": rec.issue,
+                "action": rec.action,
+                "attribute_candidates": rec.attribute_candidates,
+            }
+            for rec in recommendations[:50]
+        ],
+    }
+
+
+@app.get("/api/download/{job_id}/approved")
+async def download_approved_only(job_id: str):
+    """Download Excel with only approved suggestions."""
+    job = jobs.get(job_id)
+    if not job or job.status != JobStatus.COMPLETED:
+        raise HTTPException(404, "Jobb ikke funnet eller ikke fullført")
+
+    from backend.approval import filter_by_approval
+    approved = filter_by_approval(job.results, approved_only=True)
+    if not approved:
+        raise HTTPException(400, "Ingen godkjente forslag funnet")
+
+    timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+    filename = f"masterdata_godkjent_{job_id}_{timestamp}.xlsx"
+    filepath = str(OUTPUT_DIR / filename)
+    create_output_excel(approved, filepath, analysis_mode=job.analysis_mode, focus_areas=job.focus_areas)
+
+    return FileResponse(filepath, filename=f"masterdata_godkjent_{job_id}.xlsx",
+                       media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")
 
 
 @app.get("/api/status/{job_id}")
@@ -890,10 +1554,13 @@ async def cancel_job(job_id: str):
 async def download_result(
     job_id: str,
     threshold: Optional[int] = Query(None, description="Score threshold — export only products below this score"),
+    quick_wins_only: bool = Query(False, description="Export only products with quick win suggestions"),
 ):
     """Download the analysis result Excel file.
 
-    If threshold is set, regenerates the export with only products scoring below it.
+    Supports filtered exports:
+    - threshold: only products scoring below this value
+    - quick_wins_only: only products with quick win (high-confidence, low-risk) suggestions
     """
     job = jobs.get(job_id)
     if not job:
@@ -901,6 +1568,26 @@ async def download_result(
 
     if job.status != JobStatus.COMPLETED:
         raise HTTPException(400, "Analysen er ikke fullført enda")
+
+    # Quick wins filter
+    if quick_wins_only:
+        from backend.quick_wins import filter_quick_wins_from_results
+        filtered_results = filter_quick_wins_from_results(job.results)
+        if not filtered_results:
+            raise HTTPException(400, "Ingen produkter med quick win-forslag funnet")
+
+        timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+        qw_filename = f"masterdata_quick_wins_{job_id}_{timestamp}.xlsx"
+        qw_path = str(OUTPUT_DIR / qw_filename)
+        create_output_excel(
+            filtered_results, qw_path,
+            analysis_mode=job.analysis_mode, focus_areas=job.focus_areas,
+        )
+        return FileResponse(
+            qw_path,
+            filename=f"masterdata_quick_wins_{job_id}.xlsx",
+            media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+        )
 
     # If threshold is set, regenerate filtered export
     if threshold is not None and 0 < threshold <= 100:
@@ -938,6 +1625,85 @@ async def download_result(
     )
 
 
+@app.get("/api/results/{job_id}/filter-counts")
+async def get_filter_counts_endpoint(job_id: str):
+    """Get available filter options with counts for the current job results."""
+    job = jobs.get(job_id)
+    if not job:
+        raise HTTPException(404, "Jobb ikke funnet")
+    if job.status != JobStatus.COMPLETED:
+        raise HTTPException(400, "Analysen er ikke fullført enda")
+
+    from backend.batch_filters import get_filter_counts, AVAILABLE_FILTERS
+    counts = get_filter_counts(job.results)
+    # Include filter metadata for UI
+    filter_meta = {
+        k: {"label": v["label"], "takes_value": v.get("takes_value", False),
+            "options": v.get("options")}
+        for k, v in AVAILABLE_FILTERS.items()
+    }
+    return {"counts": counts, "filters": filter_meta, "total": len(job.results)}
+
+
+@app.get("/api/download/{job_id}/filtered")
+async def download_filtered(
+    job_id: str,
+    request: Request,
+):
+    """Download a filtered Excel export based on query parameters.
+
+    Accepts any combination of filter parameters as query string:
+      ?webshop_status=Ikke klar&priority=Høy
+      ?image_problem=1&quick_wins=1
+      ?manufacturer=Ansell&field_problem=Beskrivelse
+      ?min_priority_score=50
+
+    Boolean filters use any truthy value (1, true, yes).
+    Multiple filters are combined with AND logic.
+    """
+    job = jobs.get(job_id)
+    if not job:
+        raise HTTPException(404, "Jobb ikke funnet")
+    if job.status != JobStatus.COMPLETED:
+        raise HTTPException(400, "Analysen er ikke fullført enda")
+
+    from backend.batch_filters import apply_filters, AVAILABLE_FILTERS
+
+    # Parse filters from query parameters
+    filters = {}
+    for param, value in request.query_params.items():
+        if param in AVAILABLE_FILTERS:
+            spec = AVAILABLE_FILTERS[param]
+            if spec.get("takes_value"):
+                filters[param] = value
+            elif value.lower() in ("1", "true", "yes", "ja"):
+                filters[param] = ""
+
+    if not filters:
+        raise HTTPException(400, "Ingen filtre angitt. Bruk standard nedlasting.")
+
+    filtered_results = apply_filters(job.results, filters)
+    if not filtered_results:
+        filter_desc = ", ".join(f"{k}={v}" for k, v in filters.items())
+        raise HTTPException(400, f"Ingen produkter matcher filtrene: {filter_desc}")
+
+    timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+    filter_tag = "_".join(filters.keys())[:50]
+    filename = f"masterdata_filtrert_{filter_tag}_{job_id}_{timestamp}.xlsx"
+    filepath = str(OUTPUT_DIR / filename)
+    create_output_excel(
+        filtered_results, filepath,
+        analysis_mode=job.analysis_mode, focus_areas=job.focus_areas,
+    )
+
+    download_name = f"masterdata_{filter_tag}_{job_id}.xlsx"
+    return FileResponse(
+        filepath,
+        filename=download_name,
+        media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+    )
+
+
 @app.get("/api/results/{job_id}")
 async def get_results(job_id: str):
     """Get analysis results as JSON."""
@@ -958,6 +1724,7 @@ async def get_results(job_id: str):
         "results": [
             {
                 "article_number": r.article_number,
+                "analyzed_at": r.analyzed_at,
                 "product_name": r.product_data.product_name,
                 "found": r.product_data.found_on_onemed,
                 "score": r.total_score,
@@ -1012,6 +1779,8 @@ async def get_results(job_id: str):
                         "evidence": es.evidence,
                         "confidence": es.confidence,
                         "review_required": es.review_required,
+                        "approval_status": es.approval_status.value,
+                        "approval_comment": es.approval_comment,
                     }
                     for es in r.enrichment_suggestions
                 ],
@@ -1027,6 +1796,19 @@ async def get_results(job_id: str):
                     }
                     for fa in r.field_analyses
                 ],
+                # Webshop readiness
+                "webshop_status": r.webshop_status,
+                "webshop_missing": r.webshop_missing,
+                # Priority scoring
+                "priority_score": r.priority_score,
+                "priority_label": r.priority_label,
+                "priority_reasons": r.priority_reasons,
+                # Category intelligence
+                "category_status": r.category_status,
+                "category_suggestion": r.category_suggestion,
+                "category_summary": r.category_summary,
+                # Human-readable explanation
+                "human_summary": r.human_summary,
             }
             for r in job.results
         ],
@@ -1040,8 +1822,127 @@ async def get_results(job_id: str):
 async def get_history():
     """Return list of past completed jobs (newest first)."""
     entries = _load_history()
+    # Add reopenable flag — True if full results JSON exists
+    for e in entries:
+        jid = e.get("job_id", "")
+        results_path = HISTORY_RESULTS_DIR / f"results_{jid}.json"
+        e["reopenable"] = results_path.exists()
+        # Also check if currently loaded in memory
+        e["in_memory"] = jid in jobs
     entries.reverse()
     return {"entries": entries}
+
+
+@app.post("/api/history/{job_id}/reopen")
+async def reopen_historical_job(job_id: str):
+    """Reopen a historical job in the UI treatment interface.
+
+    Loads the full ProductAnalysis results from disk into memory
+    so that all /api/results/{job_id} endpoints work again.
+    """
+    # Already in memory?
+    if job_id in jobs and jobs[job_id].status == JobStatus.COMPLETED:
+        return {
+            "message": "Jobb allerede åpen",
+            "job_id": job_id,
+            "product_count": len(jobs[job_id].results),
+        }
+
+    # Try to rehydrate from saved results
+    job = _rehydrate_job(job_id)
+    if not job:
+        # Check if history entry exists
+        entries = _load_history()
+        entry = next((e for e in entries if e["job_id"] == job_id), None)
+        if not entry:
+            raise HTTPException(404, "Jobb ikke funnet i historikk")
+        raise HTTPException(
+            410,
+            "Jobbdata er ikke tilgjengelig for UI-gjenåpning. "
+            "Denne jobben ble opprettet før resultat-persistering ble innført. "
+            "Excel-filen kan fortsatt lastes ned."
+        )
+
+    # Store in memory — will be available via /api/results/{job_id}
+    jobs[job_id] = job
+
+    return {
+        "message": "Jobb gjenåpnet i UI",
+        "job_id": job_id,
+        "product_count": len(job.results),
+        "analysis_mode": job.analysis_mode,
+    }
+
+
+@app.put("/api/history/{job_id}/review")
+async def save_review_decisions(job_id: str, request: Request):
+    """Save manual review decisions (approvals, rejections, comments).
+
+    Body format:
+    {
+      "decisions": [
+        {
+          "article_number": "N245100189090",
+          "suggestion_index": 0,
+          "status": "Godkjent",
+          "comment": "Verifisert manuelt"
+        },
+        ...
+      ],
+      "image_decisions": [
+        {
+          "article_number": "N245100189090",
+          "status": "godkjent"
+        },
+        ...
+      ]
+    }
+    """
+    job = jobs.get(job_id)
+    if not job or job.status != JobStatus.COMPLETED:
+        raise HTTPException(404, "Jobb ikke funnet eller ikke fullført")
+
+    body = await request.json()
+    applied = 0
+
+    # Apply enrichment suggestion decisions
+    for dec in body.get("decisions", []):
+        art_nr = dec.get("article_number")
+        idx = dec.get("suggestion_index", -1)
+        status_str = dec.get("status", "")
+        comment = dec.get("comment")
+
+        for r in job.results:
+            if r.article_number != art_nr:
+                continue
+            if 0 <= idx < len(r.enrichment_suggestions):
+                es = r.enrichment_suggestions[idx]
+                try:
+                    es.approval_status = ApprovalStatus(status_str)
+                except ValueError:
+                    continue
+                if comment is not None:
+                    es.approval_comment = comment
+                es.approved_at = datetime.now().isoformat()
+                applied += 1
+            break
+
+    # Apply image suggestion decisions
+    for dec in body.get("image_decisions", []):
+        art_nr = dec.get("article_number")
+        status = dec.get("status", "")
+        from backend.image_search import approve_image_suggestion
+        if approve_image_suggestion(job.results, art_nr, status):
+            applied += 1
+
+    # Persist to disk
+    _save_review_decisions(job_id, job)
+
+    return {
+        "message": f"{applied} beslutninger lagret",
+        "job_id": job_id,
+        "applied": applied,
+    }
 
 
 @app.get("/api/history/{job_id}/download")
@@ -1086,7 +1987,88 @@ async def delete_history_entry(job_id: str):
     entries = [e for e in entries if e["job_id"] != job_id]
     _save_history(entries)
 
+    # Also delete snapshot and results JSON
+    from backend.run_comparison import delete_snapshot
+    delete_snapshot(job_id)
+    results_path = HISTORY_RESULTS_DIR / f"results_{job_id}.json"
+    results_path.unlink(missing_ok=True)
+
+    # Remove from memory if loaded
+    jobs.pop(job_id, None)
+
     return {"message": "Historikkoppføring slettet", "job_id": job_id}
+
+
+@app.get("/api/history/compare/{current_job_id}/{previous_job_id}")
+async def compare_runs_endpoint(current_job_id: str, previous_job_id: str):
+    """Compare two analysis runs and return a delta summary.
+
+    Shows what improved, what regressed, and what's new between the runs.
+    """
+    from backend.run_comparison import load_snapshot, compare_runs, list_snapshots
+    from dataclasses import asdict
+
+    # Load previous snapshot
+    prev_snapshot = load_snapshot(previous_job_id)
+    if not prev_snapshot:
+        raise HTTPException(404, f"Ingen snapshot funnet for jobb {previous_job_id}")
+
+    # Current results — from active job or snapshot
+    current_job = jobs.get(current_job_id)
+    if current_job and current_job.status == JobStatus.COMPLETED:
+        comparison = compare_runs(current_job.results, prev_snapshot, current_job_id)
+    else:
+        # Try loading from snapshot
+        curr_snapshot = load_snapshot(current_job_id)
+        if not curr_snapshot:
+            raise HTTPException(404, f"Ingen resultater eller snapshot funnet for jobb {current_job_id}")
+        # Can't compare snapshot-to-snapshot with full ProductAnalysis objects
+        raise HTTPException(400, "Sammenligning krever at minst én jobb er aktiv i minnet")
+
+    return {
+        "current_job_id": comparison.current_job_id,
+        "previous_job_id": comparison.previous_job_id,
+        "current_timestamp": comparison.current_timestamp,
+        "previous_timestamp": comparison.previous_timestamp,
+        "summary": comparison.summary,
+        "total_current": comparison.total_current,
+        "total_previous": comparison.total_previous,
+        "new_products": comparison.new_products,
+        "removed_products": comparison.removed_products,
+        "improved_count": comparison.improved_count,
+        "regressed_count": comparison.regressed_count,
+        "unchanged_count": comparison.unchanged_count,
+        "avg_score_before": comparison.avg_score_before,
+        "avg_score_after": comparison.avg_score_after,
+        "avg_score_change": comparison.avg_score_change,
+        "webshop_ready_before": comparison.webshop_ready_before,
+        "webshop_ready_after": comparison.webshop_ready_after,
+        "deltas": [
+            {
+                "article_number": d.article_number,
+                "product_name": d.product_name,
+                "is_new": d.is_new,
+                "is_removed": d.is_removed,
+                "score_before": d.score_before,
+                "score_after": d.score_after,
+                "score_change": d.score_change,
+                "webshop_before": d.webshop_before,
+                "webshop_after": d.webshop_after,
+                "webshop_changed": d.webshop_changed,
+                "fields_improved": d.fields_improved,
+                "fields_regressed": d.fields_regressed,
+                "summary": d.summary,
+            }
+            for d in comparison.deltas[:200]  # Limit to 200 deltas
+        ],
+    }
+
+
+@app.get("/api/history/snapshots")
+async def list_snapshots_endpoint():
+    """List available run snapshots for comparison."""
+    from backend.run_comparison import list_snapshots
+    return {"snapshots": list_snapshots()}
 
 
 # ── Family / Relationship Analysis API ──
@@ -1230,6 +2212,41 @@ async def analyze_jeeves_families():
 
     product_dicts = products_from_jeeves_index(_jeeves_index)
     return _run_family_detection(product_dicts, source_id, data_source="jeeves_direct")
+
+
+@app.post("/api/families/analyze-jeeves-supplier")
+async def analyze_jeeves_supplier_families():
+    """Run family detection on products that have a known supplier/manufacturer.
+
+    Filters the Jeeves catalog to only include products where the Supplier
+    field is filled in, then runs family detection on those products.
+    """
+    from backend.family_detector import products_from_jeeves_index
+
+    if not _jeeves_index or not _jeeves_index.loaded:
+        raise HTTPException(400, "Jeeves-data er ikke lastet inn")
+
+    source_id = "jeeves-supplier"
+
+    # Return cached if available
+    if source_id in _family_results:
+        return _family_results[source_id]
+
+    # Filter to only articles with supplier
+    supplier_articles = set(_jeeves_index.articles_with_supplier())
+    if not supplier_articles:
+        raise HTTPException(400, "Ingen produkter med supplier/produsent funnet i katalogen")
+
+    all_products = products_from_jeeves_index(_jeeves_index)
+    filtered_products = [p for p in all_products if p.get("article_number") in supplier_articles]
+
+    stats = _jeeves_index.supplier_stats()
+    logger.info(
+        f"Family detection with supplier filter: {len(filtered_products)} of {stats['total']} products "
+        f"({stats['without_supplier']} without supplier excluded)"
+    )
+
+    return _run_family_detection(filtered_products, source_id, data_source="jeeves_supplier")
 
 
 _ARTICLE_SEARCH_TERMS = {
@@ -2356,6 +3373,10 @@ def _format_image_quality(iq: Optional[dict]) -> dict:
         "count": iq.get("image_count_found", 0),
         "main_exists": iq.get("main_image_exists", False),
         "issues": iq.get("image_issue_summary", ""),
+        "technical_quality": iq.get("technical_quality_avg", 0),
+        "ecommerce_suitability": iq.get("ecommerce_suitability_avg", 0),
+        "main_is_product": iq.get("main_is_product", True),
+        "image_type": iq.get("main_image_type", "unknown"),
     }
 
 
@@ -2521,6 +3542,19 @@ async def _run_analysis(
                     # Step 3: Manufacturer lookup (only if product found and data incomplete)
                     # Check Jeeves first — if Jeeves has supplier info, skip mfr lookup for that
                     jeeves_check = _jeeves_index.get(article_number) if _jeeves_index else None
+
+                    # Inject supplier from catalog into product_data.manufacturer
+                    # so that downstream lookups use the catalog supplier when
+                    # the website didn't provide a manufacturer.
+                    if jeeves_check and not product_data.manufacturer:
+                        from backend.content_validator import is_valid_supplier
+                        if is_valid_supplier(jeeves_check.supplier):
+                            product_data.manufacturer = jeeves_check.supplier.strip()
+                    if jeeves_check and not product_data.manufacturer_article_number:
+                        from backend.content_validator import is_valid_supplier
+                        if is_valid_supplier(jeeves_check.supplier_item_no):
+                            product_data.manufacturer_article_number = jeeves_check.supplier_item_no.strip()
+
                     if product_data.found_on_onemed:
                         has_mfr = product_data.manufacturer or (jeeves_check and jeeves_check.supplier)
                         has_mfr_num = product_data.manufacturer_article_number or (jeeves_check and jeeves_check.supplier_item_no)
@@ -2615,26 +3649,45 @@ async def _run_analysis(
                         analysis.norengros_lookup = norengros_data
 
                     # Step 5b: Image suggestion logic
-                    # Also pass Jeeves data to enrich producer search hints
                     analysis.image_suggestion = _build_image_suggestion(
                         product_data, image_summary, mfr_data, norengros_data,
                     )
-                    # Step 5b+: For low-quality images without a suggested replacement,
-                    # try to find a better image from the producer if we have catalog info
-                    if (analysis.image_suggestion
-                            and analysis.image_suggestion.current_image_status in ("low_quality", "missing")
-                            and not analysis.image_suggestion.suggested_image_url
-                            and jeeves_data):
-                        # Use Jeeves supplier + supplier_item_no for a targeted search hint
-                        producer = jeeves_data.supplier or product_data.manufacturer
-                        supplier_item = jeeves_data.supplier_item_no or product_data.manufacturer_article_number
-                        if producer and supplier_item:
-                            analysis.image_suggestion.reason = (
-                                f"Bildekvalitet lav ({analysis.image_suggestion.current_image_status}). "
-                                f"Søk hos produsent anbefalt: {producer} (art.nr: {supplier_item}). "
-                                f"Produsentens nettside bør prioriteres som bildekilde."
-                            )
-                            analysis.image_suggestion.suggested_source = "producer_search"
+
+                    # Step 5b+: Enhance image suggestion with active search
+                    if analysis.image_suggestion:
+                        from backend.image_search import (
+                            enhance_image_suggestion,
+                            search_producer_image,
+                        )
+                        j_supplier = jeeves_data.supplier if jeeves_data else None
+                        j_supplier_item = jeeves_data.supplier_item_no if jeeves_data else None
+
+                        # Try active image search if no good image found yet
+                        if (analysis.image_suggestion.current_image_status in ("low_quality", "missing")
+                                and not (analysis.image_suggestion.suggested_image_url
+                                         and analysis.image_suggestion.suggested_source in ("manufacturer", "norengros"))):
+                            try:
+                                found_image = await search_producer_image(
+                                    product_data, mfr_data, j_supplier, j_supplier_item,
+                                )
+                                if found_image and found_image.get("image_url"):
+                                    analysis.image_suggestion.suggested_image_url = found_image["image_url"]
+                                    analysis.image_suggestion.suggested_source = found_image.get("source", "producer_website")
+                                    analysis.image_suggestion.suggested_source_url = found_image.get("source_url")
+                                    analysis.image_suggestion.confidence = found_image.get("confidence", 0.5)
+                                    analysis.image_suggestion.review_required = True
+                                    analysis.image_suggestion.reason = (
+                                        f"Bedre bilde funnet hos produsent. "
+                                        f"Verifiser at bildet viser riktig produkt."
+                                    )
+                            except Exception as e:
+                                logger.debug(f"[{job_id}] Active image search failed: {e}")
+
+                        # Always enhance with search URLs for manual follow-up
+                        analysis.image_suggestion = enhance_image_suggestion(
+                            analysis.image_suggestion, product_data,
+                            mfr_data, j_supplier, j_supplier_item,
+                        )
 
                     # Apply enrichment suggestions to field_analyses (PDF takes priority)
                     _apply_enrichment_to_analysis(analysis)
@@ -2702,6 +3755,52 @@ async def _run_analysis(
                             f"[{job_id}] {article_number}: "
                             f"{len(enrichment_suggestions)} enrichment suggestion(s) after quality gate"
                         )
+
+                    # Upgrade field statuses: SHOULD_IMPROVE/WEAK → IMPROVEMENT_READY
+                    # for fields where enrichment found a concrete suggestion
+                    from backend.analyzer import upgrade_statuses_after_enrichment
+                    upgrade_statuses_after_enrichment(analysis, enrichment_suggestions or [])
+
+                    # Recalculate conformity scores with enrichment data
+                    from backend.field_confidence import update_conformity_scores
+                    update_conformity_scores(
+                        analysis.field_analyses,
+                        enrichment_results=enrichment_results,
+                        manufacturer_data=mfr_data,
+                    )
+
+                    # Evaluate webshop readiness
+                    from backend.webshop_readiness import evaluate_webshop_readiness
+                    readiness = evaluate_webshop_readiness(analysis)
+                    analysis.webshop_status = readiness.status_label
+                    analysis.webshop_summary = readiness.summary
+                    analysis.webshop_missing = readiness.missing_list
+
+                    # Evaluate category for e-commerce fitness
+                    from backend.category_intelligence import evaluate_category_fit
+                    cat_eval = evaluate_category_fit(
+                        product.category_breadcrumb,
+                        product.product_name or "",
+                        product.description or "",
+                        product.specification or "",
+                    )
+                    analysis.category_status = cat_eval.status
+                    analysis.category_suggestion = cat_eval.suggested_category
+                    analysis.category_summary = cat_eval.summary
+
+                    # Calculate priority score
+                    from backend.priority_scoring import calculate_priority_score
+                    priority = calculate_priority_score(analysis)
+                    analysis.priority_score = priority.score
+                    analysis.priority_label = priority.label
+                    analysis.priority_reasons = "; ".join(priority.reasons) if priority.reasons else ""
+
+                    # Generate human-readable summary
+                    from backend.human_explainer import build_human_readable_summary
+                    analysis.human_summary = build_human_readable_summary(analysis)
+
+                    # Stamp analysis timestamp
+                    analysis.analyzed_at = datetime.now().isoformat()
 
                 return analysis
 
@@ -2786,6 +3885,12 @@ async def _run_analysis(
                 logger.error(f"[{job_id}] {msg}")
                 job.errors.append(msg)
 
+        # Auto-approve safe suggestions before export
+        from backend.approval import mark_auto_approved
+        auto_count = mark_auto_approved(job.results)
+        if auto_count:
+            logger.info(f"[{job_id}] Auto-godkjent {auto_count} forslag (høy confidence, lav risiko)")
+
         # Generate output Excel
         timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
         output_filename = f"masterdata_kvalitetssjekk_{job_id}_{timestamp}.xlsx"
@@ -2799,6 +3904,16 @@ async def _run_analysis(
 
         # Persist to history for later retrieval
         _add_to_history(job, source_filename=job.source_filename)
+
+        # Save full results JSON for UI reopening
+        _save_job_results(job_id, job)
+
+        # Save lightweight snapshot for run comparison
+        from backend.run_comparison import save_snapshot
+        save_snapshot(
+            job_id, job.results,
+            timestamp=datetime.fromtimestamp(job.created_at).isoformat(),
+        )
 
         logger.info(f"[{job_id}] Analysis completed. Output: {output_path}")
 

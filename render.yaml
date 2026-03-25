@@ -7,3 +7,13 @@ services:
     envVars:
       - key: PYTHON_VERSION
         value: "3.11"
+      - key: CACHE_DIR
+        value: /var/data/cache
+      - key: OUTPUT_DIR
+        value: /var/data/output
+      - key: HISTORY_DIR
+        value: /var/data/history
+    disk:
+      name: masterdata-persistent
+      mountPath: /var/data
+      sizeGB: 1

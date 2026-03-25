@@ -428,9 +428,9 @@ class TestWorkbookSimplification:
             create_output_excel([analysis], path, analysis_mode="full_enrichment")
             wb = load_workbook(path)
             sheet_names = wb.sheetnames
-            # Should be at most 7 sheets (Summary, Oversikt, Feltanalyse,
-            # Forbedringsforslag, Inriver Import, optionally Produsentoppfølging, Bildeanalyse)
-            assert len(sheet_names) <= 7, f"Too many sheets: {sheet_names}"
+            # Should be at most 9 sheets (Summary, Oversikt, Forklaring, Feltanalyse,
+            # Forbedringsforslag, Quick Wins, Inriver Import, optionally Produsentoppfølging, Bildeanalyse)
+            assert len(sheet_names) <= 9, f"Too many sheets: {sheet_names}"
             # Must NOT have removed sheets
             assert "Comparison_And_Enrichment" not in sheet_names
             assert "Debug_Log" not in sheet_names

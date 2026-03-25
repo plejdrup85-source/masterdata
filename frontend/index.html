@@ -714,6 +714,7 @@
                 <div style="font-size:0.9rem;font-weight:600;margin-bottom:0.5rem">Datakilde</div>
                 <div style="display:flex;gap:0.4rem;flex-wrap:wrap">
                     <button class="qa-source-btn" data-source="catalog_full" onclick="setQaSource('catalog_full')" style="padding:0.4rem 0.8rem;font-size:0.85rem;border-radius:6px;cursor:pointer;border:1px solid var(--border);background:var(--bg);color:var(--text);font-weight:500">Hele katalogen</button>
+                    <button class="qa-source-btn" data-source="catalog_supplier" onclick="setQaSource('catalog_supplier')" style="padding:0.4rem 0.8rem;font-size:0.85rem;border-radius:6px;cursor:pointer;border:1px solid var(--border);background:var(--bg);color:var(--text);font-weight:500">Alle med produsent</button>
                     <button class="qa-source-btn" data-source="catalog_random" onclick="setQaSource('catalog_random')" style="padding:0.4rem 0.8rem;font-size:0.85rem;border-radius:6px;cursor:pointer;border:1px solid var(--border);background:var(--bg);color:var(--text);font-weight:500">Tilfeldig utvalg</button>
                     <button class="qa-source-btn" data-source="manual_articles" onclick="setQaSource('manual_articles')" style="padding:0.4rem 0.8rem;font-size:0.85rem;border-radius:6px;cursor:pointer;border:1px solid var(--border);background:var(--bg);color:var(--text);font-weight:500">Manuelt oppgitt</button>
                     <button class="qa-source-btn active" data-source="upload_excel" onclick="setQaSource('upload_excel')" style="padding:0.4rem 0.8rem;font-size:0.85rem;border-radius:6px;cursor:pointer;border:1px solid var(--primary);background:#eff6ff;color:var(--primary);font-weight:500">Last opp Excel</button>
@@ -726,6 +727,15 @@
                     <strong>Hele Jeeves-katalogen</strong> vil bli analysert mot onemed.no.
                     <span id="qaCatalogCount" style="font-weight:600"></span>
                     <br><span style="font-size:0.8rem;color:#15803d">Ingen Excel-opplasting nødvendig.</span>
+                </div>
+            </div>
+
+            <!-- Source: Supplier-filtered Catalog -->
+            <div id="qaSourceCatalogSupplier" class="qa-source-panel" style="display:none">
+                <div style="padding:1rem;background:#ede9fe;border:1px solid #c4b5fd;border-radius:8px;font-size:0.85rem;color:#5b21b6">
+                    <strong>Alle produkter med produsent/supplier</strong> fra katalogen vil bli analysert.
+                    <span id="qaSupplierCount" style="font-weight:600"></span>
+                    <br><span style="font-size:0.8rem;color:#6d28d9">Produkter uten supplier filtreres bort. Ingen Excel-opplasting nødvendig.</span>
                 </div>
             </div>
 
@@ -894,10 +904,17 @@
         <!-- Results Section -->
         <div class="results-section" id="resultsSection">
             <div class="card">
-                <h2>Resultater</h2>
+                <h2 style="display:flex;align-items:center;gap:0.5rem">Resultater <span id="saveIndicator" style="font-size:0.75rem;font-weight:400;color:#16a34a;opacity:0;transition:opacity 0.3s"></span></h2>
                 <div class="stats-grid" id="statsGrid"></div>
                 <div class="actions">
                     <button class="btn btn-success" id="downloadBtn">Last ned Excel-rapport</button>
+                    <button class="btn" id="downloadQuickWinsBtn" style="background:#059669;color:#fff;font-size:0.85rem" title="Eksporter kun høy-confidence, lav-risiko forslag">Quick Wins</button>
+                    <button class="btn" id="downloadApprovedBtn" style="background:#0d9488;color:#fff;font-size:0.85rem" title="Eksporter kun godkjente og auto-godkjente forslag">Godkjente</button>
+                    <button class="btn" id="downloadFilteredBtn" style="background:#2563eb;color:#fff;font-size:0.85rem;display:none" title="Eksporter kun filtrerte produkter">Eksporter filtrerte (<span id="filteredExportCount">0</span>)</button>
+                    <button class="btn" id="recheckFilteredBtn" style="background:#f59e0b;color:#fff;font-size:0.85rem;display:none" title="Re-kjør analyse kun for filtrerte produkter">Re-sjekk filtrerte (<span id="recheckCount">0</span>)</button>
+                    <select id="recheckPreset" style="font-size:0.8rem;padding:0.3rem 0.5rem;border:1px solid var(--border);border-radius:4px;background:#fff;cursor:pointer" title="Velg en forhåndsdefinert re-sjekk">
+                        <option value="">Re-sjekk...</option>
+                    </select>
                     <button class="btn btn-primary" id="newAnalysisBtn">Ny analyse</button>
                     <button class="btn" id="handoffToFamilyBtn" style="background:#7c3aed;color:#fff;font-size:0.85rem" onclick="handoffToRelationshipModule()">Analyser produktfamilier for disse artiklene</button>
                 </div>
@@ -916,12 +933,53 @@
                         <input type="checkbox" id="thresholdExportOnly"> Eksporter kun filtrerte
                     </label>
                 </div>
+                <!-- Batch Filter Bar -->
+                <div id="batchFilterBar" style="display:flex;align-items:center;gap:0.5rem;margin-bottom:0.75rem;padding:0.5rem 0.75rem;background:var(--bg);border-radius:6px;border:1px solid var(--border);flex-wrap:wrap">
+                    <span style="font-size:0.82rem;font-weight:600;white-space:nowrap;margin-right:0.25rem">Filtrer:</span>
+                    <select id="filterWebshop" style="font-size:0.8rem;padding:0.2rem 0.4rem;border:1px solid var(--border);border-radius:4px;background:#fff">
+                        <option value="">Nettbutikk-status</option>
+                        <option value="Ikke klar">Ikke klar</option>
+                        <option value="Delvis klar">Delvis klar</option>
+                        <option value="Klar">Klar</option>
+                    </select>
+                    <select id="filterPriority" style="font-size:0.8rem;padding:0.2rem 0.4rem;border:1px solid var(--border);border-radius:4px;background:#fff">
+                        <option value="">Prioritet</option>
+                        <option value="Høy">Høy</option>
+                        <option value="Middels">Middels</option>
+                        <option value="Lav">Lav</option>
+                    </select>
+                    <select id="filterField" style="font-size:0.8rem;padding:0.2rem 0.4rem;border:1px solid var(--border);border-radius:4px;background:#fff">
+                        <option value="">Felt med problem</option>
+                        <option value="Produktnavn">Produktnavn</option>
+                        <option value="Beskrivelse">Beskrivelse</option>
+                        <option value="Spesifikasjon">Spesifikasjon</option>
+                        <option value="Produsent">Produsent</option>
+                        <option value="Produsentens varenummer">Prod.varenr</option>
+                        <option value="Kategori">Kategori</option>
+                        <option value="Pakningsinformasjon">Pakning</option>
+                    </select>
+                    <label style="font-size:0.78rem;white-space:nowrap;cursor:pointer" title="Kun produkter med bildeproblemer">
+                        <input type="checkbox" id="filterImageProblem"> Bildeproblem
+                    </label>
+                    <label style="font-size:0.78rem;white-space:nowrap;cursor:pointer" title="Kun produkter med quick wins">
+                        <input type="checkbox" id="filterQuickWins"> Quick wins
+                    </label>
+                    <label style="font-size:0.78rem;white-space:nowrap;cursor:pointer" title="Kun produkter med høy-confidence forslag">
+                        <input type="checkbox" id="filterHighConf"> Høy confidence
+                    </label>
+                    <label style="font-size:0.78rem;white-space:nowrap;cursor:pointer" title="Kun produkter som mangler produsentens varenummer">
+                        <input type="checkbox" id="filterMissingArtno"> Mangler prod.varenr
+                    </label>
+                    <span id="batchFilterCount" style="font-size:0.78rem;color:var(--text-muted);margin-left:auto"></span>
+                    <button id="clearFiltersBtn" style="font-size:0.75rem;padding:0.15rem 0.5rem;border:1px solid var(--border);border-radius:4px;background:#fff;cursor:pointer;display:none" title="Fjern alle filtre">Nullstill</button>
+                </div>
                 <div style="overflow-x:auto">
                     <table class="results-table">
                         <thead>
                             <tr>
                                 <th>Artikkelnr</th>
                                 <th>Produktnavn</th>
+                                <th>Nettbutikk</th>
                                 <th>Prioritet</th>
                                 <th>Score</th>
                                 <th>AI Score</th>
@@ -961,6 +1019,7 @@
                 <div style="font-size:0.9rem;font-weight:600;margin-bottom:0.5rem">Velg datakilde</div>
                 <div style="display:flex;gap:0.5rem;flex-wrap:wrap">
                     <button class="rel-mode-btn active" data-mode="catalog" onclick="setRelMode('catalog')">Hele katalogen</button>
+                    <button class="rel-mode-btn" data-mode="catalog_supplier" onclick="setRelMode('catalog_supplier')">Alle med produsent</button>
                     <button class="rel-mode-btn" data-mode="paste" onclick="setRelMode('paste')">Lim inn artikkelnumre</button>
                     <button class="rel-mode-btn" data-mode="upload" onclick="setRelMode('upload')">Last opp Excel</button>
                 </div>
@@ -971,6 +1030,15 @@
                 <div style="padding:1rem;background:#fef3c7;border:1px solid #fde68a;border-radius:8px;font-size:0.85rem;color:#92400e">
                     <strong>Hele Jeeves-katalogen</strong> vil bli analysert. Dette kan ta noen sekunder avhengig av katalogstørrelsen.
                     <span id="relCatalogCount" style="font-weight:600"></span>
+                </div>
+            </div>
+
+            <!-- Mode A2: Supplier-filtered catalog -->
+            <div id="relModeCatalogSupplier" class="rel-mode-panel" style="display:none">
+                <div style="padding:1rem;background:#ede9fe;border:1px solid #c4b5fd;border-radius:8px;font-size:0.85rem;color:#5b21b6">
+                    <strong>Alle produkter med produsent/supplier</strong> fra katalogen vil bli gruppert.
+                    <span id="relSupplierCount" style="font-weight:600"></span>
+                    <br><span style="font-size:0.8rem;color:#6d28d9">Produkter uten supplier filtreres bort.</span>
                 </div>
             </div>
 
@@ -1310,8 +1378,13 @@
             document.querySelectorAll('.rel-mode-btn').forEach(b =>
                 b.classList.toggle('active', b.dataset.mode === mode));
             document.getElementById('relModeCatalog').style.display = mode === 'catalog' ? '' : 'none';
+            document.getElementById('relModeCatalogSupplier').style.display = mode === 'catalog_supplier' ? '' : 'none';
             document.getElementById('relModePaste').style.display = mode === 'paste' ? '' : 'none';
             document.getElementById('relModeUpload').style.display = mode === 'upload' ? '' : 'none';
+            // Update supplier count
+            if (mode === 'catalog_supplier' && catalogInfo.loaded) {
+                document.getElementById('relSupplierCount').textContent = `(${catalogInfo.supplierCount || 0} av ${catalogInfo.count} produkter har produsent)`;
+            }
             updateRelRunState();
             relSaveState();
         }
@@ -1609,6 +1682,9 @@
             if (relMode === 'catalog') {
                 canRun = true;
                 text = 'Analyserer hele Jeeves-katalogen';
+            } else if (relMode === 'catalog_supplier') {
+                canRun = catalogInfo.loaded && (catalogInfo.supplierCount || 0) > 0;
+                text = `Analyserer ${catalogInfo.supplierCount || '?'} produkter med produsent`;
             } else if (relMode === 'paste') {
                 const arts = parseRelPasteInput();
                 canRun = arts.length >= 2;
@@ -1645,6 +1721,8 @@
                 try {
                     if (relMode === 'catalog') {
                         await loadFamilies(`${API_BASE}/api/families/analyze-jeeves`, 'POST');
+                    } else if (relMode === 'catalog_supplier') {
+                        await loadFamilies(`${API_BASE}/api/families/analyze-jeeves-supplier`, 'POST');
                     } else if (relMode === 'paste') {
                         const articles = parseRelPasteInput();
                         const resp = await fetch(`${API_BASE}/api/families/analyze-articles`, {
@@ -1838,6 +1916,230 @@
             }
         }
 
+        // ── Batch filters ──
+        const batchFilterEls = {
+            webshop: document.getElementById('filterWebshop'),
+            priority: document.getElementById('filterPriority'),
+            field: document.getElementById('filterField'),
+            imageProblem: document.getElementById('filterImageProblem'),
+            quickWins: document.getElementById('filterQuickWins'),
+            highConf: document.getElementById('filterHighConf'),
+            missingArtno: document.getElementById('filterMissingArtno'),
+        };
+        const clearFiltersBtn = document.getElementById('clearFiltersBtn');
+        const downloadFilteredBtn = document.getElementById('downloadFilteredBtn');
+
+        function getActiveFilters() {
+            const filters = {};
+            if (batchFilterEls.webshop.value) filters.webshop_status = batchFilterEls.webshop.value;
+            if (batchFilterEls.priority.value) filters.priority = batchFilterEls.priority.value;
+            if (batchFilterEls.field.value) filters.field_problem = batchFilterEls.field.value;
+            if (batchFilterEls.imageProblem.checked) filters.image_problem = '1';
+            if (batchFilterEls.quickWins.checked) filters.quick_wins = '1';
+            if (batchFilterEls.highConf.checked) filters.high_confidence = '1';
+            if (batchFilterEls.missingArtno.checked) filters.missing_mfr_artno = '1';
+            return filters;
+        }
+
+        function applyBatchFilters() {
+            if (!allResultsData.length) return;
+            const filters = getActiveFilters();
+            const hasFilters = Object.keys(filters).length > 0;
+            clearFiltersBtn.style.display = hasFilters ? '' : 'none';
+            downloadFilteredBtn.style.display = hasFilters ? '' : 'none';
+            recheckFilteredBtn.style.display = hasFilters ? '' : 'none';
+
+            const rows = document.querySelectorAll('#resultsBody tr.expandable');
+            const details = document.querySelectorAll('#resultsBody tr.detail-row');
+            let shown = 0;
+
+            rows.forEach((row, i) => {
+                const r = allResultsData[i];
+                if (!r) return;
+
+                let visible = true;
+                if (hasFilters) {
+                    // Client-side filtering to match what the server will do
+                    if (filters.webshop_status && (r.webshop_status || '') !== filters.webshop_status) visible = false;
+                    if (filters.priority && (r.priority_label || '') !== filters.priority) visible = false;
+                    if (filters.field_problem && visible) {
+                        const fa = (r.field_analyses || []).find(f => f.field_name === filters.field_problem);
+                        if (!fa || fa.status === 'OK' || fa.status === 'Sterk') visible = false;
+                    }
+                    if (filters.image_problem && visible) {
+                        const iq = r.image_quality || {};
+                        const imgSt = iq.status || 'MISSING';
+                        const imgCnt = iq.count || 0;
+                        if (imgSt === 'PASS' && imgCnt > 0) visible = false;
+                    }
+                    if (filters.quick_wins && visible) {
+                        // Approximate: check for high-confidence suggestions
+                        const es = r.enrichment_suggestions || [];
+                        const hasQw = es.some(s => s.confidence >= 0.75 && s.suggested_value && !s.review_required);
+                        if (!hasQw) visible = false;
+                    }
+                    if (filters.high_confidence && visible) {
+                        const es = r.enrichment_suggestions || [];
+                        if (!es.some(s => s.confidence >= 0.75 && s.suggested_value)) visible = false;
+                    }
+                    if (filters.missing_mfr_artno && visible) {
+                        const hasMfr = !!(r.manufacturer);
+                        const fa = (r.field_analyses || []).find(f => f.field_name === 'Produsentens varenummer');
+                        const hasArtno = fa && fa.current_value && fa.current_value.trim();
+                        if (!hasMfr || hasArtno) visible = false;
+                    }
+                }
+
+                // Also respect threshold filter
+                const threshEnabled = document.getElementById('thresholdEnabled').checked;
+                if (threshEnabled && visible) {
+                    const threshold = parseInt(document.getElementById('thresholdValue').value) || 70;
+                    const areaScore = r.ai_score?.area_scores?.overall_score;
+                    const effectiveScore = areaScore !== undefined ? areaScore : r.score;
+                    if (effectiveScore >= threshold) visible = false;
+                }
+
+                row.style.display = visible ? '' : 'none';
+                if (details[i]) details[i].style.display = 'none';
+                if (visible) shown++;
+            });
+
+            const countEl = document.getElementById('batchFilterCount');
+            if (hasFilters) {
+                countEl.textContent = `${shown} av ${rows.length} produkter`;
+                document.getElementById('filteredExportCount').textContent = shown;
+                document.getElementById('recheckCount').textContent = shown;
+            } else {
+                countEl.textContent = '';
+            }
+            // Update threshold count too
+            if (!hasFilters) applyThresholdFilter();
+        }
+
+        // Attach listeners to all filter controls
+        Object.values(batchFilterEls).forEach(el => {
+            el.addEventListener('change', applyBatchFilters);
+        });
+
+        clearFiltersBtn.addEventListener('click', () => {
+            batchFilterEls.webshop.value = '';
+            batchFilterEls.priority.value = '';
+            batchFilterEls.field.value = '';
+            batchFilterEls.imageProblem.checked = false;
+            batchFilterEls.quickWins.checked = false;
+            batchFilterEls.highConf.checked = false;
+            batchFilterEls.missingArtno.checked = false;
+            applyBatchFilters();
+        });
+
+        // Filtered export button
+        downloadFilteredBtn.addEventListener('click', async () => {
+            const filters = getActiveFilters();
+            if (!Object.keys(filters).length) return;
+            try {
+                const params = new URLSearchParams(filters).toString();
+                const resp = await fetch(`${API_BASE}/api/download/${currentJobId}/filtered?${params}`);
+                if (!resp.ok) {
+                    const err = await resp.json().catch(() => ({}));
+                    alert(err.detail || 'Eksport feilet');
+                    return;
+                }
+                const blob = await resp.blob();
+                const url = URL.createObjectURL(blob);
+                const a = document.createElement('a');
+                a.href = url;
+                const filterTag = Object.keys(filters).join('_');
+                a.download = `masterdata_${filterTag}_${currentJobId}.xlsx`;
+                document.body.appendChild(a);
+                a.click();
+                document.body.removeChild(a);
+                URL.revokeObjectURL(url);
+            } catch (e) {
+                alert('Eksportfeil: ' + e.message);
+            }
+        });
+
+        // Re-check filtered products button
+        const recheckFilteredBtn = document.getElementById('recheckFilteredBtn');
+        recheckFilteredBtn.addEventListener('click', async () => {
+            const filters = getActiveFilters();
+            if (!Object.keys(filters).length) return;
+            const count = document.getElementById('recheckCount').textContent;
+            if (!confirm(`Re-kjør analyse for ${count} filtrerte produkter?\n\nDette starter en ny jobb med skip_cache=true.`)) return;
+
+            try {
+                const resp = await fetch(`${API_BASE}/api/recheck/${currentJobId}`, {
+                    method: 'POST',
+                    headers: {'Content-Type': 'application/json'},
+                    body: JSON.stringify({filters, skip_cache: true}),
+                });
+                if (!resp.ok) {
+                    const err = await resp.json().catch(() => ({}));
+                    alert(err.detail || 'Re-sjekk feilet');
+                    return;
+                }
+                const data = await resp.json();
+                currentJobId = data.job_id;
+                // Switch to progress view
+                document.getElementById('resultsSection').style.display = 'none';
+                document.getElementById('progressSection').style.display = '';
+                document.getElementById('progressTitle').textContent = `Re-sjekk: ${data.total_products} produkter`;
+                startPolling();
+            } catch (e) {
+                alert('Re-sjekk feilet: ' + e.message);
+            }
+        });
+
+        // Re-check preset dropdown
+        const recheckPresetSelect = document.getElementById('recheckPreset');
+
+        // Load presets when results are available
+        async function loadRecheckPresets() {
+            if (!currentJobId) return;
+            try {
+                const resp = await fetch(`${API_BASE}/api/recheck/${currentJobId}/presets`);
+                if (!resp.ok) return;
+                const data = await resp.json();
+                recheckPresetSelect.innerHTML = '<option value="">Re-sjekk...</option>';
+                for (const [key, preset] of Object.entries(data.presets)) {
+                    if (preset.count > 0) {
+                        recheckPresetSelect.innerHTML += `<option value="${key}" title="${preset.description}">${preset.label} (${preset.count})</option>`;
+                    }
+                }
+            } catch (e) { /* ignore */ }
+        }
+
+        recheckPresetSelect.addEventListener('change', async () => {
+            const preset = recheckPresetSelect.value;
+            if (!preset || !currentJobId) return;
+            recheckPresetSelect.value = ''; // Reset
+
+            const option = recheckPresetSelect.querySelector(`option[value="${preset}"]`);
+            const label = option ? option.textContent : preset;
+            if (!confirm(`Re-kjør analyse for ${label}?\n\nDette starter en ny jobb med skip_cache=true.`)) return;
+
+            try {
+                const resp = await fetch(`${API_BASE}/api/recheck/${currentJobId}`, {
+                    method: 'POST',
+                    headers: {'Content-Type': 'application/json'},
+                    body: JSON.stringify({preset, skip_cache: true}),
+                });
+                if (!resp.ok) {
+                    const err = await resp.json().catch(() => ({}));
+                    alert(err.detail || 'Re-sjekk feilet');
+                    return;
+                }
+                const data = await resp.json();
+                currentJobId = data.job_id;
+                document.getElementById('resultsSection').style.display = 'none';
+                document.getElementById('progressSection').style.display = '';
+                document.getElementById('progressTitle').textContent = `Re-sjekk: ${data.total_products} produkter`;
+                startPolling();
+            } catch (e) {
+                alert('Re-sjekk feilet: ' + e.message);
+            }
+        });
+
         function setQaSource(mode) {
             qaSourceMode = mode;
             document.querySelectorAll('.qa-source-btn').forEach(b => {
@@ -1850,6 +2152,7 @@
             document.querySelectorAll('.qa-source-panel').forEach(p => p.style.display = 'none');
             const panelMap = {
                 catalog_full: 'qaSourceCatalogFull',
+                catalog_supplier: 'qaSourceCatalogSupplier',
                 catalog_random: 'qaSourceCatalogRandom',
                 manual_articles: 'qaSourceManualArticles',
                 upload_excel: 'qaSourceUploadExcel',
@@ -1861,6 +2164,7 @@
             // Update catalog count display
             if (mode !== 'upload_excel' && catalogInfo.loaded) {
                 document.getElementById('qaCatalogCount').textContent = `(${catalogInfo.count} produkter i katalogen)`;
+                document.getElementById('qaSupplierCount').textContent = `(${catalogInfo.supplierCount || 0} av ${catalogInfo.count} produkter har produsent)`;
                 document.getElementById('qaRandomInfo').textContent = `${catalogInfo.count} produkter tilgjengelig i katalogen`;
             }
             updateStartBtnState();
@@ -1873,6 +2177,7 @@
                 catalogInfo = await resp.json();
                 if (catalogInfo.loaded) {
                     document.getElementById('qaCatalogCount').textContent = `(${catalogInfo.count} produkter i katalogen)`;
+                    document.getElementById('qaSupplierCount').textContent = `(${catalogInfo.supplierCount || 0} av ${catalogInfo.count} produkter har produsent)`;
                     document.getElementById('qaRandomInfo').textContent = `${catalogInfo.count} produkter tilgjengelig i katalogen`;
                 }
             } catch(e) { console.warn('Could not load catalog info:', e); }
@@ -1890,6 +2195,8 @@
                 sourceOk = !!selectedFile;
             } else if (qaSourceMode === 'catalog_full') {
                 sourceOk = catalogInfo.loaded && catalogInfo.count > 0;
+            } else if (qaSourceMode === 'catalog_supplier') {
+                sourceOk = catalogInfo.loaded && (catalogInfo.supplierCount || 0) > 0;
             } else if (qaSourceMode === 'catalog_random') {
                 sourceOk = catalogInfo.loaded && catalogInfo.count > 0;
             } else if (qaSourceMode === 'manual_articles') {
@@ -2161,6 +2468,9 @@
                 // Store for threshold filter
                 allResultsData = results;
 
+                // Load re-check presets
+                loadRecheckPresets();
+
                 // Restore analysis mode from server (survives page refresh)
                 if (data.analysis_mode) currentAnalysisMode = data.analysis_mode;
                 if (data.focus_areas) currentFocusAreas = data.focus_areas;
@@ -2414,16 +2724,24 @@
                         aiDetailHtml += '</div>';
                     }
 
-                    // Priority badge
+                    // Webshop status badge
+                    const wsColors = {'Klar':'#16a34a','Delvis klar':'#d97706','Ikke klar':'#dc2626'};
+                    const wsBg = {'Klar':'#f0fdf4','Delvis klar':'#fffbeb','Ikke klar':'#fef2f2'};
+                    const ws = r.webshop_status || '';
+                    const wsBadge = ws ? `<span style="display:inline-block;padding:0.15rem 0.5rem;border-radius:4px;font-size:0.72rem;font-weight:600;color:${wsColors[ws]||'#64748b'};background:${wsBg[ws]||'#f1f5f9'}" title="${escapeHtml(r.webshop_missing || '')}">${escapeHtml(ws)}</span>` : '-';
+
+                    // Priority badge — use priority_label from our scoring if available, else AI priority_level
                     const priorityColors = {'Kritisk':'#dc2626','Høy':'#ea580c','Middels':'#d97706','Lav':'#16a34a'};
                     const priorityBg = {'Kritisk':'#fef2f2','Høy':'#fff7ed','Middels':'#fffbeb','Lav':'#f0fdf4'};
-                    const pl = r.priority_level || '';
-                    const priorityBadge = pl ? `<span style="display:inline-block;padding:0.15rem 0.5rem;border-radius:4px;font-size:0.75rem;font-weight:600;color:${priorityColors[pl]||'#64748b'};background:${priorityBg[pl]||'#f1f5f9'}">${escapeHtml(pl)}</span>` : '-';
+                    const pl = r.priority_label || r.priority_level || '';
+                    const prioScoreText = r.priority_score !== null && r.priority_score !== undefined ? ` (${r.priority_score})` : '';
+                    const priorityBadge = pl ? `<span style="display:inline-block;padding:0.15rem 0.5rem;border-radius:4px;font-size:0.72rem;font-weight:600;color:${priorityColors[pl]||'#64748b'};background:${priorityBg[pl]||'#f1f5f9'}" title="${escapeHtml(r.priority_reasons || '')}">${escapeHtml(pl)}${prioScoreText}</span>` : '-';
 
                     return `
                         <tr class="expandable" data-idx="${idx}" onclick="toggleDetail(${idx})">
                             <td>${escapeHtml(r.article_number)}</td>
                             <td title="${escapeHtml(r.product_name || '')}">${escapeHtml(r.product_name || '-')}</td>
+                            <td>${wsBadge}</td>
                             <td>${priorityBadge}</td>
                             <td>${r.score}%</td>
                             <td>${aiScore !== null ? `<span class="status-badge ${aiScoreClass}">${aiScoreDisplay}</span>` : '<span style="color:var(--text-muted)">-</span>'}</td>
@@ -2432,7 +2750,7 @@
                             <td title="${escapeHtml(r.why_low || r.comment || '')}" style="max-width:250px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;font-size:0.8rem;color:${r.why_low ? '#dc2626' : 'var(--text-muted)'}">${escapeHtml(r.why_low || r.comment || '-')}</td>
                         </tr>
                         <tr class="detail-row" id="detail-${idx}">
-                            <td colspan="8">
+                            <td colspan="9">
                                 <div class="detail-content">
                                     <h4>Feltanalyse for ${escapeHtml(r.article_number)}</h4>
                                     <div class="field-grid">
@@ -2461,6 +2779,33 @@
                                             </div>` : ''}
                                         </div>
                                     </div>` : ''}
+                                    ${(() => {
+                                        const suggestions = r.enrichment_suggestions || [];
+                                        if (!suggestions.length) return '';
+                                        const approvalColors = {'Godkjent':'#16a34a','Auto-godkjent':'#059669','Avvist':'#dc2626','Krever vurdering':'#d97706','Ikke gjennomgått':'#64748b'};
+                                        const approvalBg = {'Godkjent':'#f0fdf4','Auto-godkjent':'#ecfdf5','Avvist':'#fef2f2','Krever vurdering':'#fffbeb','Ikke gjennomgått':'#f8fafc'};
+                                        let sgHtml = '<div style="margin-top:0.75rem"><h4 style="font-size:0.85rem;font-weight:600;margin-bottom:0.5rem">Forbedringsforslag</h4>';
+                                        suggestions.forEach((s, si) => {
+                                            if (!s.suggested_value) return;
+                                            const as = s.approval_status || 'Ikke gjennomgått';
+                                            const aClr = approvalColors[as] || '#64748b';
+                                            const aBg = approvalBg[as] || '#f8fafc';
+                                            const confPct = Math.round((s.confidence || 0) * 100);
+                                            sgHtml += `<div style="padding:0.4rem 0.5rem;margin-bottom:0.4rem;border:1px solid #e2e8f0;border-radius:6px;background:#fff;font-size:0.8rem" data-art="${r.article_number}" data-si="${si}">`;
+                                            sgHtml += `<div style="display:flex;align-items:center;gap:0.5rem;flex-wrap:wrap">`;
+                                            sgHtml += `<strong>${s.field_name}</strong>`;
+                                            sgHtml += `<span style="font-size:0.72rem;color:var(--text-muted)">${s.source || ''} (${confPct}%)</span>`;
+                                            sgHtml += `<span style="margin-left:auto;padding:0.1rem 0.4rem;border-radius:3px;font-size:0.7rem;font-weight:600;color:${aClr};background:${aBg}">${as}</span>`;
+                                            sgHtml += '</div>';
+                                            sgHtml += `<div style="margin-top:0.3rem;color:var(--text-muted);font-size:0.78rem">${escapeHtml((s.suggested_value || '').substring(0, 150))}${(s.suggested_value || '').length > 150 ? '...' : ''}</div>`;
+                                            sgHtml += `<div style="margin-top:0.3rem;display:flex;gap:0.3rem">`;
+                                            sgHtml += `<button style="font-size:0.68rem;padding:0.1rem 0.35rem;border:1px solid #bbf7d0;border-radius:3px;background:#f0fdf4;color:#16a34a;cursor:pointer" onclick="event.stopPropagation();setApproval('${r.article_number}',${si},'Godkjent',this)">Godkjenn</button>`;
+                                            sgHtml += `<button style="font-size:0.68rem;padding:0.1rem 0.35rem;border:1px solid #fecaca;border-radius:3px;background:#fef2f2;color:#dc2626;cursor:pointer" onclick="event.stopPropagation();setApproval('${r.article_number}',${si},'Avvist',this)">Avvis</button>`;
+                                            sgHtml += '</div></div>';
+                                        });
+                                        sgHtml += '</div>';
+                                        return sgHtml;
+                                    })()}
                                     ${aiDetailHtml}
                                 </div>
                             </td>
@@ -2489,6 +2834,43 @@
             if (row && detail) {
                 row.classList.toggle('expanded');
                 detail.classList.toggle('visible');
+            }
+        }
+
+        async function setApproval(articleNumber, suggestionIndex, status, btn) {
+            if (!currentJobId) return;
+            try {
+                const resp = await fetch(`${API_BASE}/api/approve/${currentJobId}/${articleNumber}/${suggestionIndex}`, {
+                    method: 'PUT',
+                    headers: {'Content-Type': 'application/json'},
+                    body: JSON.stringify({status}),
+                });
+                if (!resp.ok) {
+                    const err = await resp.json().catch(() => ({}));
+                    alert(err.detail || 'Godkjenning feilet');
+                    return;
+                }
+                // Update the status badge in the UI
+                const container = btn.closest('[data-art]');
+                if (container) {
+                    const badge = container.querySelector('span[style*="margin-left:auto"]');
+                    if (badge) {
+                        const colors = {'Godkjent':'#16a34a','Avvist':'#dc2626'};
+                        const bgs = {'Godkjent':'#f0fdf4','Avvist':'#fef2f2'};
+                        badge.textContent = status;
+                        badge.style.color = colors[status] || '#64748b';
+                        badge.style.background = bgs[status] || '#f8fafc';
+                    }
+                }
+                // Also update allResultsData
+                const rData = allResultsData.find(r => r.article_number === articleNumber);
+                if (rData && rData.enrichment_suggestions && rData.enrichment_suggestions[suggestionIndex]) {
+                    rData.enrichment_suggestions[suggestionIndex].approval_status = status;
+                }
+                // Auto-save to persistent history (survives page refresh)
+                queueReviewSave(articleNumber, suggestionIndex, status);
+            } catch (e) {
+                alert('Feil: ' + e.message);
             }
         }
 
@@ -2551,6 +2933,51 @@
                 URL.revokeObjectURL(url);
             } catch (e) {
                 alert(`Nedlasting feilet: ${e.message}`);
+            }
+        });
+
+        // Quick Wins download button
+        document.getElementById('downloadQuickWinsBtn').addEventListener('click', async () => {
+            if (!currentJobId) return;
+            try {
+                const resp = await fetch(`${API_BASE}/api/download/${currentJobId}?quick_wins_only=true`);
+                if (!resp.ok) {
+                    const err = await resp.json().catch(() => ({}));
+                    alert(`Ingen quick wins: ${err.detail || 'Ukjent feil'}`);
+                    return;
+                }
+                const blob = await resp.blob();
+                const url = URL.createObjectURL(blob);
+                const a = document.createElement('a');
+                a.href = url;
+                a.download = `masterdata_quick_wins_${currentJobId}.xlsx`;
+                document.body.appendChild(a);
+                a.click();
+                document.body.removeChild(a);
+                URL.revokeObjectURL(url);
+            } catch (e) {
+                alert(`Nedlasting feilet: ${e.message}`);
+            }
+        });
+
+        // Approved-only download button
+        document.getElementById('downloadApprovedBtn').addEventListener('click', async () => {
+            if (!currentJobId) return;
+            try {
+                const resp = await fetch(`${API_BASE}/api/download/${currentJobId}/approved`);
+                if (!resp.ok) {
+                    const err = await resp.json().catch(() => ({}));
+                    alert(err.detail || 'Ingen godkjente forslag funnet');
+                    return;
+                }
+                const blob = await resp.blob();
+                const url = URL.createObjectURL(blob);
+                const a = document.createElement('a');
+                a.href = url; a.download = `masterdata_godkjent_${currentJobId}.xlsx`;
+                document.body.appendChild(a); a.click(); document.body.removeChild(a);
+                URL.revokeObjectURL(url);
+            } catch (e) {
+                alert('Nedlasting feilet: ' + e.message);
             }
         });
 
@@ -3118,11 +3545,13 @@
                 html += '<th style="padding:0.5rem">Modus</th>';
                 html += '<th style="padding:0.5rem;text-align:center">Produkter</th>';
                 html += '<th style="padding:0.5rem;text-align:center">Snitt</th>';
-                html += '<th style="padding:0.5rem;text-align:center">Kritisk</th>';
+                html += '<th style="padding:0.5rem;text-align:center">Nettbutikk</th>';
+                html += '<th style="padding:0.5rem;text-align:center">Prioritet</th>';
                 html += '<th style="padding:0.5rem"></th>';
                 html += '</tr></thead><tbody>';
 
-                for (const e of data.entries) {
+                for (let i = 0; i < data.entries.length; i++) {
+                    const e = data.entries[i];
                     const d = new Date(e.timestamp);
                     const dateStr = d.toLocaleDateString('nb-NO', {day:'2-digit',month:'2-digit',year:'numeric'})
                         + ' ' + d.toLocaleTimeString('nb-NO', {hour:'2-digit',minute:'2-digit'});
@@ -3130,19 +3559,58 @@
                     const src = e.source_filename || '-';
                     const scoreColor = e.avg_score < 40 ? '#dc2626' : e.avg_score < 70 ? '#d97706' : '#16a34a';
 
+                    // Webshop readiness mini-bar
+                    const wsR = e.webshop_ready || 0;
+                    const wsP = e.webshop_partial || 0;
+                    const wsN = e.webshop_not_ready || 0;
+                    const wsTotal = wsR + wsP + wsN;
+                    const wsBar = wsTotal > 0
+                        ? `<span title="Klar: ${wsR}, Delvis: ${wsP}, Ikke klar: ${wsN}" style="display:inline-flex;gap:2px;font-size:0.72rem">`
+                          + `<span style="color:#16a34a;font-weight:600">${wsR}</span>/`
+                          + `<span style="color:#d97706">${wsP}</span>/`
+                          + `<span style="color:#dc2626">${wsN}</span></span>`
+                        : '-';
+
+                    // Priority mini-bar
+                    const pH = e.priority_high || 0;
+                    const pM = e.priority_medium || 0;
+                    const pL = e.priority_low || 0;
+                    const prioBar = (pH + pM + pL) > 0
+                        ? `<span title="Høy: ${pH}, Middels: ${pM}, Lav: ${pL}" style="display:inline-flex;gap:2px;font-size:0.72rem">`
+                          + `<span style="color:#dc2626;font-weight:600">${pH}</span>/`
+                          + `<span style="color:#d97706">${pM}</span>/`
+                          + `<span style="color:#16a34a">${pL}</span></span>`
+                        : '-';
+
+                    // Compare button — only if there's a previous entry
+                    const prevEntry = i < data.entries.length - 1 ? data.entries[i + 1] : null;
+                    const compareBtn = prevEntry
+                        ? `<button class="btn" style="font-size:0.72rem;padding:0.2rem 0.4rem;margin-left:0.3rem;background:#eff6ff;color:#2563eb;border:1px solid #bfdbfe;cursor:pointer" onclick="compareRuns('${e.job_id}','${prevEntry.job_id}')" title="Sammenlign med forrige kjøring (${new Date(prevEntry.timestamp).toLocaleDateString('nb-NO')})">Δ</button>`
+                        : '';
+
                     html += `<tr style="border-bottom:1px solid var(--border)">`;
                     html += `<td style="padding:0.5rem;white-space:nowrap">${dateStr}</td>`;
-                    html += `<td style="padding:0.5rem;max-width:200px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap" title="${src}">${src}</td>`;
+                    html += `<td style="padding:0.5rem;max-width:180px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap" title="${src}">${src}</td>`;
                     html += `<td style="padding:0.5rem">${mode}</td>`;
                     html += `<td style="padding:0.5rem;text-align:center">${e.product_count}</td>`;
                     html += `<td style="padding:0.5rem;text-align:center;font-weight:600;color:${scoreColor}">${e.avg_score}</td>`;
-                    html += `<td style="padding:0.5rem;text-align:center">${e.critical_count > 0 ? '<span style="color:#dc2626;font-weight:600">' + e.critical_count + '</span>' : '0'}</td>`;
-                    html += `<td style="padding:0.5rem;text-align:right">`;
+                    html += `<td style="padding:0.5rem;text-align:center">${wsBar}</td>`;
+                    html += `<td style="padding:0.5rem;text-align:center">${prioBar}</td>`;
+                    html += `<td style="padding:0.5rem;text-align:right;white-space:nowrap">`;
+                    // Reopen button — only if results JSON exists on disk
+                    if (e.reopenable || e.in_memory) {
+                        const reopenLabel = e.in_memory ? 'Vis i UI' : 'Gjenåpne';
+                        html += `<button class="btn" style="font-size:0.75rem;padding:0.25rem 0.6rem;margin-right:0.3rem;background:#dbeafe;color:#1d4ed8;border:none;cursor:pointer;font-weight:600" onclick="reopenJob('${e.job_id}')">${reopenLabel}</button>`;
+                    }
                     html += `<button class="btn btn-primary" style="font-size:0.75rem;padding:0.25rem 0.6rem" onclick="downloadHistoryFile('${e.job_id}')">Last ned</button>`;
+                    html += compareBtn;
                     html += `<button class="btn" style="font-size:0.75rem;padding:0.25rem 0.5rem;margin-left:0.3rem;background:#fee2e2;color:#dc2626;border:none;cursor:pointer" onclick="deleteHistoryEntry('${e.job_id}')">Slett</button>`;
                     html += `</td></tr>`;
+
                 }
                 html += '</tbody></table>';
+                // Comparison result area
+                html += '<div id="comparisonResult" style="display:none;margin-top:1rem"></div>';
                 container.innerHTML = html;
             } catch (err) {
                 container.innerHTML = `<p style="color:#dc2626">Kunne ikke laste historikk: ${err.message}</p>`;
@@ -3161,6 +3629,164 @@
                 loadHistory();
             } catch (err) {
                 alert('Kunne ikke slette: ' + err.message);
+            }
+        }
+
+        async function reopenJob(jobId) {
+            try {
+                const resp = await fetch(`${API_BASE}/api/history/${jobId}/reopen`, {method: 'POST'});
+                if (!resp.ok) {
+                    const err = await resp.json().catch(() => ({}));
+                    if (resp.status === 410) {
+                        alert(err.detail || 'Denne jobben kan ikke gjenåpnes i UI. Prøv å laste ned Excel i stedet.');
+                    } else {
+                        throw new Error(err.detail || `HTTP ${resp.status}`);
+                    }
+                    return;
+                }
+                const data = await resp.json();
+                // Set current job and switch to masterdata module with results
+                currentJobId = data.job_id;
+                switchModule('masterdata');
+                // Hide upload area, show progress section as complete
+                const progressSection = document.getElementById('progressSection');
+                const progressTitle = document.getElementById('progressTitle');
+                const cancelBtn = document.getElementById('cancelBtn');
+                const resultsSection = document.getElementById('resultsSection');
+                if (progressSection) {
+                    progressSection.classList.add('active');
+                    if (progressTitle) progressTitle.textContent = `Gjenåpnet jobb — ${data.product_count} produkter`;
+                    if (cancelBtn) cancelBtn.classList.add('hidden');
+                }
+                // Load and display results
+                await loadResults();
+                if (resultsSection) resultsSection.classList.remove('hidden');
+            } catch (err) {
+                alert('Kunne ikke gjenåpne jobb: ' + err.message);
+            }
+        }
+
+        // Auto-save review decisions when user approves/rejects a suggestion
+        let _reviewSaveTimeout = null;
+        let _pendingReviewDecisions = [];
+        let _pendingImageDecisions = [];
+
+        function queueReviewSave(articleNumber, suggestionIndex, status, comment) {
+            _pendingReviewDecisions.push({
+                article_number: articleNumber,
+                suggestion_index: suggestionIndex,
+                status: status,
+                comment: comment || null,
+            });
+            _scheduleReviewSave();
+        }
+
+        function queueImageReviewSave(articleNumber, status) {
+            _pendingImageDecisions.push({
+                article_number: articleNumber,
+                status: status,
+            });
+            _scheduleReviewSave();
+        }
+
+        function _scheduleReviewSave() {
+            // Debounce: save after 1 second of no new changes
+            if (_reviewSaveTimeout) clearTimeout(_reviewSaveTimeout);
+            _reviewSaveTimeout = setTimeout(async () => {
+                if (!currentJobId) return;
+                if (_pendingReviewDecisions.length === 0 && _pendingImageDecisions.length === 0) return;
+
+                const body = {
+                    decisions: [..._pendingReviewDecisions],
+                    image_decisions: [..._pendingImageDecisions],
+                };
+                _pendingReviewDecisions = [];
+                _pendingImageDecisions = [];
+
+                try {
+                    const resp = await fetch(`${API_BASE}/api/history/${currentJobId}/review`, {
+                        method: 'PUT',
+                        headers: {'Content-Type': 'application/json'},
+                        body: JSON.stringify(body),
+                    });
+                    if (resp.ok) {
+                        // Show brief save indicator
+                        const indicator = document.getElementById('saveIndicator');
+                        if (indicator) {
+                            indicator.textContent = 'Lagret';
+                            indicator.style.opacity = '1';
+                            setTimeout(() => { indicator.style.opacity = '0'; }, 2000);
+                        }
+                    }
+                } catch (err) {
+                    console.warn('Auto-save failed:', err);
+                }
+            }, 1000);
+        }
+
+        async function compareRuns(currentId, previousId) {
+            const container = document.getElementById('comparisonResult');
+            if (!container) return;
+            container.style.display = '';
+            container.innerHTML = '<p style="color:var(--text-muted)">Sammenligner kjøringer...</p>';
+
+            try {
+                const resp = await fetch(`${API_BASE}/api/history/compare/${currentId}/${previousId}`);
+                if (!resp.ok) {
+                    const err = await resp.json().catch(() => ({}));
+                    container.innerHTML = `<p style="color:#dc2626">${err.detail || 'Sammenligning feilet'}</p>`;
+                    return;
+                }
+                const data = await resp.json();
+
+                let html = '<div style="padding:1rem;background:#f8fafc;border:1px solid var(--border);border-radius:8px">';
+                html += '<h3 style="margin:0 0 0.75rem;font-size:1rem">Sammenligning mellom kjøringer</h3>';
+                html += `<p style="font-size:0.85rem;margin-bottom:0.75rem"><strong>${data.summary}</strong></p>`;
+
+                // Stats grid
+                html += '<div style="display:grid;grid-template-columns:repeat(auto-fit,minmax(120px,1fr));gap:0.5rem;margin-bottom:0.75rem">';
+
+                const scoreChange = data.avg_score_change;
+                const scoreIcon = scoreChange > 0 ? '↑' : scoreChange < 0 ? '↓' : '→';
+                const scoreClr = scoreChange > 0 ? '#16a34a' : scoreChange < 0 ? '#dc2626' : '#64748b';
+                html += `<div style="padding:0.5rem;background:#fff;border-radius:6px;border:1px solid var(--border);text-align:center"><div style="font-size:1.1rem;font-weight:700;color:${scoreClr}">${scoreIcon} ${data.avg_score_after}</div><div style="font-size:0.72rem;color:var(--text-muted)">Snitt (var ${data.avg_score_before})</div></div>`;
+                html += `<div style="padding:0.5rem;background:#fff;border-radius:6px;border:1px solid var(--border);text-align:center"><div style="font-size:1.1rem;font-weight:700;color:#16a34a">${data.improved_count}</div><div style="font-size:0.72rem;color:var(--text-muted)">Forbedret</div></div>`;
+                html += `<div style="padding:0.5rem;background:#fff;border-radius:6px;border:1px solid var(--border);text-align:center"><div style="font-size:1.1rem;font-weight:700;color:#dc2626">${data.regressed_count}</div><div style="font-size:0.72rem;color:var(--text-muted)">Ble dårligere</div></div>`;
+
+                const wsChange = data.webshop_ready_after - data.webshop_ready_before;
+                const wsIcon = wsChange > 0 ? '↑' : wsChange < 0 ? '↓' : '→';
+                const wsClr = wsChange > 0 ? '#16a34a' : wsChange < 0 ? '#dc2626' : '#64748b';
+                html += `<div style="padding:0.5rem;background:#fff;border-radius:6px;border:1px solid var(--border);text-align:center"><div style="font-size:1.1rem;font-weight:700;color:${wsClr}">${wsIcon} ${data.webshop_ready_after}</div><div style="font-size:0.72rem;color:var(--text-muted)">Nettbutikk-klare (var ${data.webshop_ready_before})</div></div>`;
+
+                if (data.new_products) html += `<div style="padding:0.5rem;background:#fff;border-radius:6px;border:1px solid var(--border);text-align:center"><div style="font-size:1.1rem;font-weight:700;color:#2563eb">${data.new_products}</div><div style="font-size:0.72rem;color:var(--text-muted)">Nye produkter</div></div>`;
+                html += '</div>';
+
+                // Delta table (top changes)
+                if (data.deltas && data.deltas.length > 0) {
+                    const showDeltas = data.deltas.slice(0, 20);
+                    html += '<details><summary style="cursor:pointer;font-size:0.85rem;font-weight:600;margin-bottom:0.5rem">Vis endringer per produkt (' + data.deltas.length + ' endringer)</summary>';
+                    html += '<table style="width:100%;border-collapse:collapse;font-size:0.8rem;margin-top:0.5rem"><thead><tr style="border-bottom:1px solid var(--border)">';
+                    html += '<th style="padding:0.3rem;text-align:left">Artikkelnr</th><th style="padding:0.3rem;text-align:left">Navn</th><th style="padding:0.3rem;text-align:center">Score</th><th style="padding:0.3rem;text-align:left">Endring</th>';
+                    html += '</tr></thead><tbody>';
+                    for (const d of showDeltas) {
+                        const changeColor = d.score_change > 0 ? '#16a34a' : d.score_change < 0 ? '#dc2626' : '#64748b';
+                        const changeText = d.is_new ? 'Ny' : d.is_removed ? 'Fjernet' : (d.score_change > 0 ? '+' + d.score_change : d.score_change.toString());
+                        html += `<tr style="border-bottom:1px solid #f1f5f9">`;
+                        html += `<td style="padding:0.3rem">${d.article_number}</td>`;
+                        html += `<td style="padding:0.3rem;max-width:180px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">${d.product_name || '-'}</td>`;
+                        html += `<td style="padding:0.3rem;text-align:center;font-weight:600;color:${changeColor}">${changeText}</td>`;
+                        html += `<td style="padding:0.3rem;font-size:0.75rem;color:var(--text-muted)">${d.summary}</td>`;
+                        html += '</tr>';
+                    }
+                    html += '</tbody></table>';
+                    if (data.deltas.length > 20) html += `<p style="font-size:0.75rem;color:var(--text-muted);margin-top:0.3rem">...og ${data.deltas.length - 20} flere endringer</p>`;
+                    html += '</details>';
+                }
+                html += '<button class="btn" style="font-size:0.75rem;padding:0.2rem 0.5rem;margin-top:0.5rem;background:#f1f5f9;cursor:pointer" onclick="document.getElementById(\'comparisonResult\').style.display=\'none\'">Lukk</button>';
+                html += '</div>';
+                container.innerHTML = html;
+            } catch (err) {
+                container.innerHTML = `<p style="color:#dc2626">Kunne ikke sammenligne: ${err.message}</p>`;
             }
         }
     </script>
