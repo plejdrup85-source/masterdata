@@ -18,6 +18,60 @@
             --text-muted: #64748b;
             --border: #e2e8f0;
             --radius: 12px;
+            --heading-color: var(--text);
+            --input-bg: #ffffff;
+            --input-border: #e2e8f0;
+            --hover-bg: #f1f5f9;
+            --accent: #7c3aed;
+            --accent-bg: #faf5ff;
+            --accent-border: #e9d5ff;
+            --info-bg: #eff6ff;
+            --info-border: #bfdbfe;
+            --info-text: #1e40af;
+            --success-bg: #f0fdf4;
+            --success-border: #bbf7d0;
+            --success-text: #166534;
+            --warning-bg: #fefce8;
+            --warning-border: #fde68a;
+            --warning-text: #854d0e;
+            --danger-bg: #fee2e2;
+            --danger-text: #991b1b;
+            --tab-active: #7c3aed;
+            --tab-active-border: #7c3aed;
+        }
+
+        [data-theme="dark"] {
+            --primary: #60a5fa;
+            --primary-dark: #3b82f6;
+            --success: #4ade80;
+            --warning: #fbbf24;
+            --danger: #f87171;
+            --info: #60a5fa;
+            --bg: #0f0f0f;
+            --card-bg: #1a1a1a;
+            --text: #f0f0f0;
+            --text-muted: #a0a0a0;
+            --border: #333333;
+            --heading-color: #facc15;
+            --input-bg: #222222;
+            --input-border: #444444;
+            --hover-bg: #252525;
+            --accent: #a78bfa;
+            --accent-bg: #1e1333;
+            --accent-border: #4c3080;
+            --info-bg: #0c1929;
+            --info-border: #1e3a5f;
+            --info-text: #93c5fd;
+            --success-bg: #0a1f0f;
+            --success-border: #166534;
+            --success-text: #86efac;
+            --warning-bg: #1a1400;
+            --warning-border: #854d0e;
+            --warning-text: #fde68a;
+            --danger-bg: #1f0a0a;
+            --danger-text: #fca5a5;
+            --tab-active: #facc15;
+            --tab-active-border: #facc15;
         }
 
         * { box-sizing: border-box; margin: 0; padding: 0; }
@@ -43,7 +97,7 @@
         header h1 {
             font-size: 1.75rem;
             font-weight: 700;
-            color: var(--text);
+            color: var(--heading-color);
             margin-bottom: 0.5rem;
         }
 
@@ -65,7 +119,7 @@
             font-size: 1.15rem;
             font-weight: 600;
             margin-bottom: 1rem;
-            color: var(--text);
+            color: var(--heading-color);
         }
 
         /* Upload area */
@@ -482,9 +536,123 @@
         }
         .module-tab:hover { color: var(--text); }
         .module-tab.active {
-            color: #7c3aed;
-            border-bottom-color: #7c3aed;
+            color: var(--tab-active);
+            border-bottom-color: var(--tab-active-border);
         }
+        /* ── Image Analysis Module ── */
+        .ia-source-btn {
+            padding: 0.4rem 0.8rem;
+            font-size: 0.85rem;
+            border-radius: 6px;
+            cursor: pointer;
+            border: 1px solid var(--border);
+            background: var(--bg);
+            color: var(--text);
+            font-weight: 500;
+            transition: all 0.15s;
+        }
+        .ia-source-btn.active {
+            border-color: #7c3aed;
+            background: #f5f3ff;
+            color: #7c3aed;
+        }
+        .ia-review-card {
+            background: var(--card-bg);
+            border: 1px solid var(--border);
+            border-radius: var(--radius);
+            padding: 1rem;
+            margin-bottom: 0.75rem;
+            display: grid;
+            grid-template-columns: 1fr 150px 150px 1fr auto;
+            gap: 1rem;
+            align-items: center;
+        }
+        .ia-review-card.status-approved { border-left: 4px solid var(--success); }
+        .ia-review-card.status-rejected { border-left: 4px solid var(--danger); }
+        .ia-review-card.status-pending { border-left: 4px solid var(--border); }
+        .ia-img-thumb {
+            width: 120px;
+            height: 120px;
+            object-fit: contain;
+            border: 1px solid var(--border);
+            border-radius: 6px;
+            background: #f8f8f8;
+            cursor: pointer;
+            transition: transform 0.15s;
+        }
+        .ia-img-thumb:hover { transform: scale(1.05); box-shadow: 0 2px 8px rgba(0,0,0,0.15); }
+        .ia-img-placeholder {
+            width: 120px;
+            height: 120px;
+            border: 2px dashed var(--border);
+            border-radius: 6px;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            color: var(--text-muted);
+            font-size: 0.75rem;
+            text-align: center;
+        }
+        .ia-lightbox {
+            display: none;
+            position: fixed;
+            inset: 0;
+            background: rgba(0,0,0,0.85);
+            z-index: 2000;
+            align-items: center;
+            justify-content: center;
+            cursor: pointer;
+        }
+        .ia-lightbox.active { display: flex; }
+        .ia-lightbox img {
+            max-width: 90vw;
+            max-height: 90vh;
+            object-fit: contain;
+            border-radius: 8px;
+            box-shadow: 0 4px 24px rgba(0,0,0,0.4);
+        }
+        .ia-status-badge {
+            display: inline-block;
+            padding: 0.2rem 0.5rem;
+            border-radius: 4px;
+            font-size: 0.75rem;
+            font-weight: 600;
+            text-transform: uppercase;
+        }
+        .ia-status-badge.approved { background: #dcfce7; color: #166534; }
+        .ia-status-badge.rejected { background: #fee2e2; color: #991b1b; }
+        .ia-status-badge.pending { background: #f1f5f9; color: #475569; }
+        .ia-score-badge {
+            display: inline-block;
+            padding: 0.15rem 0.4rem;
+            border-radius: 4px;
+            font-size: 0.75rem;
+            font-weight: 600;
+        }
+        .ia-score-badge.good { background: #dcfce7; color: #166534; }
+        .ia-score-badge.warning { background: #fef3c7; color: #92400e; }
+        .ia-score-badge.bad { background: #fee2e2; color: #991b1b; }
+        .ia-score-badge.missing { background: #f1f5f9; color: #64748b; }
+        .ia-toolbar {
+            display: flex;
+            gap: 0.5rem;
+            align-items: center;
+            flex-wrap: wrap;
+            margin-bottom: 1rem;
+            padding: 0.75rem;
+            background: #f8fafc;
+            border-radius: 8px;
+            border: 1px solid var(--border);
+        }
+        .ia-select-all-cb { cursor: pointer; width: 16px; height: 16px; }
+        .ia-item-cb { cursor: pointer; width: 14px; height: 14px; margin-right: 0.3rem; }
+        @media (max-width: 900px) {
+            .ia-review-card {
+                grid-template-columns: 1fr;
+                gap: 0.5rem;
+            }
+        }
+
         /* Relationship module */
         .rel-mode-btn {
             padding: 0.5rem 1rem;
@@ -678,9 +846,266 @@
             .results-table { font-size: 0.75rem; }
             .field-grid { grid-template-columns: 1fr; }
         }
+
+        /* ── Theme toggle button ── */
+        .theme-toggle {
+            position: fixed;
+            top: 1rem;
+            right: 1rem;
+            z-index: 999;
+            background: var(--card-bg);
+            border: 1px solid var(--border);
+            border-radius: 8px;
+            padding: 0.4rem 0.7rem;
+            cursor: pointer;
+            font-size: 0.85rem;
+            color: var(--text);
+            display: flex;
+            align-items: center;
+            gap: 0.35rem;
+            box-shadow: 0 2px 8px rgba(0,0,0,0.1);
+            transition: all 0.2s;
+        }
+        .theme-toggle:hover { background: var(--hover-bg); }
+
+        /* ── Dark mode comprehensive overrides ── */
+
+        /* All headings in dark mode get yellow */
+        [data-theme="dark"] h1,
+        [data-theme="dark"] h2,
+        [data-theme="dark"] h3 {
+            color: var(--heading-color) !important;
+        }
+
+        /* Inputs, selects, textareas */
+        [data-theme="dark"] input,
+        [data-theme="dark"] select,
+        [data-theme="dark"] textarea {
+            background: var(--input-bg) !important;
+            color: var(--text) !important;
+            border-color: var(--input-border) !important;
+        }
+
+        /* Upload area */
+        [data-theme="dark"] .upload-area {
+            border-color: var(--border);
+            background: var(--card-bg);
+        }
+        [data-theme="dark"] .upload-area:hover,
+        [data-theme="dark"] .upload-area.dragover {
+            border-color: var(--primary);
+            background: var(--info-bg);
+        }
+
+        /* Result tables */
+        [data-theme="dark"] .results-table th {
+            background: #222 !important;
+            color: var(--heading-color) !important;
+            border-color: var(--border) !important;
+        }
+        [data-theme="dark"] .results-table td {
+            border-color: var(--border) !important;
+        }
+        [data-theme="dark"] .results-table tr:hover td {
+            background: var(--hover-bg) !important;
+        }
+
+        /* Member/standalone tables */
+        [data-theme="dark"] .member-table th,
+        [data-theme="dark"] .standalone-table th {
+            border-color: var(--border) !important;
+            color: var(--text-muted) !important;
+        }
+        [data-theme="dark"] .member-table td,
+        [data-theme="dark"] .standalone-table td {
+            border-color: var(--border) !important;
+        }
+
+        /* Buttons with hardcoded colors */
+        [data-theme="dark"] .btn-outline {
+            background: var(--card-bg) !important;
+            color: var(--text) !important;
+            border-color: var(--border) !important;
+        }
+        [data-theme="dark"] .btn-outline:hover {
+            background: var(--hover-bg) !important;
+        }
+
+        /* QA source/preset buttons */
+        [data-theme="dark"] .qa-source-btn,
+        [data-theme="dark"] .ia-source-btn,
+        [data-theme="dark"] .preset-btn {
+            background: var(--card-bg) !important;
+            color: var(--text) !important;
+            border-color: var(--border) !important;
+        }
+        [data-theme="dark"] .qa-source-btn.active {
+            background: var(--info-bg) !important;
+            color: var(--primary) !important;
+            border-color: var(--primary) !important;
+        }
+        [data-theme="dark"] .ia-source-btn.active {
+            background: var(--accent-bg) !important;
+            color: var(--accent) !important;
+            border-color: var(--accent) !important;
+        }
+
+        /* Inline info/success/warning/danger panels */
+        [data-theme="dark"] [style*="background:#f0fdf4"],
+        [data-theme="dark"] [style*="background:#dcfce7"] {
+            background: var(--success-bg) !important;
+            border-color: var(--success-border) !important;
+            color: var(--success-text) !important;
+        }
+        [data-theme="dark"] [style*="background:#eff6ff"],
+        [data-theme="dark"] [style*="background:#f0f9ff"] {
+            background: var(--info-bg) !important;
+            border-color: var(--info-border) !important;
+            color: var(--info-text) !important;
+        }
+        [data-theme="dark"] [style*="background:#fefce8"],
+        [data-theme="dark"] [style*="background:#fef3c7"] {
+            background: var(--warning-bg) !important;
+            border-color: var(--warning-border) !important;
+            color: var(--warning-text) !important;
+        }
+        [data-theme="dark"] [style*="background:#fee2e2"] {
+            background: var(--danger-bg) !important;
+            color: var(--danger-text) !important;
+        }
+        [data-theme="dark"] [style*="background:#faf5ff"] {
+            background: var(--accent-bg) !important;
+            border-color: var(--accent-border) !important;
+        }
+        [data-theme="dark"] [style*="background:#f8fafc"],
+        [data-theme="dark"] [style*="background:#f1f5f9"] {
+            background: var(--hover-bg) !important;
+        }
+        [data-theme="dark"] [style*="background:#fff"] {
+            background: var(--card-bg) !important;
+        }
+
+        /* Progress bar */
+        [data-theme="dark"] [style*="background:#e2e8f0"] {
+            background: #333 !important;
+        }
+
+        /* Analysis mode labels in dark */
+        [data-theme="dark"] label {
+            color: var(--text);
+        }
+
+        /* Family cards */
+        [data-theme="dark"] .family-card {
+            background: var(--card-bg);
+            border-color: var(--border);
+        }
+
+        /* Image analysis */
+        [data-theme="dark"] .ia-review-card {
+            background: var(--card-bg);
+            border-color: var(--border);
+        }
+        [data-theme="dark"] .ia-img-thumb {
+            background: #222;
+            border-color: var(--border);
+        }
+        [data-theme="dark"] .ia-img-placeholder {
+            border-color: var(--border);
+            color: var(--text-muted);
+        }
+        [data-theme="dark"] .ia-toolbar {
+            background: var(--card-bg);
+            border-color: var(--border);
+        }
+
+        /* Score/status badges in dark mode */
+        [data-theme="dark"] .ia-score-badge.good { background: #0a2e12; color: #86efac; }
+        [data-theme="dark"] .ia-score-badge.warning { background: #2e1a00; color: #fde68a; }
+        [data-theme="dark"] .ia-score-badge.bad { background: #2e0a0a; color: #fca5a5; }
+        [data-theme="dark"] .ia-score-badge.missing { background: #1e1e1e; color: #a0a0a0; }
+        [data-theme="dark"] .ia-status-badge.approved { background: #0a2e12; color: #86efac; }
+        [data-theme="dark"] .ia-status-badge.rejected { background: #2e0a0a; color: #fca5a5; }
+        [data-theme="dark"] .ia-status-badge.pending { background: #1e1e1e; color: #a0a0a0; }
+
+        /* Review buttons in family module */
+        [data-theme="dark"] .review-btn {
+            background: var(--card-bg) !important;
+            border-color: var(--border) !important;
+            color: var(--text) !important;
+        }
+        [data-theme="dark"] .review-btn.active-accepted { background: #0a2e12 !important; color: #86efac !important; border-color: #166534 !important; }
+        [data-theme="dark"] .review-btn.active-rejected { background: #2e0a0a !important; color: #fca5a5 !important; border-color: #991b1b !important; }
+        [data-theme="dark"] .review-btn.active-reject { background: #2e0a0a !important; color: #fca5a5 !important; border-color: #991b1b !important; }
+        [data-theme="dark"] .review-btn.active-needs_review { background: #2e1a00 !important; color: #fde68a !important; border-color: #854d0e !important; }
+
+        /* Modals in dark mode */
+        [data-theme="dark"] [style*="background:#fff;border-radius:12px"],
+        [data-theme="dark"] [style*="background:#fff;border-radius"] {
+            background: var(--card-bg) !important;
+            color: var(--text) !important;
+        }
+
+        /* Fix scroll/code areas */
+        [data-theme="dark"] pre, [data-theme="dark"] code {
+            background: #1e1e1e !important;
+            color: #e0e0e0 !important;
+        }
+
+        /* Tab bar for family subtabs */
+        [data-theme="dark"] .tab-btn {
+            color: var(--text-muted);
+        }
+        [data-theme="dark"] .tab-btn:hover {
+            color: var(--text);
+        }
+        [data-theme="dark"] .tab-btn.active {
+            color: var(--tab-active);
+            border-bottom-color: var(--tab-active-border);
+        }
+
+        /* Module nav in dark mode */
+        [data-theme="dark"] .module-nav {
+            border-bottom-color: var(--border);
+        }
+        [data-theme="dark"] .module-tab {
+            color: var(--text-muted);
+        }
+        [data-theme="dark"] .module-tab:hover {
+            color: var(--text);
+        }
+
+        /* Links */
+        [data-theme="dark"] a {
+            color: var(--primary);
+        }
+
+        /* Column info box */
+        [data-theme="dark"] .column-info {
+            background: var(--info-bg) !important;
+            color: var(--info-text) !important;
+        }
+
+        /* Rel mode buttons */
+        [data-theme="dark"] .rel-mode-btn {
+            background: var(--card-bg) !important;
+            color: var(--text) !important;
+            border-color: var(--border) !important;
+        }
+        [data-theme="dark"] .rel-mode-btn.active {
+            background: var(--accent-bg) !important;
+            color: var(--accent) !important;
+            border-color: var(--accent) !important;
+        }
     </style>
 </head>
 <body>
+    <!-- Theme toggle -->
+    <button class="theme-toggle" id="themeToggle" onclick="toggleTheme()" title="Bytt mellom lys og mørk modus">
+        <span id="themeIcon">&#9790;</span>
+        <span id="themeLabel">Dark</span>
+    </button>
+
     <div class="container">
         <header>
             <h1>Masterdata Kvalitetssjekk</h1>
@@ -694,6 +1119,9 @@
             </button>
             <button class="module-tab" id="tabRelations" onclick="switchModule('relations')">
                 Produktfamilier
+            </button>
+            <button class="module-tab" id="tabImageAnalysis" onclick="switchModule('imageanalysis')">
+                Bildeanalyse
             </button>
             <button class="module-tab" id="tabHistory" onclick="switchModule('history')">
                 Historikk
@@ -1183,6 +1611,156 @@
             </div>
         </div><!-- /moduleHistory -->
 
+        <!-- ═══════════════════════════════════════════════════════ -->
+        <!-- MODULE: BILDEANALYSE                                    -->
+        <!-- ═══════════════════════════════════════════════════════ -->
+        <div id="moduleImageAnalysis" style="display:none">
+
+        <!-- Step 1: Select data source -->
+        <div class="card" id="iaConfigCard">
+            <h2>Bildeanalyse &mdash; Velg produkter</h2>
+            <p style="color:var(--text-muted);font-size:0.9rem;margin-bottom:1rem">
+                Analyser bildekvalitet for valgte produkter. Produkter med manglende eller dårlige bilder kan gjennomgås og godkjennes.
+            </p>
+
+            <div style="margin-bottom:1rem">
+                <div style="font-size:0.9rem;font-weight:600;margin-bottom:0.5rem">Datakilde</div>
+                <div style="display:flex;gap:0.4rem;flex-wrap:wrap">
+                    <button class="ia-source-btn active" data-source="catalog_random" onclick="setIaSource('catalog_random')">Tilfeldig utvalg</button>
+                    <button class="ia-source-btn" data-source="catalog_full" onclick="setIaSource('catalog_full')">Hele katalogen</button>
+                    <button class="ia-source-btn" data-source="manual_articles" onclick="setIaSource('manual_articles')">Manuelt oppgitt</button>
+                    <button class="ia-source-btn" data-source="upload_excel" onclick="setIaSource('upload_excel')">Excel-opplasting</button>
+                </div>
+            </div>
+
+            <!-- Source: Random Sample -->
+            <div id="iaSourceRandom" class="ia-source-panel">
+                <div style="padding:1rem;background:#eff6ff;border:1px solid #bfdbfe;border-radius:8px;font-size:0.85rem;color:#1e40af">
+                    <strong>Tilfeldig utvalg</strong> fra intern katalog.
+                    <div style="margin-top:0.5rem;display:flex;gap:0.75rem;align-items:center;flex-wrap:wrap">
+                        <label>Antall produkter:
+                            <select id="iaRandomSize" style="padding:0.3rem 0.5rem;border:1px solid var(--border);border-radius:4px;font-size:0.85rem">
+                                <option value="10">10</option>
+                                <option value="25">25</option>
+                                <option value="50" selected>50</option>
+                                <option value="100">100</option>
+                                <option value="200">200</option>
+                                <option value="500">500</option>
+                            </select>
+                        </label>
+                        <span id="iaRandomInfo" style="font-size:0.82rem;color:var(--text-muted)"></span>
+                    </div>
+                </div>
+            </div>
+
+            <!-- Source: Full Catalog -->
+            <div id="iaSourceFull" class="ia-source-panel" style="display:none">
+                <div style="padding:1rem;background:#f0fdf4;border:1px solid #bbf7d0;border-radius:8px;font-size:0.85rem;color:#166534">
+                    <strong>Hele Jeeves-katalogen</strong> vil bli analysert.
+                    <span id="iaCatalogCount" style="font-weight:600"></span>
+                </div>
+            </div>
+
+            <!-- Source: Manual Articles -->
+            <div id="iaSourceManual" class="ia-source-panel" style="display:none">
+                <div style="padding:1rem;background:#fefce8;border:1px solid #fde68a;border-radius:8px;font-size:0.85rem;color:#854d0e">
+                    <strong>Velg produkter manuelt</strong>
+                    <div style="margin-top:0.75rem">
+                        <div style="display:flex;gap:0.5rem;margin-bottom:0.5rem;flex-wrap:wrap">
+                            <button class="ia-source-btn active" id="iaManualTabArticles" onclick="setIaManualTab('articles')">Artikkelnumre</button>
+                            <button class="ia-source-btn" id="iaManualTabSupplier" onclick="setIaManualTab('supplier')">Velg produsent</button>
+                        </div>
+                        <div id="iaManualArticlesPanel">
+                            <textarea id="iaManualArticles" rows="4" placeholder="Skriv artikkelnumre separert med komma, mellomrom eller linjeskift&#10;F.eks: N558818305, N558818306, 12345" style="width:100%;padding:0.5rem;border:1px solid var(--border);border-radius:4px;font-family:monospace;font-size:0.85rem;resize:vertical"></textarea>
+                        </div>
+                        <div id="iaManualSupplierPanel" style="display:none">
+                            <div style="margin-bottom:0.5rem">
+                                <input type="text" id="iaSupplierSearch" placeholder="Søk etter produsent..." style="width:100%;padding:0.5rem;border:1px solid var(--border);border-radius:4px;font-size:0.85rem" oninput="filterIaSuppliers()">
+                            </div>
+                            <select id="iaSupplierSelect" size="8" style="width:100%;padding:0.3rem;border:1px solid var(--border);border-radius:4px;font-size:0.85rem">
+                                <option value="">Laster produsenter...</option>
+                            </select>
+                            <div id="iaSupplierInfo" style="font-size:0.82rem;color:var(--text-muted);margin-top:0.3rem"></div>
+                        </div>
+                    </div>
+                </div>
+            </div>
+
+            <!-- Source: Excel Upload -->
+            <div id="iaSourceExcel" class="ia-source-panel" style="display:none">
+                <div style="padding:1rem;background:#f8fafc;border:1px solid var(--border);border-radius:8px">
+                    <div class="upload-area" id="iaUploadArea" style="padding:1.5rem 1rem">
+                        <input type="file" accept=".xlsx" onchange="handleIaFileSelect(event)">
+                        <p style="color:var(--text-muted);font-size:0.85rem">Slipp en Excel-fil her eller klikk for å velge</p>
+                        <div class="filename" id="iaFileName" style="display:none"></div>
+                    </div>
+                </div>
+            </div>
+
+            <div class="actions">
+                <button class="btn btn-primary" id="iaStartBtn" onclick="startImageAnalysis()">Start bildeanalyse</button>
+            </div>
+        </div>
+
+        <!-- Step 2: Progress -->
+        <div class="card" id="iaProgressCard" style="display:none">
+            <h2>Bildeanalyse pågår</h2>
+            <div style="margin:1rem 0">
+                <div style="display:flex;justify-content:space-between;font-size:0.85rem;margin-bottom:0.3rem">
+                    <span id="iaProgressText">0 / 0 produkter</span>
+                    <span id="iaProgressPct">0%</span>
+                </div>
+                <div style="background:#e2e8f0;border-radius:6px;height:8px;overflow:hidden">
+                    <div id="iaProgressBar" style="background:#7c3aed;height:100%;width:0%;transition:width 0.3s;border-radius:6px"></div>
+                </div>
+            </div>
+            <div id="iaProgressCurrent" style="font-size:0.82rem;color:var(--text-muted)"></div>
+        </div>
+
+        <!-- Step 3: Results & Review -->
+        <div id="iaResultsSection" style="display:none">
+            <!-- Summary -->
+            <div class="card" id="iaSummaryCard">
+                <h2>Analyseoversikt</h2>
+                <div style="display:grid;grid-template-columns:repeat(auto-fit,minmax(140px,1fr));gap:0.75rem;margin-top:0.75rem" id="iaSummaryGrid"></div>
+            </div>
+
+            <!-- Toolbar -->
+            <div class="ia-toolbar" id="iaToolbar">
+                <label style="font-size:0.85rem;display:flex;align-items:center;gap:0.3rem;cursor:pointer">
+                    <input type="checkbox" class="ia-select-all-cb" id="iaSelectAll" onchange="iaToggleSelectAll()">
+                    <span>Velg alle synlige</span>
+                </label>
+                <div style="flex:1"></div>
+                <select id="iaFilterSelect" onchange="iaApplyFilter()" style="padding:0.35rem 0.5rem;border:1px solid var(--border);border-radius:6px;font-size:0.82rem">
+                    <option value="needs_review">Trenger gjennomgang</option>
+                    <option value="all">Alle</option>
+                    <option value="approved">Godkjente</option>
+                    <option value="rejected">Avslåtte</option>
+                    <option value="pending">Venter</option>
+                </select>
+                <button class="btn btn-success" style="font-size:0.8rem;padding:0.35rem 0.7rem" onclick="iaBatchApprove()">Godkjenn valgte</button>
+                <button class="btn btn-danger" style="font-size:0.8rem;padding:0.35rem 0.7rem" onclick="iaBatchReject()">Avslå valgte</button>
+                <button class="btn" style="background:#7c3aed;color:#fff;font-size:0.8rem;padding:0.35rem 0.7rem" onclick="iaExportZip()">Eksporter godkjente (ZIP)</button>
+            </div>
+
+            <!-- Status counts bar -->
+            <div style="display:flex;gap:0.5rem;flex-wrap:wrap;margin-bottom:0.75rem;font-size:0.82rem" id="iaStatusBar"></div>
+
+            <!-- Review items container -->
+            <div id="iaReviewContainer"></div>
+
+            <!-- Pagination -->
+            <div style="display:flex;justify-content:center;gap:0.5rem;margin-top:1rem" id="iaPagination"></div>
+        </div>
+
+        </div><!-- /moduleImageAnalysis -->
+
+        <!-- Image Lightbox -->
+        <div class="ia-lightbox" id="iaLightbox" onclick="closeLightbox()">
+            <img id="iaLightboxImg" src="" alt="Forstørret bilde">
+        </div>
+
         <!-- Move member modal -->
         <div id="moveMemberModal" style="display:none;position:fixed;inset:0;background:rgba(0,0,0,0.4);z-index:1000;align-items:center;justify-content:center">
             <div style="background:#fff;border-radius:12px;padding:1.5rem;max-width:450px;width:90%;box-shadow:0 8px 32px rgba(0,0,0,0.2)">
@@ -1235,6 +1813,32 @@
     </div>
 
     <script>
+        // ── Theme management ──
+        function applyTheme(theme) {
+            document.documentElement.setAttribute('data-theme', theme);
+            const icon = document.getElementById('themeIcon');
+            const label = document.getElementById('themeLabel');
+            if (theme === 'dark') {
+                icon.innerHTML = '&#9788;';
+                label.textContent = 'Light';
+            } else {
+                icon.innerHTML = '&#9790;';
+                label.textContent = 'Dark';
+            }
+            localStorage.setItem('masterdata-theme', theme);
+        }
+
+        function toggleTheme() {
+            const current = document.documentElement.getAttribute('data-theme') || 'light';
+            applyTheme(current === 'dark' ? 'light' : 'dark');
+        }
+
+        // Apply saved theme on load
+        (function() {
+            const saved = localStorage.getItem('masterdata-theme') || 'light';
+            applyTheme(saved);
+        })();
+
         const API_BASE = '';
         let currentJobId = null;
         let pollInterval = null;
@@ -1249,11 +1853,13 @@
             currentModule = mod;
             document.getElementById('moduleMasterdata').style.display = mod === 'masterdata' ? '' : 'none';
             document.getElementById('moduleRelations').style.display = mod === 'relations' ? '' : 'none';
+            document.getElementById('moduleImageAnalysis').style.display = mod === 'imageanalysis' ? '' : 'none';
             document.getElementById('moduleHistory').style.display = mod === 'history' ? '' : 'none';
             document.querySelectorAll('.module-tab').forEach(t => t.classList.remove('active'));
-            const tabMap = {masterdata: 'tabMasterdata', relations: 'tabRelations', history: 'tabHistory'};
+            const tabMap = {masterdata: 'tabMasterdata', relations: 'tabRelations', imageanalysis: 'tabImageAnalysis', history: 'tabHistory'};
             document.getElementById(tabMap[mod])?.classList.add('active');
             if (mod === 'relations') initRelModule();
+            if (mod === 'imageanalysis') initIaModule();
             if (mod === 'history') loadHistory();
         }
 
@@ -3789,6 +4395,417 @@
                 container.innerHTML = `<p style="color:#dc2626">Kunne ikke sammenligne: ${err.message}</p>`;
             }
         }
+
+        // ══════════════════════════════════════════════════════════════
+        // MODULE: BILDEANALYSE (Image Analysis)
+        // ══════════════════════════════════════════════════════════════
+
+        let iaSourceMode = 'catalog_random';
+        let iaManualTab = 'articles';
+        let iaSessionId = null;
+        let iaPollInterval = null;
+        let iaCurrentPage = 1;
+        let iaCurrentFilter = 'needs_review';
+        let iaSelectedFile = null;
+        let iaSupplierList = [];
+        let iaSelectedItems = new Set();
+        let iaInitialized = false;
+
+        function initIaModule() {
+            if (iaInitialized) return;
+            iaInitialized = true;
+            // Load catalog info
+            fetch(`${API_BASE}/api/catalog-info`).then(r => r.json()).then(d => {
+                if (d.loaded) {
+                    document.getElementById('iaCatalogCount').textContent = ` (${d.count} produkter)`;
+                    document.getElementById('iaRandomInfo').textContent = `Totalt ${d.count} produkter i katalogen`;
+                }
+            }).catch(() => {});
+            // Load suppliers
+            fetch(`${API_BASE}/api/image-analysis/suppliers`).then(r => r.json()).then(d => {
+                iaSupplierList = d.suppliers || [];
+                renderIaSuppliers(iaSupplierList);
+            }).catch(() => {});
+        }
+
+        function setIaSource(mode) {
+            iaSourceMode = mode;
+            document.querySelectorAll('.ia-source-btn[data-source]').forEach(b => {
+                b.classList.toggle('active', b.dataset.source === mode);
+            });
+            document.getElementById('iaSourceRandom').style.display = mode === 'catalog_random' ? '' : 'none';
+            document.getElementById('iaSourceFull').style.display = mode === 'catalog_full' ? '' : 'none';
+            document.getElementById('iaSourceManual').style.display = mode === 'manual_articles' ? '' : 'none';
+            document.getElementById('iaSourceExcel').style.display = mode === 'upload_excel' ? '' : 'none';
+        }
+
+        function setIaManualTab(tab) {
+            iaManualTab = tab;
+            document.getElementById('iaManualTabArticles').classList.toggle('active', tab === 'articles');
+            document.getElementById('iaManualTabSupplier').classList.toggle('active', tab === 'supplier');
+            document.getElementById('iaManualArticlesPanel').style.display = tab === 'articles' ? '' : 'none';
+            document.getElementById('iaManualSupplierPanel').style.display = tab === 'supplier' ? '' : 'none';
+        }
+
+        function renderIaSuppliers(list) {
+            const sel = document.getElementById('iaSupplierSelect');
+            sel.innerHTML = '';
+            if (!list.length) {
+                sel.innerHTML = '<option value="">Ingen produsenter funnet</option>';
+                return;
+            }
+            list.forEach(s => {
+                const opt = document.createElement('option');
+                opt.value = s;
+                opt.textContent = s;
+                sel.appendChild(opt);
+            });
+        }
+
+        function filterIaSuppliers() {
+            const q = document.getElementById('iaSupplierSearch').value.toLowerCase();
+            const filtered = iaSupplierList.filter(s => s.toLowerCase().includes(q));
+            renderIaSuppliers(filtered);
+        }
+
+        function handleIaFileSelect(e) {
+            const file = e.target.files[0];
+            if (!file) return;
+            iaSelectedFile = file;
+            const nameEl = document.getElementById('iaFileName');
+            nameEl.textContent = file.name;
+            nameEl.style.display = '';
+        }
+
+        async function startImageAnalysis() {
+            const btn = document.getElementById('iaStartBtn');
+            btn.disabled = true;
+            btn.textContent = 'Starter...';
+
+            try {
+                let resp;
+                if (iaSourceMode === 'upload_excel') {
+                    if (!iaSelectedFile) { alert('Velg en Excel-fil først'); btn.disabled = false; btn.textContent = 'Start bildeanalyse'; return; }
+                    const form = new FormData();
+                    form.append('file', iaSelectedFile);
+                    resp = await fetch(`${API_BASE}/api/image-analysis/upload-start`, { method: 'POST', body: form });
+                } else {
+                    const body = { source_mode: iaSourceMode };
+                    if (iaSourceMode === 'catalog_random') {
+                        body.sample_size = parseInt(document.getElementById('iaRandomSize').value);
+                    } else if (iaSourceMode === 'manual_articles') {
+                        if (iaManualTab === 'articles') {
+                            const text = document.getElementById('iaManualArticles').value.trim();
+                            if (!text) { alert('Skriv inn artikkelnumre'); btn.disabled = false; btn.textContent = 'Start bildeanalyse'; return; }
+                            body.article_numbers = text.split(/[\s,;\n]+/).filter(Boolean);
+                        } else {
+                            const supplier = document.getElementById('iaSupplierSelect').value;
+                            if (!supplier) { alert('Velg en produsent'); btn.disabled = false; btn.textContent = 'Start bildeanalyse'; return; }
+                            body.source_mode = 'supplier';
+                            body.supplier = supplier;
+                        }
+                    }
+                    resp = await fetch(`${API_BASE}/api/image-analysis/start`, {
+                        method: 'POST',
+                        headers: {'Content-Type': 'application/json'},
+                        body: JSON.stringify(body),
+                    });
+                }
+
+                if (!resp.ok) {
+                    const err = await resp.json().catch(() => ({}));
+                    throw new Error(err.detail || `HTTP ${resp.status}`);
+                }
+
+                const data = await resp.json();
+                iaSessionId = data.session_id;
+
+                // Show progress
+                document.getElementById('iaConfigCard').style.display = 'none';
+                document.getElementById('iaProgressCard').style.display = '';
+                document.getElementById('iaResultsSection').style.display = 'none';
+
+                // Start polling
+                iaPollInterval = setInterval(pollIaStatus, 1500);
+
+            } catch (err) {
+                alert('Feil ved start av bildeanalyse: ' + err.message);
+            } finally {
+                btn.disabled = false;
+                btn.textContent = 'Start bildeanalyse';
+            }
+        }
+
+        async function pollIaStatus() {
+            if (!iaSessionId) return;
+            try {
+                const resp = await fetch(`${API_BASE}/api/image-analysis/status/${iaSessionId}`);
+                if (!resp.ok) return;
+                const data = await resp.json();
+
+                const pct = data.total_products > 0 ? Math.round(data.processed_products / data.total_products * 100) : 0;
+                document.getElementById('iaProgressText').textContent = `${data.processed_products} / ${data.total_products} produkter`;
+                document.getElementById('iaProgressPct').textContent = `${pct}%`;
+                document.getElementById('iaProgressBar').style.width = `${pct}%`;
+                document.getElementById('iaProgressCurrent').textContent = data.current_product ? `Analyserer: ${data.current_product}` : '';
+
+                if (data.status === 'completed' || data.status === 'failed') {
+                    clearInterval(iaPollInterval);
+                    iaPollInterval = null;
+                    if (data.status === 'completed') {
+                        document.getElementById('iaProgressCard').style.display = 'none';
+                        document.getElementById('iaResultsSection').style.display = '';
+                        renderIaSummary(data.summary);
+                        iaCurrentPage = 1;
+                        iaCurrentFilter = 'needs_review';
+                        document.getElementById('iaFilterSelect').value = iaCurrentFilter;
+                        loadIaResults();
+                    } else {
+                        document.getElementById('iaProgressCurrent').textContent = 'Analyse feilet.';
+                    }
+                }
+            } catch (e) {}
+        }
+
+        function renderIaSummary(summary) {
+            const grid = document.getElementById('iaSummaryGrid');
+            const items = [
+                { label: 'Totalt analysert', value: summary.total || 0, color: '#64748b' },
+                { label: 'Mangler bilde', value: summary.missing_images || 0, color: '#dc2626' },
+                { label: 'Lav kvalitet', value: summary.low_quality || 0, color: '#d97706' },
+                { label: 'Trenger gjennomgang', value: summary.needs_review || 0, color: '#7c3aed' },
+                { label: 'God kvalitet', value: summary.good_quality || 0, color: '#16a34a' },
+                { label: 'Gj.snitt score', value: (summary.avg_score || 0).toFixed(1), color: '#2563eb' },
+            ];
+            grid.innerHTML = items.map(i => `
+                <div style="text-align:center;padding:0.75rem;background:#f8fafc;border-radius:8px;border:1px solid var(--border)">
+                    <div style="font-size:1.5rem;font-weight:700;color:${i.color}">${i.value}</div>
+                    <div style="font-size:0.78rem;color:var(--text-muted)">${i.label}</div>
+                </div>
+            `).join('');
+        }
+
+        async function loadIaResults() {
+            if (!iaSessionId) return;
+            try {
+                const filter = document.getElementById('iaFilterSelect').value;
+                iaCurrentFilter = filter;
+                const resp = await fetch(`${API_BASE}/api/image-analysis/results/${iaSessionId}?filter=${filter}&page=${iaCurrentPage}&page_size=30`);
+                if (!resp.ok) return;
+                const data = await resp.json();
+
+                renderIaStatusBar(data.status_counts);
+                renderIaReviewItems(data.items);
+                renderIaPagination(data.page, data.total_pages, data.total);
+                iaSelectedItems.clear();
+                document.getElementById('iaSelectAll').checked = false;
+            } catch (e) {
+                console.error('Failed to load IA results', e);
+            }
+        }
+
+        function renderIaStatusBar(counts) {
+            const bar = document.getElementById('iaStatusBar');
+            bar.innerHTML = `
+                <span style="padding:0.2rem 0.5rem;background:#f1f5f9;border-radius:4px">Totalt: <strong>${counts.total}</strong></span>
+                <span style="padding:0.2rem 0.5rem;background:#f5f3ff;border-radius:4px;color:#7c3aed">Trenger gjennomgang: <strong>${counts.needs_review}</strong></span>
+                <span style="padding:0.2rem 0.5rem;background:#dcfce7;border-radius:4px;color:#166534">Godkjent: <strong>${counts.approved}</strong></span>
+                <span style="padding:0.2rem 0.5rem;background:#fee2e2;border-radius:4px;color:#991b1b">Avslått: <strong>${counts.rejected}</strong></span>
+                <span style="padding:0.2rem 0.5rem;background:#f8fafc;border-radius:4px;color:#64748b">Venter: <strong>${counts.pending}</strong></span>
+            `;
+        }
+
+        function renderIaReviewItems(items) {
+            const container = document.getElementById('iaReviewContainer');
+            if (!items || !items.length) {
+                container.innerHTML = '<div style="text-align:center;padding:2rem;color:var(--text-muted)">Ingen produkter i denne visningen.</div>';
+                return;
+            }
+
+            container.innerHTML = items.map(item => {
+                const artnr = item.article_number;
+                const statusClass = item.review_status;
+                const scoreBadge = getScoreBadge(item.image_score, item.current_image_exists);
+
+                const currentImg = item.current_image_exists && item.current_image_url
+                    ? `<img src="${item.current_image_url}" class="ia-img-thumb" alt="Nåværende bilde" onclick="openLightbox('${item.current_image_url}')" loading="lazy" onerror="this.style.display='none';this.nextElementSibling.style.display='flex'">`
+                      + `<div class="ia-img-placeholder" style="display:none">Bilde ikke tilgjengelig</div>`
+                    : `<div class="ia-img-placeholder">Mangler bilde</div>`;
+
+                const suggestedImg = item.suggested_image_url
+                    ? `<img src="${item.suggested_image_url}" class="ia-img-thumb" alt="Foreslått bilde" onclick="openLightbox('${item.suggested_image_url}')" loading="lazy" onerror="this.style.display='none';this.nextElementSibling.style.display='flex'">`
+                      + `<div class="ia-img-placeholder" style="display:none">Bilde ikke tilgjengelig</div>`
+                    : `<div class="ia-img-placeholder">Ingen forslag</div>`;
+
+                const sourceInfo = item.suggested_source
+                    ? `<div style="font-size:0.72rem;color:var(--text-muted);margin-top:0.2rem">Kilde: ${item.suggested_source}${item.suggested_source_url ? ` <a href="${item.suggested_source_url}" target="_blank" style="color:var(--primary)">↗</a>` : ''}</div>`
+                    : '';
+
+                const statusBadge = `<span class="ia-status-badge ${statusClass}">${
+                    statusClass === 'approved' ? 'Godkjent' : statusClass === 'rejected' ? 'Avslått' : 'Venter'
+                }</span>`;
+
+                return `
+                <div class="ia-review-card status-${statusClass}" data-artnr="${artnr}">
+                    <div>
+                        <input type="checkbox" class="ia-item-cb" data-artnr="${artnr}" onchange="iaToggleItem('${artnr}', this.checked)" ${iaSelectedItems.has(artnr) ? 'checked' : ''}>
+                        <strong style="font-size:0.9rem">${artnr}</strong>
+                        ${item.product_name ? `<div style="font-size:0.82rem;color:var(--text-muted);margin-top:0.15rem;max-width:200px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap" title="${item.product_name}">${item.product_name}</div>` : ''}
+                        ${item.supplier ? `<div style="font-size:0.75rem;color:var(--text-muted)">${item.supplier}</div>` : ''}
+                        <div style="margin-top:0.3rem">${scoreBadge} ${statusBadge}</div>
+                        ${item.suggestion_reason ? `<div style="font-size:0.72rem;color:#92400e;margin-top:0.2rem">${item.suggestion_reason}</div>` : ''}
+                    </div>
+                    <div style="text-align:center">
+                        <div style="font-size:0.72rem;color:var(--text-muted);margin-bottom:0.2rem">Nåværende</div>
+                        ${currentImg}
+                    </div>
+                    <div style="text-align:center">
+                        <div style="font-size:0.72rem;color:var(--text-muted);margin-bottom:0.2rem">Forslag</div>
+                        ${suggestedImg}
+                        ${sourceInfo}
+                    </div>
+                    <div style="font-size:0.78rem;color:var(--text-muted)">
+                        ${item.image_issues && item.image_issues !== 'Ingen problemer' ? `<div style="margin-bottom:0.3rem"><strong>Problemer:</strong> ${item.image_issues}</div>` : ''}
+                        <div>Bilder funnet: ${item.image_count}${item.secondary_images > 0 ? ` (${item.secondary_images} sekundære)` : ''}</div>
+                    </div>
+                    <div style="display:flex;flex-direction:column;gap:0.3rem">
+                        <button class="btn btn-success" style="font-size:0.75rem;padding:0.3rem 0.6rem" onclick="iaReviewSingle('${artnr}','approved')" ${item.review_status === 'approved' ? 'disabled' : ''}>Godkjenn</button>
+                        <button class="btn btn-danger" style="font-size:0.75rem;padding:0.3rem 0.6rem" onclick="iaReviewSingle('${artnr}','rejected')" ${item.review_status === 'rejected' ? 'disabled' : ''}>Avslå</button>
+                    </div>
+                </div>`;
+            }).join('');
+        }
+
+        function getScoreBadge(score, exists) {
+            if (!exists) return '<span class="ia-score-badge missing">Mangler</span>';
+            if (score >= 70) return `<span class="ia-score-badge good">${score}</span>`;
+            if (score >= 40) return `<span class="ia-score-badge warning">${score}</span>`;
+            return `<span class="ia-score-badge bad">${score}</span>`;
+        }
+
+        function renderIaPagination(current, totalPages, totalItems) {
+            const container = document.getElementById('iaPagination');
+            if (totalPages <= 1) { container.innerHTML = ''; return; }
+            let html = '';
+            if (current > 1) html += `<button class="btn btn-outline" style="font-size:0.8rem;padding:0.3rem 0.6rem" onclick="iaGoToPage(${current - 1})">← Forrige</button>`;
+            html += `<span style="font-size:0.82rem;color:var(--text-muted);padding:0.3rem 0.5rem">Side ${current} av ${totalPages} (${totalItems} treff)</span>`;
+            if (current < totalPages) html += `<button class="btn btn-outline" style="font-size:0.8rem;padding:0.3rem 0.6rem" onclick="iaGoToPage(${current + 1})">Neste →</button>`;
+            container.innerHTML = html;
+        }
+
+        function iaGoToPage(page) {
+            iaCurrentPage = page;
+            loadIaResults();
+        }
+
+        function iaApplyFilter() {
+            iaCurrentPage = 1;
+            loadIaResults();
+        }
+
+        function iaToggleItem(artnr, checked) {
+            if (checked) iaSelectedItems.add(artnr); else iaSelectedItems.delete(artnr);
+        }
+
+        function iaToggleSelectAll() {
+            const checked = document.getElementById('iaSelectAll').checked;
+            document.querySelectorAll('.ia-item-cb').forEach(cb => {
+                cb.checked = checked;
+                const artnr = cb.dataset.artnr;
+                if (checked) iaSelectedItems.add(artnr); else iaSelectedItems.delete(artnr);
+            });
+        }
+
+        async function iaReviewSingle(artnr, status) {
+            try {
+                const resp = await fetch(`${API_BASE}/api/image-analysis/${iaSessionId}/review/${artnr}`, {
+                    method: 'PUT',
+                    headers: {'Content-Type': 'application/json'},
+                    body: JSON.stringify({ review_status: status }),
+                });
+                if (!resp.ok) { const e = await resp.json().catch(()=>({})); throw new Error(e.detail || 'Feil'); }
+                loadIaResults();
+            } catch (e) {
+                alert('Feil: ' + e.message);
+            }
+        }
+
+        async function iaBatchApprove() {
+            const articles = [...iaSelectedItems];
+            if (!articles.length) { alert('Velg produkter først'); return; }
+            try {
+                const resp = await fetch(`${API_BASE}/api/image-analysis/${iaSessionId}/bulk-review`, {
+                    method: 'PUT',
+                    headers: {'Content-Type': 'application/json'},
+                    body: JSON.stringify({ article_numbers: articles, review_status: 'approved' }),
+                });
+                if (!resp.ok) { const e = await resp.json().catch(()=>({})); throw new Error(e.detail || 'Feil'); }
+                const data = await resp.json();
+                iaSelectedItems.clear();
+                loadIaResults();
+            } catch (e) {
+                alert('Batchgodkjenning feilet: ' + e.message);
+            }
+        }
+
+        async function iaBatchReject() {
+            const articles = [...iaSelectedItems];
+            if (!articles.length) { alert('Velg produkter først'); return; }
+            try {
+                const resp = await fetch(`${API_BASE}/api/image-analysis/${iaSessionId}/bulk-review`, {
+                    method: 'PUT',
+                    headers: {'Content-Type': 'application/json'},
+                    body: JSON.stringify({ article_numbers: articles, review_status: 'rejected' }),
+                });
+                if (!resp.ok) { const e = await resp.json().catch(()=>({})); throw new Error(e.detail || 'Feil'); }
+                iaSelectedItems.clear();
+                loadIaResults();
+            } catch (e) {
+                alert('Batchavslag feilet: ' + e.message);
+            }
+        }
+
+        async function iaExportZip() {
+            if (!iaSessionId) return;
+            try {
+                const btn = event.target;
+                btn.disabled = true;
+                btn.textContent = 'Eksporterer...';
+                const resp = await fetch(`${API_BASE}/api/image-analysis/${iaSessionId}/export-zip`);
+                if (!resp.ok) {
+                    const err = await resp.json().catch(() => ({}));
+                    throw new Error(err.detail || `HTTP ${resp.status}`);
+                }
+                const blob = await resp.blob();
+                const url = URL.createObjectURL(blob);
+                const a = document.createElement('a');
+                a.href = url;
+                a.download = `godkjente_bilder_${iaSessionId}.zip`;
+                a.click();
+                URL.revokeObjectURL(url);
+                btn.disabled = false;
+                btn.textContent = 'Eksporter godkjente (ZIP)';
+            } catch (e) {
+                alert('Eksportfeil: ' + e.message);
+                event.target.disabled = false;
+                event.target.textContent = 'Eksporter godkjente (ZIP)';
+            }
+        }
+
+        function openLightbox(url) {
+            document.getElementById('iaLightboxImg').src = url;
+            document.getElementById('iaLightbox').classList.add('active');
+        }
+
+        function closeLightbox() {
+            document.getElementById('iaLightbox').classList.remove('active');
+            document.getElementById('iaLightboxImg').src = '';
+        }
+
+        // Close lightbox on Escape key
+        document.addEventListener('keydown', e => {
+            if (e.key === 'Escape') closeLightbox();
+        });
     </script>
 </body>
 </html>
