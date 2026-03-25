@@ -3033,6 +3033,89 @@ async def _run_analysis(
 
 
 # ══════════════════════════════════════════════════════════════════════
+# MODULE: SAVED JOBS (Save / Resume / Password protection)
+# ══════════════════════════════════════════════════════════════════════
+
+from backend.saved_jobs import (
+    save_job as _save_job_svc,
+    update_job as _update_job_svc,
+    unlock_job as _unlock_job_svc,
+    list_saved_jobs as _list_saved_jobs,
+    delete_job as _delete_job_svc,
+    cleanup_expired as _cleanup_expired_jobs,
+)
+
+
+@app.on_event("startup")
+async def cleanup_expired_saved_jobs():
+    """Clean up expired saved jobs on startup."""
+    try:
+        removed = _cleanup_expired_jobs()
+        if removed:
+            logger.info(f"Cleaned up {removed} expired saved jobs on startup")
+    except Exception as e:
+        logger.warning(f"Failed to clean up expired saved jobs: {e}")
+
+
+@app.post("/api/saved-jobs/save")
+async def save_job_endpoint(data: dict = Body(...)):
+    """Save current analysis progress as a resumable job."""
+    job_name = data.get("job_name", "")
+    password = data.get("password", "")
+    module = data.get("module", "kvalitetsanalyse")
+    state_payload = data.get("state_payload", {})
+    job_id = data.get("job_id") or str(uuid.uuid4())[:8]
+
+    try:
+        result = _save_job_svc(job_id, job_name, password, module, state_payload)
+        return {"status": "ok", **result}
+    except ValueError as e:
+        raise HTTPException(400, str(e))
+
+
+@app.put("/api/saved-jobs/{job_id}")
+async def update_saved_job(job_id: str, data: dict = Body(...)):
+    """Update an existing saved job's state."""
+    password = data.get("password", "")
+    state_payload = data.get("state_payload", {})
+    try:
+        result = _update_job_svc(job_id, password, state_payload)
+        return {"status": "ok", **result}
+    except ValueError as e:
+        raise HTTPException(400 if "passord" in str(e).lower() else 404, str(e))
+
+
+@app.post("/api/saved-jobs/{job_id}/unlock")
+async def unlock_saved_job(job_id: str, data: dict = Body(...)):
+    """Unlock a saved job with password and return its state."""
+    password = data.get("password", "")
+    if not password:
+        raise HTTPException(400, "Passord er påkrevd")
+    try:
+        result = _unlock_job_svc(job_id, password)
+        return {"status": "ok", **result}
+    except ValueError as e:
+        raise HTTPException(403 if "passord" in str(e).lower() else 404, str(e))
+
+
+@app.get("/api/saved-jobs")
+async def list_saved_jobs_endpoint():
+    """List all saved jobs (metadata only)."""
+    return {"jobs": _list_saved_jobs()}
+
+
+@app.delete("/api/saved-jobs/{job_id}")
+async def delete_saved_job(job_id: str, data: dict = Body(...)):
+    """Delete a saved job (requires password or admin)."""
+    password = data.get("password", "")
+    try:
+        result = _delete_job_svc(job_id, password)
+        return {"status": "ok", **result}
+    except ValueError as e:
+        raise HTTPException(403 if "passord" in str(e).lower() else 404, str(e))
+
+
+# ══════════════════════════════════════════════════════════════════════
 # MODULE: BILDEANALYSE (Image Analysis)
 # ══════════════════════════════════════════════════════════════════════
 

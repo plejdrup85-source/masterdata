@@ -728,6 +728,52 @@
             .results-table { font-size: 0.75rem; }
             .field-grid { grid-template-columns: 1fr; }
         }
+        /* ── Image Analysis Module ── */
+        .ia-source-btn {
+            padding: 0.4rem 0.8rem; font-size: 0.85rem; border-radius: 6px; cursor: pointer;
+            border: 1px solid var(--border); background: var(--bg); color: var(--text); font-weight: 500; transition: all 0.15s;
+        }
+        .ia-source-btn.active { border-color: #7c3aed; background: #f5f3ff; color: #7c3aed; }
+        .ia-review-card {
+            background: var(--card-bg); border: 1px solid var(--border); border-radius: var(--radius);
+            padding: 1rem; margin-bottom: 0.75rem;
+            display: grid; grid-template-columns: 1fr 150px 150px 1fr auto; gap: 1rem; align-items: center;
+        }
+        .ia-review-card.status-approved { border-left: 4px solid var(--success); }
+        .ia-review-card.status-rejected { border-left: 4px solid var(--danger); }
+        .ia-review-card.status-pending { border-left: 4px solid var(--border); }
+        .ia-img-thumb {
+            width: 120px; height: 120px; object-fit: contain; border: 1px solid var(--border);
+            border-radius: 6px; background: #f8f8f8; cursor: pointer; transition: transform 0.15s;
+        }
+        .ia-img-thumb:hover { transform: scale(1.05); box-shadow: 0 2px 8px rgba(0,0,0,0.15); }
+        .ia-img-placeholder {
+            width: 120px; height: 120px; border: 2px dashed var(--border); border-radius: 6px;
+            display: flex; align-items: center; justify-content: center; color: var(--text-muted); font-size: 0.75rem; text-align: center;
+        }
+        .ia-lightbox {
+            display: none; position: fixed; inset: 0; background: rgba(0,0,0,0.85); z-index: 2000;
+            align-items: center; justify-content: center; cursor: pointer;
+        }
+        .ia-lightbox.active { display: flex; }
+        .ia-lightbox img { max-width: 90vw; max-height: 90vh; object-fit: contain; border-radius: 8px; }
+        .ia-toolbar {
+            display: flex; gap: 0.5rem; align-items: center; flex-wrap: wrap; margin-bottom: 1rem;
+            padding: 0.75rem; background: #f8fafc; border-radius: 8px; border: 1px solid var(--border);
+        }
+        .ia-status-badge { display: inline-block; padding: 0.2rem 0.5rem; border-radius: 4px; font-size: 0.75rem; font-weight: 600; }
+        .ia-status-badge.approved { background: #dcfce7; color: #166534; }
+        .ia-status-badge.rejected { background: #fee2e2; color: #991b1b; }
+        .ia-status-badge.pending { background: #f1f5f9; color: #475569; }
+        .ia-score-badge { display: inline-block; padding: 0.15rem 0.4rem; border-radius: 4px; font-size: 0.75rem; font-weight: 600; }
+        .ia-score-badge.good { background: #dcfce7; color: #166534; }
+        .ia-score-badge.warning { background: #fef3c7; color: #92400e; }
+        .ia-score-badge.bad { background: #fee2e2; color: #991b1b; }
+        .ia-score-badge.missing { background: #f1f5f9; color: #64748b; }
+        .ia-select-all-cb { cursor: pointer; width: 16px; height: 16px; }
+        .ia-item-cb { cursor: pointer; width: 14px; height: 14px; margin-right: 0.3rem; }
+        @media (max-width: 900px) { .ia-review-card { grid-template-columns: 1fr; gap: 0.5rem; } }
+
         /* ── Theme toggle ── */
         .theme-toggle {
             position: fixed; top: 1rem; right: 1rem; z-index: 999;
@@ -1005,6 +1051,7 @@
                     <button class="btn btn-primary" id="newAnalysisBtn">Ny analyse</button>
                     <button class="btn" id="reviewSuggestionsBtn" style="background:#7c3aed;color:#fff;font-size:0.85rem">Vurder berikelsesforslag</button>
                     <button class="btn" id="handoffToFamilyBtn" style="background:#7c3aed;color:#fff;font-size:0.85rem" onclick="handoffToRelationshipModule()">Analyser produktfamilier for disse artiklene</button>
+                    <button class="btn" style="background:#d97706;color:#fff;font-size:0.85rem" onclick="saveCurrentAnalysis()">Lagre jobb</button>
                 </div>
             </div>
 
@@ -1385,6 +1432,7 @@
                 <button class="btn btn-success" style="font-size:0.8rem;padding:0.35rem 0.7rem" onclick="iaBatchApprove()">Godkjenn valgte</button>
                 <button class="btn btn-danger" style="font-size:0.8rem;padding:0.35rem 0.7rem" onclick="iaBatchReject()">Avslå valgte</button>
                 <button class="btn" style="background:#7c3aed;color:#fff;font-size:0.8rem;padding:0.35rem 0.7rem" onclick="iaExportZip()">Eksporter godkjente (ZIP)</button>
+                <button class="btn" style="background:#d97706;color:#fff;font-size:0.8rem;padding:0.35rem 0.7rem" onclick="saveCurrentImageAnalysis()">Lagre jobb</button>
             </div>
 
             <!-- Status counts bar -->
@@ -1470,48 +1518,32 @@
         </div>
     </div>
 
-    <!-- Lock Job Modal -->
-    <div id="lockModal" style="display:none;position:fixed;inset:0;background:rgba(0,0,0,0.4);z-index:1000;align-items:center;justify-content:center">
-        <div style="background:#fff;border-radius:12px;padding:1.5rem;max-width:400px;width:90%;box-shadow:0 8px 32px rgba(0,0,0,0.2)">
-            <h3 style="margin:0 0 0.75rem;font-size:1rem" id="lockModalTitle">L&aring;s jobb</h3>
-            <p style="font-size:0.85rem;color:var(--text-muted);margin:0 0 1rem">Sett et passord for &aring; beskytte denne jobben.</p>
-            <input type="password" id="lockPasswordInput" placeholder="Passord (minst 4 tegn)" style="width:100%;padding:0.5rem;border:1px solid var(--border);border-radius:6px;font-size:0.9rem;margin-bottom:0.75rem">
+    <!-- Save Job Modal -->
+    <div id="saveJobModal" style="display:none;position:fixed;inset:0;background:rgba(0,0,0,0.4);z-index:1000;align-items:center;justify-content:center">
+        <div style="background:var(--card-bg);border-radius:12px;padding:1.5rem;max-width:400px;width:90%;box-shadow:0 8px 32px rgba(0,0,0,0.2)">
+            <h3 style="margin:0 0 0.75rem;font-size:1rem;color:var(--heading-color)">Lagre jobb</h3>
+            <p style="font-size:0.85rem;color:var(--text-muted);margin:0 0 1rem">Gi jobben et navn og passord slik at du kan gjenoppta den senere.</p>
+            <input type="text" id="saveJobName" placeholder="Jobbnavn (f.eks. Bildekontroll mars)" style="width:100%;padding:0.5rem;border:1px solid var(--border);border-radius:6px;font-size:0.9rem;margin-bottom:0.5rem">
+            <input type="password" id="saveJobPassword" placeholder="Passord (minst 4 tegn)" style="width:100%;padding:0.5rem;border:1px solid var(--border);border-radius:6px;font-size:0.9rem;margin-bottom:0.5rem">
+            <input type="password" id="saveJobPasswordConfirm" placeholder="Bekreft passord" style="width:100%;padding:0.5rem;border:1px solid var(--border);border-radius:6px;font-size:0.9rem;margin-bottom:0.75rem">
+            <div id="saveJobError" style="display:none;font-size:0.82rem;color:var(--danger);margin-bottom:0.5rem"></div>
             <div style="display:flex;gap:0.5rem;justify-content:flex-end">
-                <button class="btn" style="background:#e2e8f0;color:#475569;font-size:0.85rem;padding:0.4rem 1rem" onclick="closeLockModal()">Avbryt</button>
-                <button class="btn btn-primary" style="font-size:0.85rem;padding:0.4rem 1rem" onclick="doLockJob()">L&aring;s</button>
+                <button class="btn" style="background:#e2e8f0;color:#475569;font-size:0.85rem;padding:0.4rem 1rem" onclick="closeSaveJobModal()">Avbryt</button>
+                <button class="btn btn-primary" style="font-size:0.85rem;padding:0.4rem 1rem" id="saveJobBtn" onclick="doSaveJob()">Lagre</button>
             </div>
         </div>
     </div>
 
     <!-- Unlock Job Modal -->
-    <div id="unlockModal" style="display:none;position:fixed;inset:0;background:rgba(0,0,0,0.4);z-index:1000;align-items:center;justify-content:center">
-        <div style="background:#fff;border-radius:12px;padding:1.5rem;max-width:400px;width:90%;box-shadow:0 8px 32px rgba(0,0,0,0.2)">
-            <h3 style="margin:0 0 0.75rem;font-size:1rem">L&aring;s opp jobb</h3>
-            <p style="font-size:0.85rem;color:var(--text-muted);margin:0 0 1rem">Skriv inn passord for &aring; l&aring;se opp jobben.</p>
-            <input type="password" id="unlockPasswordInput" placeholder="Passord" style="width:100%;padding:0.5rem;border:1px solid var(--border);border-radius:6px;font-size:0.9rem;margin-bottom:0.75rem">
+    <div id="unlockJobModal" style="display:none;position:fixed;inset:0;background:rgba(0,0,0,0.4);z-index:1000;align-items:center;justify-content:center">
+        <div style="background:var(--card-bg);border-radius:12px;padding:1.5rem;max-width:400px;width:90%;box-shadow:0 8px 32px rgba(0,0,0,0.2)">
+            <h3 style="margin:0 0 0.75rem;font-size:1rem;color:var(--heading-color)">Gjenoppta lagret jobb</h3>
+            <p style="font-size:0.85rem;color:var(--text-muted);margin:0 0 0.5rem" id="unlockJobName"></p>
+            <input type="password" id="unlockJobPassword" placeholder="Passord" style="width:100%;padding:0.5rem;border:1px solid var(--border);border-radius:6px;font-size:0.9rem;margin-bottom:0.75rem" onkeydown="if(event.key==='Enter')doUnlockJob()">
+            <div id="unlockJobError" style="display:none;font-size:0.82rem;color:var(--danger);margin-bottom:0.5rem"></div>
             <div style="display:flex;gap:0.5rem;justify-content:flex-end">
-                <button class="btn" style="background:#e2e8f0;color:#475569;font-size:0.85rem;padding:0.4rem 1rem" onclick="closeUnlockModal()">Avbryt</button>
-                <button class="btn btn-primary" style="font-size:0.85rem;padding:0.4rem 1rem" onclick="doUnlockJob()">L&aring;s opp</button>
-            </div>
-        </div>
-    </div>
-
-    <!-- Manual Product Search Modal -->
-    <div id="manualSearchModal" style="display:none;position:fixed;inset:0;background:rgba(0,0,0,0.4);z-index:1000;align-items:center;justify-content:center">
-        <div style="background:#fff;border-radius:12px;padding:1.5rem;max-width:700px;width:95%;box-shadow:0 8px 32px rgba(0,0,0,0.2);max-height:80vh;overflow-y:auto">
-            <h3 style="margin:0 0 0.75rem;font-size:1rem">S&oslash;k i katalog &mdash; manuelt produktvalg</h3>
-            <p style="font-size:0.82rem;color:var(--text-muted);margin:0 0 0.75rem">Rad: <span id="manualSearchRow"></span></p>
-            <div style="display:flex;gap:0.5rem;margin-bottom:0.75rem">
-                <input type="text" id="manualSearchInput" placeholder="S&oslash;k p&aring; produktnavn, spesifikasjon eller artikkelnr..." style="flex:1;padding:0.5rem;border:1px solid var(--border);border-radius:6px;font-size:0.9rem" onkeydown="if(event.key==='Enter')doManualSearch()">
-                <button class="btn btn-primary" style="font-size:0.85rem;padding:0.4rem 0.8rem" onclick="doManualSearch()">S&oslash;k</button>
-            </div>
-            <div style="display:flex;gap:0.5rem;margin-bottom:0.75rem">
-                <input type="text" id="manualArtnrInput" placeholder="Eller skriv inn artikkelnummer direkte..." style="flex:1;padding:0.5rem;border:1px solid var(--border);border-radius:6px;font-size:0.9rem;font-family:monospace" onkeydown="if(event.key==='Enter')doManualArtnrSelect()">
-                <button class="btn" style="font-size:0.85rem;padding:0.4rem 0.8rem;background:#dcfce7;color:#166534;border:1px solid #bbf7d0" onclick="doManualArtnrSelect()">Velg art.nr</button>
-            </div>
-            <div id="manualSearchResults" style="font-size:0.82rem;color:var(--text-muted)"></div>
-            <div style="display:flex;gap:0.5rem;justify-content:flex-end;margin-top:0.75rem">
-                <button class="btn" style="background:#e2e8f0;color:#475569;font-size:0.85rem;padding:0.4rem 1rem" onclick="closeManualSearchModal()">Lukk</button>
+                <button class="btn" style="background:#e2e8f0;color:#475569;font-size:0.85rem;padding:0.4rem 1rem" onclick="closeUnlockJobModal()">Avbryt</button>
+                <button class="btn btn-primary" style="font-size:0.85rem;padding:0.4rem 1rem" onclick="doUnlockJob()">&#x1f513; L&aring;s opp</button>
             </div>
         </div>
     </div>
@@ -3476,54 +3508,75 @@
         async function loadHistory() {
             const container = document.getElementById('historyList');
             try {
-                const resp = await fetch(`${API_BASE}/api/history`);
-                if (!resp.ok) throw new Error(`HTTP ${resp.status}`);
-                const data = await resp.json();
+                // Load both regular history and saved jobs in parallel
+                const [histResp, savedResp] = await Promise.all([
+                    fetch(`${API_BASE}/api/history`),
+                    fetch(`${API_BASE}/api/saved-jobs`).catch(() => null),
+                ]);
+                if (!histResp.ok) throw new Error(`HTTP ${histResp.status}`);
+                const data = await histResp.json();
+                const savedData = savedResp && savedResp.ok ? await savedResp.json() : {jobs: []};
                 historyLoaded = true;
 
-                if (!data.entries || data.entries.length === 0) {
-                    container.innerHTML = '<p style="color:var(--text-muted)">Ingen tidligere analyser funnet.</p>';
-                    return;
+                let html = '';
+
+                // Saved jobs section
+                const savedJobs = savedData.jobs || [];
+                if (savedJobs.length > 0) {
+                    html += '<div style="margin-bottom:1.5rem"><h3 style="font-size:1rem;margin-bottom:0.5rem;color:var(--heading-color)">Lagrede jobber</h3>';
+                    html += '<table style="width:100%;border-collapse:collapse;font-size:0.85rem">';
+                    html += '<thead><tr style="border-bottom:2px solid var(--border);text-align:left">';
+                    html += '<th style="padding:0.5rem">Navn</th><th style="padding:0.5rem">Modul</th>';
+                    html += '<th style="padding:0.5rem">Opprettet</th><th style="padding:0.5rem">Sist endret</th>';
+                    html += '<th style="padding:0.5rem"></th></tr></thead><tbody>';
+                    for (const sj of savedJobs) {
+                        const created = new Date(sj.created_at * 1000).toLocaleDateString('nb-NO', {day:'2-digit',month:'2-digit',year:'numeric'});
+                        const updated = new Date(sj.updated_at * 1000).toLocaleDateString('nb-NO', {day:'2-digit',month:'2-digit',year:'numeric'});
+                        const moduleLabel = {kvalitetsanalyse:'Kvalitetsanalyse',bildeanalyse:'Bildeanalyse'}[sj.module] || sj.module;
+                        html += `<tr style="border-bottom:1px solid var(--border)">`;
+                        html += `<td style="padding:0.5rem;font-weight:600">${sj.job_name}</td>`;
+                        html += `<td style="padding:0.5rem">${moduleLabel}</td>`;
+                        html += `<td style="padding:0.5rem">${created}</td>`;
+                        html += `<td style="padding:0.5rem">${updated}</td>`;
+                        html += `<td style="padding:0.5rem;text-align:right">`;
+                        html += `<button class="btn btn-primary" style="font-size:0.75rem;padding:0.25rem 0.6rem" onclick="openSavedJob('${sj.job_id}','${sj.job_name.replace(/'/g,"\\'")}')">Gjenoppta</button>`;
+                        html += `</td></tr>`;
+                    }
+                    html += '</tbody></table></div>';
                 }
 
-                const modeLabels = {
-                    full_enrichment: 'Full berikelse',
-                    audit_only: 'Kvalitetsrevisjon',
-                    focused_scan: 'Fokusert sjekk',
-                };
-
-                let html = '<table style="width:100%;border-collapse:collapse;font-size:0.85rem">';
-                html += '<thead><tr style="border-bottom:2px solid var(--border);text-align:left">';
-                html += '<th style="padding:0.5rem">Dato</th>';
-                html += '<th style="padding:0.5rem">Kildefil</th>';
-                html += '<th style="padding:0.5rem">Modus</th>';
-                html += '<th style="padding:0.5rem;text-align:center">Produkter</th>';
-                html += '<th style="padding:0.5rem;text-align:center">Snitt</th>';
-                html += '<th style="padding:0.5rem;text-align:center">Kritisk</th>';
-                html += '<th style="padding:0.5rem"></th>';
-                html += '</tr></thead><tbody>';
-
-                for (const e of data.entries) {
-                    const d = new Date(e.timestamp);
-                    const dateStr = d.toLocaleDateString('nb-NO', {day:'2-digit',month:'2-digit',year:'numeric'})
-                        + ' ' + d.toLocaleTimeString('nb-NO', {hour:'2-digit',minute:'2-digit'});
-                    const mode = modeLabels[e.analysis_mode] || e.analysis_mode;
-                    const src = e.source_filename || '-';
-                    const scoreColor = e.avg_score < 40 ? '#dc2626' : e.avg_score < 70 ? '#d97706' : '#16a34a';
-
-                    html += `<tr style="border-bottom:1px solid var(--border)">`;
-                    html += `<td style="padding:0.5rem;white-space:nowrap">${dateStr}</td>`;
-                    html += `<td style="padding:0.5rem;max-width:200px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap" title="${src}">${src}</td>`;
-                    html += `<td style="padding:0.5rem">${mode}</td>`;
-                    html += `<td style="padding:0.5rem;text-align:center">${e.product_count}</td>`;
-                    html += `<td style="padding:0.5rem;text-align:center;font-weight:600;color:${scoreColor}">${e.avg_score}</td>`;
-                    html += `<td style="padding:0.5rem;text-align:center">${e.critical_count > 0 ? '<span style="color:#dc2626;font-weight:600">' + e.critical_count + '</span>' : '0'}</td>`;
-                    html += `<td style="padding:0.5rem;text-align:right">`;
-                    html += `<button class="btn btn-primary" style="font-size:0.75rem;padding:0.25rem 0.6rem" onclick="downloadHistoryFile('${e.job_id}')">Last ned</button>`;
-                    html += `<button class="btn" style="font-size:0.75rem;padding:0.25rem 0.5rem;margin-left:0.3rem;background:#fee2e2;color:#dc2626;border:none;cursor:pointer" onclick="deleteHistoryEntry('${e.job_id}')">Slett</button>`;
-                    html += `</td></tr>`;
+                // Regular history section
+                const modeLabels = {full_enrichment:'Full berikelse',audit_only:'Kvalitetsrevisjon',focused_scan:'Fokusert sjekk'};
+                if (data.entries && data.entries.length > 0) {
+                    html += '<h3 style="font-size:1rem;margin-bottom:0.5rem;color:var(--heading-color)">Analysehistorikk</h3>';
+                    html += '<table style="width:100%;border-collapse:collapse;font-size:0.85rem">';
+                    html += '<thead><tr style="border-bottom:2px solid var(--border);text-align:left">';
+                    html += '<th style="padding:0.5rem">Dato</th><th style="padding:0.5rem">Kildefil</th>';
+                    html += '<th style="padding:0.5rem">Modus</th><th style="padding:0.5rem;text-align:center">Produkter</th>';
+                    html += '<th style="padding:0.5rem;text-align:center">Snitt</th><th style="padding:0.5rem;text-align:center">Kritisk</th>';
+                    html += '<th style="padding:0.5rem"></th></tr></thead><tbody>';
+                    for (const e of data.entries) {
+                        const d = new Date(e.timestamp);
+                        const dateStr = d.toLocaleDateString('nb-NO', {day:'2-digit',month:'2-digit',year:'numeric'})
+                            + ' ' + d.toLocaleTimeString('nb-NO', {hour:'2-digit',minute:'2-digit'});
+                        const mode = modeLabels[e.analysis_mode] || e.analysis_mode;
+                        const src = e.source_filename || '-';
+                        const scoreColor = e.avg_score < 40 ? '#dc2626' : e.avg_score < 70 ? '#d97706' : '#16a34a';
+                        html += `<tr style="border-bottom:1px solid var(--border)">`;
+                        html += `<td style="padding:0.5rem;white-space:nowrap">${dateStr}</td>`;
+                        html += `<td style="padding:0.5rem;max-width:200px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap" title="${src}">${src}</td>`;
+                        html += `<td style="padding:0.5rem">${mode}</td>`;
+                        html += `<td style="padding:0.5rem;text-align:center">${e.product_count}</td>`;
+                        html += `<td style="padding:0.5rem;text-align:center;font-weight:600;color:${scoreColor}">${e.avg_score}</td>`;
+                        html += `<td style="padding:0.5rem;text-align:center">${e.critical_count > 0 ? '<span style="color:#dc2626;font-weight:600">'+e.critical_count+'</span>' : '0'}</td>`;
+                        html += `<td style="padding:0.5rem;text-align:right">`;
+                        html += `<button class="btn btn-primary" style="font-size:0.75rem;padding:0.25rem 0.6rem" onclick="downloadHistoryFile('${e.job_id}')">Last ned</button>`;
+                        html += ` <button class="btn" style="font-size:0.75rem;padding:0.25rem 0.5rem;background:#fee2e2;color:#dc2626;border:none;cursor:pointer" onclick="deleteHistoryEntry('${e.job_id}')">Slett</button>`;
+                        html += `</td></tr>`;
+                    }
+                    html += '</tbody></table>';
                 }
-                html += '</tbody></table>';
+                if (!html) html = '<p style="color:var(--text-muted)">Ingen historikk eller lagrede jobber funnet.</p>';
                 container.innerHTML = html;
             } catch (err) {
                 container.innerHTML = `<p style="color:#dc2626">Kunne ikke laste historikk: ${err.message}</p>`;
@@ -3543,6 +3596,123 @@
             } catch (err) {
                 alert('Kunne ikke slette: ' + err.message);
             }
+        }
+
+        // ══════════════════════════════════════════════════════════════
+        // SAVED JOBS — Save / Resume / Unlock
+        // ══════════════════════════════════════════════════════════════
+
+        let _saveJobContext = null;  // {job_id, module, state_payload}
+        let _unlockJobId = null;
+
+        function openSaveJobModal(module, statePayload, jobId) {
+            _saveJobContext = { job_id: jobId || '', module: module, state_payload: statePayload };
+            document.getElementById('saveJobName').value = '';
+            document.getElementById('saveJobPassword').value = '';
+            document.getElementById('saveJobPasswordConfirm').value = '';
+            document.getElementById('saveJobError').style.display = 'none';
+            document.getElementById('saveJobModal').style.display = 'flex';
+        }
+
+        function closeSaveJobModal() {
+            document.getElementById('saveJobModal').style.display = 'none';
+            _saveJobContext = null;
+        }
+
+        async function doSaveJob() {
+            const name = document.getElementById('saveJobName').value.trim();
+            const pw = document.getElementById('saveJobPassword').value;
+            const pw2 = document.getElementById('saveJobPasswordConfirm').value;
+            const errEl = document.getElementById('saveJobError');
+
+            if (!name) { errEl.textContent = 'Jobbnavn er påkrevd'; errEl.style.display = ''; return; }
+            if (pw.length < 4) { errEl.textContent = 'Passord må være minst 4 tegn'; errEl.style.display = ''; return; }
+            if (pw !== pw2) { errEl.textContent = 'Passordene stemmer ikke overens'; errEl.style.display = ''; return; }
+
+            const btn = document.getElementById('saveJobBtn');
+            btn.disabled = true; btn.textContent = 'Lagrer...';
+            try {
+                const resp = await fetch(`${API_BASE}/api/saved-jobs/save`, {
+                    method: 'POST', headers: {'Content-Type': 'application/json'},
+                    body: JSON.stringify({
+                        job_id: _saveJobContext.job_id || undefined,
+                        job_name: name, password: pw,
+                        module: _saveJobContext.module,
+                        state_payload: _saveJobContext.state_payload,
+                    }),
+                });
+                if (!resp.ok) { const e = await resp.json().catch(()=>({})); throw new Error(e.detail || 'Lagring feilet'); }
+                closeSaveJobModal();
+                alert('Jobb lagret! Du finner den under Historikk.');
+            } catch (e) {
+                errEl.textContent = e.message; errEl.style.display = '';
+            } finally {
+                btn.disabled = false; btn.textContent = 'Lagre';
+            }
+        }
+
+        function openSavedJob(jobId, jobName) {
+            _unlockJobId = jobId;
+            document.getElementById('unlockJobName').textContent = jobName || jobId;
+            document.getElementById('unlockJobPassword').value = '';
+            document.getElementById('unlockJobError').style.display = 'none';
+            document.getElementById('unlockJobModal').style.display = 'flex';
+        }
+
+        function closeUnlockJobModal() {
+            document.getElementById('unlockJobModal').style.display = 'none';
+            _unlockJobId = null;
+        }
+
+        async function doUnlockJob() {
+            const pw = document.getElementById('unlockJobPassword').value;
+            const errEl = document.getElementById('unlockJobError');
+            if (!pw) { errEl.textContent = 'Skriv inn passord'; errEl.style.display = ''; return; }
+
+            try {
+                const resp = await fetch(`${API_BASE}/api/saved-jobs/${_unlockJobId}/unlock`, {
+                    method: 'POST', headers: {'Content-Type': 'application/json'},
+                    body: JSON.stringify({password: pw}),
+                });
+                if (!resp.ok) {
+                    const e = await resp.json().catch(()=>({}));
+                    throw new Error(e.detail || 'Kunne ikke låse opp');
+                }
+                const data = await resp.json();
+                closeUnlockJobModal();
+
+                // Restore state based on module
+                if (data.module === 'bildeanalyse' && data.state_payload && data.state_payload.session_id) {
+                    switchModule('imageanalysis');
+                    iaSessionId = data.state_payload.session_id;
+                    document.getElementById('iaConfigCard').style.display = 'none';
+                    document.getElementById('iaProgressCard').style.display = 'none';
+                    document.getElementById('iaResultsSection').style.display = '';
+                    if (data.state_payload.summary) renderIaSummary(data.state_payload.summary);
+                    loadIaResults();
+                    if (data.unlocked_by_admin) alert('Jobb gjenåpnet med admin-passord.');
+                } else if (data.module === 'kvalitetsanalyse' && data.state_payload && data.state_payload.job_id) {
+                    switchModule('masterdata');
+                    currentJobId = data.state_payload.job_id;
+                    await loadResults();
+                    if (data.unlocked_by_admin) alert('Jobb gjenåpnet med admin-passord.');
+                } else {
+                    alert('Jobb gjenåpnet, men kunne ikke gjenopprette tilstand automatisk.');
+                }
+            } catch (e) {
+                errEl.textContent = e.message; errEl.style.display = '';
+            }
+        }
+
+        function saveCurrentAnalysis() {
+            if (!currentJobId) { alert('Ingen aktiv analyse å lagre.'); return; }
+            openSaveJobModal('kvalitetsanalyse', {job_id: currentJobId}, 'qa-' + currentJobId);
+        }
+
+        function saveCurrentImageAnalysis() {
+            if (!iaSessionId) { alert('Ingen aktiv bildeanalyse å lagre.'); return; }
+            // Capture current summary from the UI
+            openSaveJobModal('bildeanalyse', {session_id: iaSessionId}, 'ia-' + iaSessionId);
         }
 
         // ══════════════════════════════════════════════════════════════
@@ -3954,6 +4124,7 @@
         // Close lightbox on Escape key
         document.addEventListener('keydown', e => {
             if (e.key === 'Escape') closeLightbox();
+        });
 
 
         // ═══════════════════════════════════════════════════════
