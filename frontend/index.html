@@ -1433,6 +1433,9 @@
                 <button class="btn btn-danger" style="font-size:0.8rem;padding:0.35rem 0.7rem" onclick="iaBatchReject()">Avslå valgte</button>
                 <button class="btn" style="background:#7c3aed;color:#fff;font-size:0.8rem;padding:0.35rem 0.7rem" onclick="iaExportZip()">Eksporter godkjente (ZIP)</button>
                 <button class="btn" style="background:#d97706;color:#fff;font-size:0.8rem;padding:0.35rem 0.7rem" onclick="saveCurrentImageAnalysis()">Lagre jobb</button>
+                <label style="font-size:0.75rem;display:flex;align-items:center;gap:0.25rem;color:var(--text-muted);cursor:pointer;margin-left:0.5rem">
+                    <input type="checkbox" id="iaShowLowScores" onchange="loadIaResults()" style="cursor:pointer"> Vis lave scorer
+                </label>
             </div>
 
             <!-- Status counts bar -->
@@ -3941,11 +3944,17 @@
                 return;
             }
 
+            const showLow = document.getElementById('iaShowLowScores')?.checked || false;
+            const MIN_CONFIDENCE = 0.30;
+
             container.innerHTML = items.map(item => {
                 const artnr = item.article_number;
                 const statusClass = item.review_status;
                 const scoreBadge = getScoreBadge(item.image_score, item.current_image_exists);
-                const candidates = item.candidates || [];
+                const allCandidates = item.candidates || [];
+                // Filter out low-confidence candidates unless debug toggle is on
+                const candidates = showLow ? allCandidates : allCandidates.filter(c => c.confidence >= MIN_CONFIDENCE);
+                const filteredCount = allCandidates.length - candidates.length;
                 const selectedIdx = item.selected_candidate_index != null ? item.selected_candidate_index : 0;
 
                 const currentImg = item.current_image_exists && item.current_image_url
@@ -3953,17 +3962,19 @@
                       + `<div class="ia-img-placeholder" style="display:none">Ikke tilgjengelig</div>`
                     : `<div class="ia-img-placeholder">Mangler bilde</div>`;
 
-                // Render candidate images (multiple)
+                // Render candidate images
                 let candidatesHtml = '';
                 if (candidates.length > 0) {
                     candidatesHtml = candidates.map((c, idx) => {
-                        const isSelected = idx === selectedIdx;
+                        // Find original index in allCandidates for backend reference
+                        const origIdx = allCandidates.indexOf(c);
+                        const isSelected = origIdx === selectedIdx;
                         const trustBadge = c.is_manufacturer
                             ? '<span style="background:#dcfce7;color:#166534;padding:0.1rem 0.3rem;border-radius:3px;font-size:0.65rem;font-weight:600">PRODUSENT</span>'
                             : '';
                         const confColor = c.confidence >= 0.7 ? '#16a34a' : c.confidence >= 0.4 ? '#d97706' : '#64748b';
                         const border = isSelected ? '3px solid var(--primary)' : '1px solid var(--border)';
-                        return `<div style="display:inline-block;text-align:center;margin:0.2rem;vertical-align:top;cursor:pointer;border:${border};border-radius:8px;padding:0.3rem;background:var(--card-bg)" onclick="iaSelectCandidate('${artnr}',${idx})">
+                        return `<div style="display:inline-block;text-align:center;margin:0.2rem;vertical-align:top;cursor:pointer;border:${border};border-radius:8px;padding:0.3rem;background:var(--card-bg)" onclick="iaSelectCandidate('${artnr}',${origIdx})">
                             <img src="${c.image_url}" style="width:100px;height:100px;object-fit:contain;border-radius:4px;display:block" loading="lazy" onclick="event.stopPropagation();openLightbox('${c.image_url}')" onerror="this.src='';this.alt='Feil'">
                             <div style="font-size:0.65rem;color:var(--text-muted);margin-top:0.2rem;max-width:100px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap" title="${c.source_domain}">${c.source_domain}</div>
                             <div style="font-size:0.6rem;margin-top:0.1rem">${trustBadge} <span style="color:${confColor};font-weight:600">${Math.round(c.confidence*100)}%</span></div>
@@ -3974,14 +3985,30 @@
                     candidatesHtml = '<div class="ia-img-placeholder" style="width:100px;height:100px">Ingen forslag funnet</div>';
                 }
 
+                const filteredNote = filteredCount > 0
+                    ? `<div style="font-size:0.6rem;color:var(--text-muted);margin-top:0.2rem">${filteredCount} lavscorende skjult</div>`
+                    : '';
+
                 const statusBadge = `<span class="ia-status-badge ${statusClass}">${
                     statusClass === 'approved' ? 'Godkjent' : statusClass === 'rejected' ? 'Avslått' : 'Venter'
                 }</span>`;
 
+                // Manual URL input
+                const manualUrlId = `ia-manual-url-${artnr}`;
+                const manualPreviewId = `ia-manual-preview-${artnr}`;
+                const manualSection = `
+                    <div style="margin-top:0.5rem;padding:0.5rem;background:var(--hover-bg);border-radius:6px;border:1px solid var(--border)">
+                        <div style="font-size:0.7rem;color:var(--text-muted);margin-bottom:0.3rem;font-weight:600">Legg inn bilde-URL manuelt</div>
+                        <div style="display:flex;gap:0.3rem;align-items:center">
+                            <input type="text" id="${manualUrlId}" placeholder="https://..." style="flex:1;padding:0.3rem 0.5rem;border:1px solid var(--border);border-radius:4px;font-size:0.8rem;font-family:monospace" oninput="iaPreviewManualUrl('${artnr}')">
+                            <button class="btn btn-primary" style="font-size:0.72rem;padding:0.3rem 0.5rem;white-space:nowrap" onclick="iaUseManualUrl('${artnr}')">Bruk URL</button>
+                        </div>
+                        <div id="${manualPreviewId}" style="margin-top:0.3rem"></div>
+                    </div>`;
+
                 return `
                 <div style="background:var(--card-bg);border:1px solid var(--border);border-radius:var(--radius);padding:1rem;margin-bottom:0.75rem;border-left:4px solid ${statusClass==='approved'?'var(--success)':statusClass==='rejected'?'var(--danger)':'var(--border)'}" data-artnr="${artnr}">
                     <div style="display:flex;align-items:flex-start;gap:1rem;flex-wrap:wrap">
-                        <!-- Product info -->
                         <div style="min-width:180px;flex:0 0 auto">
                             <div style="display:flex;align-items:center;gap:0.3rem">
                                 <input type="checkbox" class="ia-item-cb" data-artnr="${artnr}" onchange="iaToggleItem('${artnr}', this.checked)" ${iaSelectedItems.has(artnr) ? 'checked' : ''}>
@@ -3992,19 +4019,17 @@
                             ${item.supplier_item_no ? `<div style="font-size:0.75rem;color:var(--text-muted)">Prod. art.nr: <strong style="font-family:monospace">${item.supplier_item_no}</strong></div>` : ''}
                             <div style="margin-top:0.3rem">${scoreBadge} ${statusBadge}</div>
                             ${item.suggestion_reason ? `<div style="font-size:0.72rem;color:var(--warning);margin-top:0.2rem">${item.suggestion_reason}</div>` : ''}
-                            ${item.image_issues && item.image_issues !== 'Ingen problemer' ? `<div style="font-size:0.7rem;color:var(--text-muted);margin-top:0.15rem">${item.image_issues}</div>` : ''}
                         </div>
-                        <!-- Current image -->
                         <div style="text-align:center;flex:0 0 auto">
                             <div style="font-size:0.72rem;color:var(--text-muted);margin-bottom:0.2rem;font-weight:600">Nåværende bilde</div>
                             ${currentImg}
                         </div>
-                        <!-- Candidates -->
                         <div style="flex:1;min-width:200px">
-                            <div style="font-size:0.72rem;color:var(--text-muted);margin-bottom:0.2rem;font-weight:600">Foreslåtte bilder (${candidates.length} funnet) ${candidates.length > 0 ? '— klikk for å velge' : ''}</div>
+                            <div style="font-size:0.72rem;color:var(--text-muted);margin-bottom:0.2rem;font-weight:600">Foreslåtte bilder (${candidates.length}) ${candidates.length > 0 ? '— klikk for å velge' : ''}</div>
                             <div style="display:flex;flex-wrap:wrap;gap:0.2rem">${candidatesHtml}</div>
+                            ${filteredNote}
+                            ${manualSection}
                         </div>
-                        <!-- Actions -->
                         <div style="display:flex;flex-direction:column;gap:0.3rem;flex:0 0 auto">
                             <button class="btn btn-success" style="font-size:0.75rem;padding:0.3rem 0.6rem" onclick="iaReviewSingle('${artnr}','approved',${selectedIdx})" ${item.review_status === 'approved' ? 'disabled' : ''}>Godkjenn</button>
                             <button class="btn btn-danger" style="font-size:0.75rem;padding:0.3rem 0.6rem" onclick="iaReviewSingle('${artnr}','rejected')" ${item.review_status === 'rejected' ? 'disabled' : ''}>Avslå</button>
@@ -4015,16 +4040,42 @@
         }
 
         function iaSelectCandidate(artnr, candidateIdx) {
-            // Visually select a candidate (updates backend on approve)
             const card = document.querySelector(`[data-artnr="${artnr}"]`);
             if (!card) return;
-            // Update the stored selection for this item
             card.dataset.selectedCandidate = candidateIdx;
-            // Visual feedback — highlight selected
-            const candidates = card.querySelectorAll('[onclick*="iaSelectCandidate"]');
-            candidates.forEach((el, i) => {
-                el.style.border = i === candidateIdx ? '3px solid var(--primary)' : '1px solid var(--border)';
+            const candidateDivs = card.querySelectorAll('[onclick*="iaSelectCandidate"]');
+            candidateDivs.forEach((el, i) => {
+                const origIdx = parseInt(el.getAttribute('onclick').match(/,(\d+)\)/)?.[1] || i);
+                el.style.border = origIdx === candidateIdx ? '3px solid var(--primary)' : '1px solid var(--border)';
             });
+        }
+
+        function iaPreviewManualUrl(artnr) {
+            const input = document.getElementById(`ia-manual-url-${artnr}`);
+            const preview = document.getElementById(`ia-manual-preview-${artnr}`);
+            const url = (input?.value || '').trim();
+            if (!url) { preview.innerHTML = ''; return; }
+            if (!url.startsWith('http')) { preview.innerHTML = '<span style="font-size:0.7rem;color:var(--danger)">URL må starte med http:// eller https://</span>'; return; }
+            preview.innerHTML = `
+                <div style="display:inline-block;border:3px solid #d97706;border-radius:8px;padding:0.3rem;cursor:pointer" onclick="openLightbox('${url}')">
+                    <img src="${url}" style="width:100px;height:100px;object-fit:contain;border-radius:4px;display:block" onerror="this.parentElement.innerHTML='<span style=\\'font-size:0.7rem;color:var(--danger)\\'>Kunne ikke laste bilde</span>'">
+                    <div style="font-size:0.6rem;color:#d97706;font-weight:600;margin-top:0.15rem;text-align:center">Manuelt lagt til</div>
+                </div>`;
+        }
+
+        async function iaUseManualUrl(artnr) {
+            const input = document.getElementById(`ia-manual-url-${artnr}`);
+            const url = (input?.value || '').trim();
+            if (!url || !url.startsWith('http')) { alert('Skriv inn en gyldig bilde-URL (starter med http)'); return; }
+            try {
+                const resp = await fetch(`${API_BASE}/api/image-analysis/${iaSessionId}/review/${artnr}`, {
+                    method: 'PUT',
+                    headers: {'Content-Type': 'application/json'},
+                    body: JSON.stringify({ review_status: 'approved', suggested_image_url: url }),
+                });
+                if (!resp.ok) { const e = await resp.json().catch(()=>({})); throw new Error(e.detail || 'Feil'); }
+                loadIaResults();
+            } catch (e) { alert('Feil: ' + e.message); }
         }
 
         function getScoreBadge(score, exists) {
