@@ -3923,6 +3923,348 @@ async def _run_analysis(
         job.errors.append(f"Fatal error: {str(e)}")
 
 
+# ══════════════════════════════════════════════════════════════════════
+# MODULE: BILDEANALYSE (Image Analysis)
+# ══════════════════════════════════════════════════════════════════════
+
+from backend.image_analysis_service import (
+    run_image_analysis,
+    load_session as _load_ia_session,
+    get_session_status as _get_ia_status,
+    update_review_status as _update_ia_review,
+    bulk_update_review as _bulk_ia_review,
+    export_approved_images_zip,
+    list_sessions as _list_ia_sessions,
+    get_suppliers_from_jeeves,
+    get_articles_by_supplier,
+    _generate_session_id,
+    ImageAnalysisStatus,
+)
+
+# Track active image analysis tasks
+_ia_tasks: dict[str, asyncio.Task] = {}
+
+
+@app.post("/api/image-analysis/start")
+async def start_image_analysis(request: Request, data: dict = Body(...)):
+    """Start a new image analysis session.
+
+    Body: {
+        "source_mode": "catalog_full"|"catalog_random"|"manual_articles"|"supplier",
+        "sample_size": 100,         // for catalog_random
+        "article_numbers": [...],   // for manual_articles
+        "supplier": "SupplierName"  // for supplier mode
+    }
+    """
+    client_ip = request.client.host if request.client else "unknown"
+    if not _check_rate_limit(client_ip):
+        raise HTTPException(429, "For mange forespørsler. Vent litt.")
+
+    source_mode = data.get("source_mode", "catalog_full")
+
+    if source_mode in ("catalog_full", "catalog_random", "supplier"):
+        if not _jeeves_index or not _jeeves_index.loaded:
+            raise HTTPException(400, "Jeeves-katalog er ikke lastet inn.")
+
+    all_catalog = []
+    if _jeeves_index and _jeeves_index.loaded:
+        all_catalog = _jeeves_index.all_article_numbers()
+
+    if source_mode == "catalog_full":
+        selected = all_catalog
+        batch_info = f"Hele katalogen: {len(selected)} artikler"
+
+    elif source_mode == "catalog_random":
+        sample_size = data.get("sample_size", 100)
+        if sample_size < 1:
+            raise HTTPException(400, "sample_size må være minst 1")
+        sample_size = min(sample_size, len(all_catalog))
+        seed = int(time.time())
+        rng = random.Random(seed)
+        selected = rng.sample(all_catalog, sample_size)
+        batch_info = f"Tilfeldig utvalg: {sample_size} av {len(all_catalog)} (seed={seed})"
+
+    elif source_mode == "manual_articles":
+        raw_articles = data.get("article_numbers", [])
+        if not raw_articles:
+            raise HTTPException(400, "Ingen artikkelnumre oppgitt")
+        from backend.identifiers import normalize_identifier
+        seen = set()
+        selected = []
+        for art in raw_articles:
+            norm = normalize_identifier(art)
+            if norm and norm not in seen:
+                seen.add(norm)
+                selected.append(norm)
+        if not selected:
+            raise HTTPException(400, "Ingen gyldige artikkelnumre")
+        batch_info = f"Manuelt oppgitt: {len(selected)} artikler"
+
+    elif source_mode == "supplier":
+        supplier_name = data.get("supplier", "")
+        if not supplier_name:
+            raise HTTPException(400, "Produsent må oppgis")
+        selected = get_articles_by_supplier(_jeeves_index, supplier_name)
+        if not selected:
+            raise HTTPException(400, f"Ingen produkter funnet for produsent: {supplier_name}")
+        batch_info = f"Produsent '{supplier_name}': {len(selected)} artikler"
+
+    else:
+        raise HTTPException(400, f"Ugyldig source_mode: {source_mode}")
+
+    if not selected:
+        raise HTTPException(400, "Ingen artikler å analysere")
+
+    if len(selected) > MAX_ARTICLES:
+        raise HTTPException(400, f"For mange artikler ({len(selected)}). Maks {MAX_ARTICLES}.")
+
+    session_id = _generate_session_id()
+
+    async def _run():
+        try:
+            await run_image_analysis(
+                article_numbers=selected,
+                session_id=session_id,
+                jeeves_index=_jeeves_index,
+            )
+        except Exception as e:
+            logger.error(f"Image analysis session {session_id} failed: {e}")
+
+    task = asyncio.create_task(_run())
+    _ia_tasks[session_id] = task
+    _background_tasks.add(task)
+    task.add_done_callback(_background_tasks.discard)
+
+    return {
+        "session_id": session_id,
+        "total_products": len(selected),
+        "source_mode": source_mode,
+        "batch_info": batch_info,
+        "message": f"Bildeanalyse startet: {batch_info}",
+    }
+
+
+@app.post("/api/image-analysis/upload-start")
+async def start_image_analysis_from_excel(
+    request: Request,
+    file: UploadFile = File(...),
+):
+    """Start image analysis from an uploaded Excel file with article numbers."""
+    client_ip = request.client.host if request.client else "unknown"
+    if not _check_rate_limit(client_ip):
+        raise HTTPException(429, "For mange forespørsler. Vent litt.")
+
+    if not file.filename:
+        raise HTTPException(400, "Ingen fil valgt")
+
+    ext = Path(file.filename).suffix.lower()
+    if ext != ".xlsx":
+        raise HTTPException(400, f"Filformatet {ext} støttes ikke. Bruk .xlsx.")
+
+    content = await file.read()
+    if len(content) > MAX_FILE_SIZE:
+        raise HTTPException(400, "Filen er for stor.")
+
+    try:
+        article_numbers, _ = read_article_numbers(content, file.filename)
+    except Exception as e:
+        raise HTTPException(400, f"Kunne ikke lese Excel-filen: {e}")
+
+    if not article_numbers:
+        raise HTTPException(400, "Ingen artikkelnumre funnet i filen")
+
+    # Deduplicate
+    seen = set()
+    unique = []
+    for a in article_numbers:
+        if a not in seen:
+            seen.add(a)
+            unique.append(a)
+
+    if len(unique) > MAX_ARTICLES:
+        raise HTTPException(400, f"For mange artikler ({len(unique)}). Maks {MAX_ARTICLES}.")
+
+    session_id = _generate_session_id()
+    batch_info = f"Excel-opplasting: {len(unique)} artikler fra {file.filename}"
+
+    async def _run():
+        try:
+            await run_image_analysis(
+                article_numbers=unique,
+                session_id=session_id,
+                jeeves_index=_jeeves_index,
+            )
+        except Exception as e:
+            logger.error(f"Image analysis session {session_id} failed: {e}")
+
+    task = asyncio.create_task(_run())
+    _ia_tasks[session_id] = task
+    _background_tasks.add(task)
+    task.add_done_callback(_background_tasks.discard)
+
+    return {
+        "session_id": session_id,
+        "total_products": len(unique),
+        "source_mode": "upload_excel",
+        "batch_info": batch_info,
+        "message": f"Bildeanalyse startet: {batch_info}",
+    }
+
+
+@app.get("/api/image-analysis/status/{session_id}")
+async def image_analysis_status(session_id: str):
+    """Get status of an image analysis session."""
+    try:
+        return _get_ia_status(session_id)
+    except ValueError:
+        raise HTTPException(404, "Bildeanalyse-sesjon ikke funnet")
+
+
+@app.get("/api/image-analysis/results/{session_id}")
+async def image_analysis_results(
+    session_id: str,
+    filter: Optional[str] = Query(None, description="Filter: needs_review, approved, rejected, all"),
+    page: int = Query(1, ge=1),
+    page_size: int = Query(50, ge=1, le=200),
+):
+    """Get results of an image analysis session with pagination and filtering."""
+    try:
+        session = _load_ia_session(session_id)
+    except ValueError:
+        raise HTTPException(404, "Bildeanalyse-sesjon ikke funnet")
+
+    if session["status"] != ImageAnalysisStatus.COMPLETED.value:
+        return {
+            "session_id": session_id,
+            "status": session["status"],
+            "items": [],
+            "total": 0,
+            "page": page,
+            "page_size": page_size,
+            "summary": session.get("summary", {}),
+        }
+
+    items = session["items"]
+
+    # Apply filter
+    if filter == "needs_review":
+        items = [i for i in items if i["needs_review"]]
+    elif filter == "approved":
+        items = [i for i in items if i["review_status"] == "approved"]
+    elif filter == "rejected":
+        items = [i for i in items if i["review_status"] == "rejected"]
+    elif filter == "pending":
+        items = [i for i in items if i["review_status"] == "pending"]
+
+    total = len(items)
+
+    # Paginate
+    start = (page - 1) * page_size
+    end = start + page_size
+    page_items = items[start:end]
+
+    # Count statuses
+    all_items = session["items"]
+    status_counts = {
+        "total": len(all_items),
+        "needs_review": sum(1 for i in all_items if i["needs_review"]),
+        "approved": sum(1 for i in all_items if i["review_status"] == "approved"),
+        "rejected": sum(1 for i in all_items if i["review_status"] == "rejected"),
+        "pending": sum(1 for i in all_items if i["review_status"] == "pending"),
+    }
+
+    return {
+        "session_id": session_id,
+        "status": session["status"],
+        "items": page_items,
+        "total": total,
+        "page": page,
+        "page_size": page_size,
+        "total_pages": (total + page_size - 1) // page_size,
+        "summary": session.get("summary", {}),
+        "status_counts": status_counts,
+    }
+
+
+@app.put("/api/image-analysis/{session_id}/review/{article_number}")
+async def review_image(session_id: str, article_number: str, data: dict = Body(...)):
+    """Update review status for a single image.
+
+    Body: {"review_status": "approved"|"rejected"|"pending",
+           "suggested_image_url": "optional URL if user found a better image"}
+    """
+    status = data.get("review_status")
+    suggested_url = data.get("suggested_image_url")
+
+    if not status:
+        raise HTTPException(400, "review_status er påkrevd")
+
+    try:
+        result = _update_ia_review(session_id, article_number, status, suggested_url)
+        return {"status": "ok", **result}
+    except ValueError as e:
+        raise HTTPException(400 if "Invalid" in str(e) else 404, str(e))
+
+
+@app.put("/api/image-analysis/{session_id}/bulk-review")
+async def bulk_review_images(session_id: str, data: dict = Body(...)):
+    """Bulk update review status for multiple images.
+
+    Body: {"article_numbers": ["ART001", "ART002", ...],
+           "review_status": "approved"|"rejected"|"pending"}
+    """
+    article_numbers = data.get("article_numbers", [])
+    status = data.get("review_status")
+
+    if not article_numbers:
+        raise HTTPException(400, "Ingen artikkelnumre oppgitt")
+    if not status:
+        raise HTTPException(400, "review_status er påkrevd")
+
+    try:
+        result = _bulk_ia_review(session_id, article_numbers, status)
+        return {"status": "ok", **result}
+    except ValueError as e:
+        raise HTTPException(400 if "Invalid" in str(e) else 404, str(e))
+
+
+@app.get("/api/image-analysis/{session_id}/export-zip")
+async def export_images_zip(session_id: str):
+    """Export all approved images as a JPEG ZIP file."""
+    try:
+        zip_buffer = await export_approved_images_zip(session_id)
+    except ValueError as e:
+        raise HTTPException(400, str(e))
+    except Exception as e:
+        logger.error(f"ZIP export failed: {e}")
+        raise HTTPException(500, f"Eksportfeil: {e}")
+
+    from starlette.responses import StreamingResponse
+    return StreamingResponse(
+        zip_buffer,
+        media_type="application/zip",
+        headers={
+            "Content-Disposition": f"attachment; filename=godkjente_bilder_{session_id}.zip"
+        },
+    )
+
+
+@app.get("/api/image-analysis/sessions")
+async def list_image_analysis_sessions():
+    """List recent image analysis sessions."""
+    return {"sessions": _list_ia_sessions()}
+
+
+@app.get("/api/image-analysis/suppliers")
+async def list_suppliers():
+    """List all unique suppliers from Jeeves for the supplier selector."""
+    if not _jeeves_index or not _jeeves_index.loaded:
+        return {"suppliers": [], "loaded": False}
+
+    suppliers = get_suppliers_from_jeeves(_jeeves_index)
+    return {"suppliers": suppliers, "loaded": True}
+
+
 if __name__ == "__main__":
     import uvicorn
     port = int(os.environ.get("PORT", 8000))
