@@ -3031,1339 +3031,227 @@ async def _run_analysis(
         job.errors.append(f"Fatal error: {str(e)}")
 
 
-# ══════════════════════════════════════════════════════════════════════════════
-# MODULE: PRODUKTMATCHING (Standard + Hardcore Pris Prioritet)
-# ══════════════════════════════════════════════════════════════════════════════
 
-from backend.matcher import (
-    MatchMode, MatchResult, match_product, select_candidate, parse_alc_price,
-)
-from backend.job_store import (
-    save_job as _persist_job, load_job as _load_persisted_job,
-    list_jobs as _list_persisted_jobs, lock_job as _lock_persisted_job,
-    unlock_job as _unlock_persisted_job, verify_job_access as _verify_job_access,
-    cleanup_expired_jobs, update_job_activity,
-)
-from backend.learning_store import (
-    add_example as _add_learning_example,
-    verify_learning_admin as _verify_learning_admin,
-    add_examples_batch, get_all_examples, get_stats as get_learning_stats,
-    list_batches as list_learning_batches, delete_batch as delete_learning_batch,
-    register_batch, find_matching_examples, reindex as reindex_learning,
+# ══════════════════════════════════════════════════════════════════════
+# MODULE: BILDEANALYSE (Image Analysis)
+# ══════════════════════════════════════════════════════════════════════
+
+from backend.image_analysis_service import (
+    run_image_analysis,
+    load_session as _load_ia_session,
+    get_session_status as _get_ia_status,
+    update_review_status as _update_ia_review,
+    bulk_update_review as _bulk_ia_review,
+    export_approved_images_zip,
+    list_sessions as _list_ia_sessions,
+    get_suppliers_from_jeeves,
+    get_articles_by_supplier,
+    _generate_session_id,
+    ImageAnalysisStatus,
 )
 
-# In-memory storage for match jobs (also persisted to disk)
-_match_jobs: dict[str, dict] = {}
-MATCH_OUTPUT_DIR = OUTPUT_DIR / "matching"
-MATCH_OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
-
-# Mode label helper
-_MODE_LABELS = {
-    MatchMode.STANDARD.value: "Standard",
-    MatchMode.HARDCORE_PRICE.value: "Hardcore Pris Prioritet",
-    MatchMode.OWN_BRAND.value: "Egne merkevarer",
-    MatchMode.STRICT_QUALITY.value: "Streng kvalitet",
-}
+_ia_tasks: dict[str, asyncio.Task] = {}
 
 
-def _build_catalog_for_matching(alc_prices: Optional[dict] = None) -> list[dict]:
-    """Build catalog list from Jeeves index for matching.
-
-    alc_prices: optional dict mapping article_number → ALC price
-    """
-    if not _jeeves_index or not _jeeves_index.loaded:
-        return []
-
-    catalog = []
-    for artnr in _jeeves_index.all_article_numbers():
-        jd = _jeeves_index.get(artnr)
-        if not jd:
-            continue
-        item = {
-            "article_number": jd.article_number,
-            "item_description": jd.item_description or "",
-            "specification": jd.specification or "",
-            "supplier": jd.supplier or "",
-            "product_brand": jd.product_brand or "",
-            "alc_price": (alc_prices or {}).get(artnr),
-        }
-        catalog.append(item)
-    return catalog
-
-
-# ── Column detection helpers (shared by analyze + start) ──
-
-_COL_NAME_KEYWORDS = {"produktnavn", "produkt", "product", "navn", "name", "varenavn", "beskrivelse"}
-_COL_SPEC_KEYWORDS = {"spesifikasjon", "specification", "spec", "detaljer", "details"}
-_COL_ARTNR_KEYWORDS = {"artikkelnummer", "artikkel", "artikkelnr", "artnr", "art.nr", "sku", "varenr", "varenummer"}
-_COL_ALC_KEYWORDS = {"alc", "alc-pris", "alc pris", "alcpris", "pris", "price", "enhetspris"}
-
-
-def _detect_columns(headers: list[str]) -> dict:
-    """Auto-detect column roles from header names.
-
-    Returns {name_col, spec_col, artnr_col, alc_col} — each is int index or None.
-    """
-    name_col = spec_col = artnr_col = alc_col = None
-    for idx, h in enumerate(headers):
-        h_norm = h.lower().replace(".", "").replace(" ", "").replace("-", "").replace("_", "")
-        if name_col is None and any(kw.replace(".", "").replace(" ", "") in h_norm for kw in _COL_NAME_KEYWORDS):
-            name_col = idx
-        elif spec_col is None and any(kw.replace(".", "").replace(" ", "") in h_norm for kw in _COL_SPEC_KEYWORDS):
-            spec_col = idx
-        elif artnr_col is None and any(kw.replace(".", "").replace(" ", "") in h_norm for kw in _COL_ARTNR_KEYWORDS):
-            artnr_col = idx
-        elif alc_col is None and any(kw.replace(".", "").replace(" ", "") in h_norm for kw in _COL_ALC_KEYWORDS):
-            alc_col = idx
-    return {"name_col": name_col, "spec_col": spec_col, "artnr_col": artnr_col, "alc_col": alc_col}
-
-
-def _classify_columns(headers: list[str], detected: dict) -> list[dict]:
-    """Classify each column with a role and suggested category.
-
-    Categories: 'input' (product text), 'input_spec' (specification),
-    'input_id' (article number), 'output_price' (price/ALC to fill),
-    'skip' (not used).
-    """
-    cols = []
-    for idx, h in enumerate(headers):
-        role = "skip"
-        if idx == detected.get("name_col"):
-            role = "input"
-        elif idx == detected.get("spec_col"):
-            role = "input_spec"
-        elif idx == detected.get("artnr_col"):
-            role = "input_id"
-        elif idx == detected.get("alc_col"):
-            role = "output_price"
-        cols.append({"index": idx, "header": h, "role": role})
-    return cols
-
-
-@app.post("/api/anbud/analyze")
-async def analyze_anbud_file(file: UploadFile = File(...)):
-    """Analyze an uploaded anbud Excel file.
-
-    Returns column headers, auto-detected roles, and preview rows
-    so the user can review/adjust the mapping before starting.
-    """
-    content = await file.read()
-    if len(content) > MAX_FILE_SIZE:
-        raise HTTPException(400, f"Filen er for stor. Maks {MAX_FILE_SIZE / 1024 / 1024:.0f} MB.")
-
-    try:
-        from openpyxl import load_workbook
-        wb = load_workbook(BytesIO(content), read_only=True, data_only=True)
-        ws = wb.active
-        rows = list(ws.iter_rows(max_row=7))
-        if not rows:
-            raise HTTPException(400, "Filen er tom.")
-
-        headers = [str(cell.value or "").strip() for cell in rows[0]]
-        detected = _detect_columns(headers)
-        columns = _classify_columns(headers, detected)
-
-        preview_rows = []
-        data_row_count = 0
-        for row in rows[1:]:
-            preview_rows.append([str(cell.value or "").strip() for cell in row])
-
-        # Count total data rows
-        total_rows = ws.max_row - 1 if ws.max_row else 0
-
-        wb.close()
-    except HTTPException:
-        raise
-    except Exception as e:
-        raise HTTPException(400, f"Kunne ikke lese filen: {e}")
-
-    return {
-        "filename": file.filename or "",
-        "headers": headers,
-        "columns": columns,
-        "preview_rows": preview_rows,
-        "total_data_rows": total_rows,
-    }
-
-
-@app.post("/api/match/start")
-async def start_match_job(
-    request: Request,
-    file: UploadFile = File(...),
-    match_mode: str = Query(MatchMode.STANDARD.value, description="Match mode"),
-    job_name: str = Query("", description="Job name"),
-    created_by: str = Query("", description="User who created the job"),
-    job_type: str = Query("standard", description="Job type: standard or anbud"),
-    col_name: int = Query(-1, description="Column index for product name (-1 = auto)"),
-    col_spec: int = Query(-1, description="Column index for specification (-1 = auto/none)"),
-    col_artnr: int = Query(-1, description="Column index for article number (-1 = auto/none)"),
-):
-    """Start a product matching job.
-
-    Upload an Excel file with input products to match against the catalog.
-    Column indices can be passed explicitly (from anbud analyze step) or auto-detected.
-    """
-    _cleanup_old_jobs()
-
+@app.post("/api/image-analysis/start")
+async def start_image_analysis(request: Request, data: dict = Body(...)):
+    """Start a new image analysis session."""
     client_ip = request.client.host if request.client else "unknown"
     if not _check_rate_limit(client_ip):
-        raise HTTPException(429, "For mange forespørsler. Prøv igjen senere.")
+        raise HTTPException(429, "For mange forespørsler.")
 
-    if not _jeeves_index or not _jeeves_index.loaded:
-        raise HTTPException(400, "Jeeves-katalog er ikke lastet. Kan ikke kjøre matching.")
+    source_mode = data.get("source_mode", "catalog_full")
 
-    if not job_name.strip():
-        raise HTTPException(400, "Jobbnavn er påkrevd.")
-    if not created_by.strip():
-        raise HTTPException(400, "Brukernavn er påkrevd.")
-    if job_type not in ("standard", "anbud"):
-        raise HTTPException(400, "Ugyldig jobbtype. Bruk 'standard' eller 'anbud'.")
+    if source_mode in ("catalog_full", "catalog_random", "supplier"):
+        if not _jeeves_index or not _jeeves_index.loaded:
+            raise HTTPException(400, "Jeeves-katalog er ikke lastet inn.")
 
-    valid_modes = [m.value for m in MatchMode]
-    if match_mode not in valid_modes:
-        raise HTTPException(400, f"Ugyldig matchmodus: {match_mode}. Gyldige: {', '.join(valid_modes)}")
+    all_catalog = _jeeves_index.all_article_numbers() if _jeeves_index and _jeeves_index.loaded else []
 
-    content = await file.read()
-    if len(content) > MAX_FILE_SIZE:
-        raise HTTPException(400, f"Filen er for stor. Maks {MAX_FILE_SIZE / 1024 / 1024:.0f} MB.")
+    if source_mode == "catalog_full":
+        selected = all_catalog
+        batch_info = f"Hele katalogen: {len(selected)} artikler"
+    elif source_mode == "catalog_random":
+        sample_size = min(data.get("sample_size", 100), len(all_catalog))
+        if sample_size < 1:
+            raise HTTPException(400, "sample_size må være minst 1")
+        rng = random.Random(int(time.time()))
+        selected = rng.sample(all_catalog, sample_size)
+        batch_info = f"Tilfeldig utvalg: {sample_size} av {len(all_catalog)}"
+    elif source_mode == "manual_articles":
+        raw = data.get("article_numbers", [])
+        if not raw:
+            raise HTTPException(400, "Ingen artikkelnumre oppgitt")
+        from backend.identifiers import normalize_identifier
+        seen = set()
+        selected = []
+        for art in raw:
+            norm = normalize_identifier(art)
+            if norm and norm not in seen:
+                seen.add(norm)
+                selected.append(norm)
+        if not selected:
+            raise HTTPException(400, "Ingen gyldige artikkelnumre")
+        batch_info = f"Manuelt oppgitt: {len(selected)} artikler"
+    elif source_mode == "supplier":
+        supplier_name = data.get("supplier", "")
+        if not supplier_name:
+            raise HTTPException(400, "Produsent må oppgis")
+        selected = get_articles_by_supplier(_jeeves_index, supplier_name)
+        if not selected:
+            raise HTTPException(400, f"Ingen produkter for produsent: {supplier_name}")
+        batch_info = f"Produsent '{supplier_name}': {len(selected)} artikler"
+    else:
+        raise HTTPException(400, f"Ugyldig source_mode: {source_mode}")
 
-    # Parse input Excel
-    try:
-        from openpyxl import load_workbook
-        wb = load_workbook(BytesIO(content), read_only=True, data_only=True)
-        ws = wb.active
-        rows_iter = ws.iter_rows()
-        header_row = next(rows_iter)
-        headers = [str(cell.value or "").strip() for cell in header_row]
+    if not selected:
+        raise HTTPException(400, "Ingen artikler å analysere")
+    if len(selected) > MAX_ARTICLES:
+        raise HTTPException(400, f"For mange artikler ({len(selected)}). Maks {MAX_ARTICLES}.")
 
-        # Use explicit column overrides if provided, otherwise auto-detect
-        if col_name >= 0:
-            name_col = col_name
-            spec_col = col_spec if col_spec >= 0 else None
-            artnr_col = col_artnr if col_artnr >= 0 else None
-            alc_col = None
-        else:
-            detected = _detect_columns(headers)
-            name_col = detected["name_col"]
-            spec_col = detected["spec_col"]
-            artnr_col = detected["artnr_col"]
-            alc_col = detected["alc_col"]
+    session_id = _generate_session_id()
 
-        # Fallback: first column is product name if no header match
-        if name_col is None:
-            name_col = 0
-
-        # Read input products
-        input_products = []
-        for row_num, row in enumerate(rows_iter, start=2):
-            values = [cell.value for cell in row]
-            name = str(values[name_col] or "").strip() if name_col is not None and len(values) > name_col else ""
-            spec = str(values[spec_col] or "").strip() if spec_col is not None and len(values) > spec_col else ""
-            artnr = str(values[artnr_col] or "").strip() if artnr_col is not None and len(values) > artnr_col else ""
-
-            if not name and not spec:
-                continue
-
-            input_products.append({
-                "row": row_num,
-                "name": name,
-                "specification": spec,
-                "article_number": artnr,
-            })
-
-        wb.close()
-
-    except Exception as e:
-        logger.error(f"Failed to parse match input: {e}")
-        raise HTTPException(400, f"Kunne ikke lese Excel-filen: {e}")
-
-    if not input_products:
-        raise HTTPException(400, "Ingen produkter funnet i filen")
-
-    if len(input_products) > 500:
-        raise HTTPException(400, f"For mange produkter ({len(input_products)}). Maks 500 per matching-jobb.")
-
-    # Create match job
-    job_id = str(uuid.uuid4())[:8]
-    now = time.time()
-    match_job = {
-        "job_id": job_id,
-        "job_name": job_name.strip(),
-        "created_by": created_by.strip(),
-        "job_type": job_type,
-        "status": "running",
-        "match_mode": match_mode,
-        "total": len(input_products),
-        "processed": 0,
-        "results": [],
-        "created_at": now,
-        "updated_at": now,
-        "last_activity_at": now,
-        "source_filename": file.filename or "",
-        "input_products": input_products,
-        "detected_columns": {
-            "name": headers[name_col] if name_col is not None and name_col < len(headers) else None,
-            "specification": headers[spec_col] if spec_col is not None and spec_col < len(headers) else None,
-            "article_number": headers[artnr_col] if artnr_col is not None and artnr_col < len(headers) else None,
-            "alc_price": headers[alc_col] if alc_col is not None and alc_col < len(headers) else None,
-        },
-        "output_file": None,
-        "user_selections": {},
-        "row_approvals": {},  # {input_row: "approved"|"rejected"|"pending"}
-        "locked": False,
-    }
-    _match_jobs[job_id] = match_job
-    _persist_job(match_job)
-
-    # Run matching in background
-    async def _run_matching():
+    async def _run():
         try:
-            catalog = _build_catalog_for_matching()
-            if not catalog:
-                match_job["status"] = "failed"
-                match_job["error"] = "Katalogen er tom"
-                return
-
-            use_ai = bool(os.environ.get("ANTHROPIC_API_KEY"))
-
-            for inp in input_products:
-                if match_job.get("cancelled"):
-                    break
-
-                result = await match_product(
-                    input_name=inp["name"],
-                    input_spec=inp["specification"],
-                    catalog=catalog,
-                    match_mode=match_mode,
-                    use_ai=use_ai,
-                    input_row=inp["row"],
-                    input_article_number=inp["article_number"],
-                )
-                match_job["results"].append(result)
-                match_job["processed"] += 1
-                # Persist progress every 5 products
-                if match_job["processed"] % 5 == 0:
-                    _persist_job(match_job)
-
-            # Generate Excel output
-            _generate_match_excel(match_job)
-
-            match_job["status"] = "completed"
-            match_job["summary"] = _compute_match_summary(match_job)
-
-            # Persist final state and save to history
-            _persist_job(match_job)
-            _add_match_to_history(match_job)
-
+            await run_image_analysis(selected, session_id, _jeeves_index)
         except Exception as e:
-            logger.error(f"[match-{job_id}] Failed: {e}")
-            match_job["status"] = "failed"
-            match_job["error"] = str(e)
+            logger.error(f"Image analysis {session_id} failed: {e}")
 
-    task = asyncio.create_task(_run_matching())
+    task = asyncio.create_task(_run())
+    _ia_tasks[session_id] = task
     _background_tasks.add(task)
     task.add_done_callback(_background_tasks.discard)
 
-    mode_label = _MODE_LABELS.get(match_mode, "Standard")
-
-    return {
-        "job_id": job_id,
-        "job_name": match_job["job_name"],
-        "created_by": match_job["created_by"],
-        "job_type": job_type,
-        "match_mode": match_mode,
-        "mode_label": mode_label,
-        "total_products": len(input_products),
-        "detected_columns": match_job["detected_columns"],
-        "message": f"Matching startet ({mode_label}): {len(input_products)} produkter mot {_jeeves_index.count} i katalogen",
-    }
-
-
-def _get_job(job_id: str) -> Optional[dict]:
-    """Get job from memory or disk."""
-    job = _match_jobs.get(job_id)
-    if job:
-        return job
-    return _load_persisted_job(job_id)
-
-
-@app.get("/api/match/status/{job_id}")
-async def get_match_status(job_id: str):
-    """Get status of a matching job."""
-    job = _get_job(job_id)
-    if not job:
-        raise HTTPException(404, "Matching-jobb ikke funnet")
-
-    return {
-        "job_id": job["job_id"],
-        "job_name": job.get("job_name", ""),
-        "created_by": job.get("created_by", ""),
-        "status": job["status"],
-        "match_mode": job["match_mode"],
-        "total": job["total"],
-        "processed": job["processed"],
-        "progress_percent": round(job["processed"] / job["total"] * 100, 1) if job["total"] > 0 else 0,
-        "error": job.get("error"),
-        "locked": job.get("locked", False),
-    }
-
-
-@app.get("/api/match/results/{job_id}")
-async def get_match_results(job_id: str):
-    """Get matching results with all candidates."""
-    job = _get_job(job_id)
-    if not job:
-        raise HTTPException(404, "Matching-jobb ikke funnet")
-
-    if job["status"] not in ("completed", "running"):
-        raise HTTPException(400, "Resultater ikke tilgjengelig ennå")
-
-    # Results may be MatchResult objects (in-memory) or dicts (from disk)
-    results = job.get("results", [])
-    serialized = []
-    for r in results:
-        if hasattr(r, "to_dict"):
-            serialized.append(r.to_dict())
-        elif isinstance(r, dict):
-            serialized.append(r)
-
-    return {
-        "job_id": job["job_id"],
-        "job_name": job.get("job_name", ""),
-        "created_by": job.get("created_by", ""),
-        "job_type": job.get("job_type", "standard"),
-        "status": job["status"],
-        "match_mode": job["match_mode"],
-        "mode_label": _MODE_LABELS.get(job["match_mode"], "Standard"),
-        "total": job["total"],
-        "processed": job["processed"],
-        "source_filename": job.get("source_filename", ""),
-        "results": serialized,
-        "summary": job.get("summary") or _compute_match_summary(job),
-        "row_approvals": job.get("row_approvals", {}),
-        "locked": job.get("locked", False),
-    }
-
-
-def _rattr(obj, key, default=""):
-    """Get attribute from MatchResult object or key from dict (disk-loaded)."""
-    if hasattr(obj, key):
-        return getattr(obj, key)
-    if isinstance(obj, dict):
-        return obj.get(key, default)
-    return default
-
-
-def _compute_match_summary(job: dict) -> dict:
-    """Compute summary statistics for a matching job."""
-    results = job.get("results", [])
-    total = len(results)
-    matched = sum(1 for r in results if _rattr(r, "status") == "matched")
-    no_match = sum(1 for r in results if _rattr(r, "status") == "no_match")
-    multiple = sum(1 for r in results if _rattr(r, "status") == "multiple")
-    manual = sum(1 for r in results if _rattr(r, "status") == "manual_review")
-    manual_selected = sum(1 for r in results if _rattr(r, "selected_by") == "manual")
-
-    # Price stats (only for selected candidates with prices)
-    prices = []
-    for r in results:
-        sel = None
-        if hasattr(r, "get_selected"):
-            sel = r.get_selected()
-        elif isinstance(r, dict):
-            # Find selected candidate in dict results
-            sel_artnr = r.get("selected_candidate")
-            if sel_artnr:
-                for c in r.get("candidates", []):
-                    c_artnr = c.get("article_number") if isinstance(c, dict) else getattr(c, "article_number", None)
-                    if c_artnr == sel_artnr:
-                        sel = c
-                        break
-        if sel:
-            price = sel.get("alc_price") if isinstance(sel, dict) else getattr(sel, "alc_price", None)
-            if price is not None:
-                prices.append(price)
-
-    return {
-        "total": total,
-        "matched": matched,
-        "no_match": no_match,
-        "multiple_candidates": multiple,
-        "manual_review_needed": manual,
-        "manual_selections": manual_selected,
-        "avg_price": round(sum(prices) / len(prices), 2) if prices else None,
-        "min_price": min(prices) if prices else None,
-        "max_price": max(prices) if prices else None,
-        "products_with_price": len(prices),
-    }
-
-
-@app.post("/api/match/select/{job_id}")
-async def select_match_candidate(
-    job_id: str,
-    data: dict = Body(...),
-):
-    """Manually select a candidate for a specific input row.
-
-    Body: {"input_row": 2, "article_number": "12345", "password": "optional"}
-    """
-    job = _match_jobs.get(job_id)
-    if not job:
-        raise HTTPException(404, "Matching-jobb ikke funnet")
-
-    # Check lock
-    if job.get("locked"):
-        can_edit, msg = _verify_job_access(job_id, data.get("password"))
-        if not can_edit:
-            raise HTTPException(403, msg)
-
-    input_row = data.get("input_row")
-    article_number = data.get("article_number")
-
-    if input_row is None or not article_number:
-        raise HTTPException(400, "Mangler input_row eller article_number")
-
-    # Find the result for this row
-    for result in job["results"]:
-        row_num = result.input_row if hasattr(result, "input_row") else result.get("input_row")
-        if row_num == input_row:
-            if hasattr(result, "input_row"):
-                success = select_candidate(result, article_number)
-            else:
-                # Result loaded from disk (dict) — update directly
-                result["selected_candidate"] = article_number
-                result["selected_by"] = "manual"
-                result["status"] = "matched"
-                success = True
-            if success:
-                job["user_selections"][str(input_row)] = article_number
-                job["last_activity_at"] = time.time()
-                _generate_match_excel(job)
-                _persist_job(job)
-
-                # Feed into learning store
-                input_name = result.input_product_name if hasattr(result, "input_product_name") else result.get("input_product_name", "")
-                input_spec = result.input_specification if hasattr(result, "input_specification") else result.get("input_specification", "")
-                _feed_learning_example(input_name, input_spec, article_number, "ui_override", job_id)
-
-                return {
-                    "message": "Kandidat valgt",
-                    "input_row": input_row,
-                    "selected": article_number,
-                }
-            else:
-                raise HTTPException(400, f"Kandidat {article_number} finnes ikke for rad {input_row}")
-
-    raise HTTPException(404, f"Rad {input_row} ikke funnet i resultater")
-
-
-def _feed_learning_example(input_name: str, input_spec: str, article_number: str, source: str, job_id: str) -> None:
-    """Feed a learning example from UI action."""
-    if not input_name or not article_number:
-        return
-    try:
-        # Look up product name from catalog
-        product_name = ""
-        if _jeeves_index and _jeeves_index.loaded:
-            jd = _jeeves_index.get(article_number)
-            if jd:
-                product_name = jd.item_description or ""
-        _add_learning_example(
-            input_text=input_name,
-            input_spec=input_spec,
-            matched_article=article_number,
-            matched_product_name=product_name,
-            source=source,
-            source_job_id=job_id,
-        )
-    except Exception as e:
-        logger.warning(f"Failed to feed learning example: {e}")
-
-
-@app.get("/api/match/download/{job_id}")
-async def download_match_result(job_id: str):
-    """Download the matching result Excel file."""
-    job = _get_job(job_id)
-    if not job:
-        raise HTTPException(404, "Matching-jobb ikke funnet")
-
-    if job["status"] != "completed":
-        raise HTTPException(400, "Matching er ikke fullført ennå")
-
-    output_file = job.get("output_file")
-    if not output_file or not Path(output_file).exists():
-        raise HTTPException(404, "Resultatfilen finnes ikke")
-
-    mode_suffix = {
-        MatchMode.STANDARD.value: "standard",
-        MatchMode.HARDCORE_PRICE.value: "hardcore_pris",
-        MatchMode.OWN_BRAND.value: "egne_merker",
-        MatchMode.STRICT_QUALITY.value: "streng_kvalitet",
-    }.get(job["match_mode"], "standard")
-    return FileResponse(
-        output_file,
-        filename=f"matching_{mode_suffix}_{job_id}.xlsx",
-        media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-    )
-
-
-def _generate_match_excel(job: dict) -> None:
-    """Generate Excel output for matching results."""
-    from openpyxl import Workbook
-    from openpyxl.styles import Alignment, Border, Font, PatternFill, Side
-
-    wb = Workbook()
-    results = job.get("results", [])
-    match_mode = job.get("match_mode", MatchMode.STANDARD.value)
-    is_hardcore = match_mode == MatchMode.HARDCORE_PRICE.value
-    mode_label = _MODE_LABELS.get(match_mode, "Standard")
-
-    # ── Sheet 1: Matching-resultater (main results) ──
-    ws = wb.active
-    ws.title = "Matching-resultater"
-
-    header_fill = PatternFill(start_color="4472C4", end_color="4472C4", fill_type="solid")
-    header_font = Font(bold=True, color="FFFFFF", size=11)
-    highlight_fill = PatternFill(start_color="E2EFDA", end_color="E2EFDA", fill_type="solid")
-    warning_fill = PatternFill(start_color="FFF2CC", end_color="FFF2CC", fill_type="solid")
-    danger_fill = PatternFill(start_color="FFC7CE", end_color="FFC7CE", fill_type="solid")
-    manual_fill = PatternFill(start_color="D9E2F3", end_color="D9E2F3", fill_type="solid")
-
-    headers = [
-        "Rad", "Innprodukt", "Inn-spesifikasjon", "Inn-artikkelnr",
-        "Matchmodus", "Status",
-        "Valgt art.nr", "Valgt produktnavn", "Valgt spesifikasjon",
-        "Valgt ALC-pris", "Valgt produsent",
-        "Relevansscore", "Valgt i UI",
-        "Billigste relevante alternativ", "Standard beste match avviker fra valgt",
-        "Antall kandidater", "Kommentar",
-    ]
-    for col, h in enumerate(headers, 1):
-        cell = ws.cell(row=1, column=col, value=h)
-        cell.fill = header_fill
-        cell.font = header_font
-        cell.alignment = Alignment(horizontal="center", wrap_text=True)
-
-    def _cattr(c, key, default=None):
-        """Get attribute from MatchCandidate object or key from dict."""
-        return c.get(key, default) if isinstance(c, dict) else getattr(c, key, default)
-
-    for row_idx, result in enumerate(results, 2):
-        # Handle both MatchResult objects (in-memory) and dicts (from disk)
-        r_status = _rattr(result, "status")
-        r_selected_by = _rattr(result, "selected_by")
-        r_input_row = _rattr(result, "input_row", 0)
-        r_input_name = _rattr(result, "input_product_name")
-        r_input_spec = _rattr(result, "input_specification")
-        r_input_artnr = _rattr(result, "input_article_number")
-        r_comment = _rattr(result, "comment")
-        r_selected_candidate = _rattr(result, "selected_candidate")
-        r_candidates = _rattr(result, "candidates", []) or []
-
-        # Find selected candidate
-        selected = None
-        if hasattr(result, "get_selected"):
-            selected = result.get_selected()
-        elif r_selected_candidate:
-            for c in r_candidates:
-                c_artnr = c.get("article_number") if isinstance(c, dict) else getattr(c, "article_number", None)
-                if c_artnr == r_selected_candidate:
-                    selected = c
-                    break
-
-        is_manual = r_selected_by == "manual"
-
-        # Check if this is the cheapest relevant
-
-        priced_relevant = [c for c in r_candidates if _cattr(c, "is_sufficiently_relevant") and _cattr(c, "alc_price") is not None]
-        is_cheapest_relevant = False
-        if selected and priced_relevant:
-            cheapest = min(priced_relevant, key=lambda c: _cattr(c, "alc_price", float('inf')))
-            is_cheapest_relevant = _cattr(selected, "article_number") == _cattr(cheapest, "article_number")
-
-        # Check if standard best match differs from selected
-        standard_best_differs = False
-        if selected and r_candidates:
-            best_by_relevance = max(r_candidates, key=lambda c: _cattr(c, "relevance_score", 0))
-            standard_best_differs = _cattr(best_by_relevance, "article_number") != _cattr(selected, "article_number")
-
-        row_data = [
-            r_input_row,
-            r_input_name,
-            r_input_spec,
-            r_input_artnr,
-            mode_label,
-            r_status,
-            _cattr(selected, "article_number", "") if selected else "",
-            _cattr(selected, "product_name", "") if selected else "",
-            _cattr(selected, "specification", "") if selected else "",
-            _cattr(selected, "alc_price") if selected and _cattr(selected, "alc_price") else "",
-            _cattr(selected, "supplier", "") if selected else "",
-            round(_cattr(selected, "relevance_score", 0), 1) if selected else "",
-            "Ja" if is_manual else "Nei",
-            "Ja" if is_cheapest_relevant else "Nei",
-            "Ja" if standard_best_differs else "Nei",
-            len(r_candidates),
-            r_comment,
-        ]
-
-        for col, val in enumerate(row_data, 1):
-            cell = ws.cell(row=row_idx, column=col, value=val)
-            if col == 10 and isinstance(val, (int, float)) and val > 0:
-                cell.number_format = '#,##0.00 "kr"'
-
-        # Row highlighting
-        if r_status == "no_match":
-            for col in range(1, len(headers) + 1):
-                ws.cell(row=row_idx, column=col).fill = danger_fill
-        elif r_status == "manual_review":
-            for col in range(1, len(headers) + 1):
-                ws.cell(row=row_idx, column=col).fill = warning_fill
-        elif is_manual:
-            for col in range(1, len(headers) + 1):
-                ws.cell(row=row_idx, column=col).fill = manual_fill
-
-    # Auto-width
-    for col_idx in range(1, len(headers) + 1):
-        ws.column_dimensions[chr(64 + col_idx) if col_idx <= 26 else 'A'].width = 18
-
-    # ── Sheet 2: Alle kandidater (all candidates per row) ──
-    ws2 = wb.create_sheet("Alle kandidater")
-    cand_headers = [
-        "Inn-rad", "Innprodukt",
-        "Kandidat-rang", "Kandidat art.nr", "Kandidat produktnavn",
-        "Kandidat spesifikasjon", "Kandidat produsent",
-        "ALC-pris", "Relevansscore", "AI-score",
-        "Tilstrekkelig relevant", "Tags", "AI-forklaring",
-        "Er valgt",
-    ]
-    for col, h in enumerate(cand_headers, 1):
-        cell = ws2.cell(row=1, column=col, value=h)
-        cell.fill = header_fill
-        cell.font = header_font
-        cell.alignment = Alignment(horizontal="center", wrap_text=True)
-
-    cand_row = 2
-    for result in results:
-        r_candidates = _rattr(result, "candidates", []) or []
-        r_selected_candidate = _rattr(result, "selected_candidate")
-        r_input_row = _rattr(result, "input_row", 0)
-        r_input_name = _rattr(result, "input_product_name")
-
-        for cand in r_candidates:
-            c_artnr = _cattr(cand, "article_number", "")
-            is_selected = c_artnr == r_selected_candidate
-            ai_score = _cattr(cand, "ai_relevance_score")
-            tags = _cattr(cand, "tags", []) or []
-            cand_data = [
-                r_input_row,
-                r_input_name,
-                _cattr(cand, "rank", 0),
-                c_artnr,
-                _cattr(cand, "product_name", ""),
-                _cattr(cand, "specification", ""),
-                _cattr(cand, "supplier", ""),
-                _cattr(cand, "alc_price") or "",
-                round(_cattr(cand, "relevance_score", 0), 1),
-                round(ai_score, 1) if ai_score is not None else "",
-                "Ja" if _cattr(cand, "is_sufficiently_relevant") else "Nei",
-                ", ".join(tags) if tags else "",
-                _cattr(cand, "ai_explanation", ""),
-                "JA" if is_selected else "",
-            ]
-            for col, val in enumerate(cand_data, 1):
-                cell = ws2.cell(row=cand_row, column=col, value=val)
-                if col == 8 and isinstance(val, (int, float)) and val > 0:
-                    cell.number_format = '#,##0.00 "kr"'
-                if is_selected:
-                    cell.fill = highlight_fill
-            cand_row += 1
-
-    # ── Sheet 3: Sammendrag ──
-    ws3 = wb.create_sheet("Sammendrag")
-    ws3.insert_rows(1)
-    summary = _compute_match_summary(job)
-
-    summary_data = [
-        ("Matching-rapport", ""),
-        ("", ""),
-        ("Matchmodus", mode_label),
-        ("Kildefil", job.get("source_filename", "")),
-        ("Dato", datetime.now().strftime("%Y-%m-%d %H:%M")),
-        ("", ""),
-        ("Totalt produkter", summary["total"]),
-        ("Matchet", summary["matched"]),
-        ("Ingen match", summary["no_match"]),
-        ("Flere kandidater", summary["multiple_candidates"]),
-        ("Krever manuell vurdering", summary["manual_review_needed"]),
-        ("Manuelt valgt i UI", summary["manual_selections"]),
-        ("", ""),
-        ("Prisinformasjon", ""),
-        ("Produkter med ALC-pris", summary["products_with_price"]),
-        ("Gjennomsnittlig ALC-pris", f"kr {summary['avg_price']:,.2f}" if summary["avg_price"] else "N/A"),
-        ("Laveste ALC-pris", f"kr {summary['min_price']:,.2f}" if summary["min_price"] else "N/A"),
-        ("Høyeste ALC-pris", f"kr {summary['max_price']:,.2f}" if summary["max_price"] else "N/A"),
-    ]
-
-    for row_idx, (label, value) in enumerate(summary_data, 1):
-        ws3.cell(row=row_idx, column=1, value=label).font = Font(bold=bool(label and not value))
-        ws3.cell(row=row_idx, column=2, value=value)
-
-    ws3.column_dimensions["A"].width = 30
-    ws3.column_dimensions["B"].width = 30
-
-    # Save
-    timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-    mode_suffix = "hardcore_pris" if is_hardcore else "standard"
-    output_filename = f"matching_{mode_suffix}_{job['job_id']}_{timestamp}.xlsx"
-    output_path = str(MATCH_OUTPUT_DIR / output_filename)
-    wb.save(output_path)
-    job["output_file"] = output_path
-    logger.info(f"Match Excel saved: {output_path}")
-
-
-def _add_match_to_history(job: dict) -> None:
-    """Add a completed match job to the persistent history."""
-    if job["status"] != "completed":
-        return
-    src = Path(job.get("output_file", ""))
-    if not src.exists():
-        return
-
-    history_filename = f"matching_{job['job_id']}.xlsx"
-    dest = HISTORY_EXCEL_DIR / history_filename
-    try:
-        shutil.copy2(str(src), str(dest))
-    except OSError as e:
-        logger.error(f"Failed to copy match Excel to history: {e}")
-        return
-
-    summary = _compute_match_summary(job)
-    entry = {
-        "job_id": job["job_id"],
-        "timestamp": datetime.fromtimestamp(job["created_at"]).isoformat(),
-        "created_at": job["created_at"],
-        "source_filename": job.get("source_filename", ""),
-        "excel_filename": history_filename,
-        "product_count": summary["total"],
-        "analysis_mode": f"matching_{job['match_mode']}",
-        "focus_areas": [],
-        "batch_info": f"Matching ({summary['matched']}/{summary['total']} matchet)",
-        "avg_score": summary.get("avg_price") or 0,
-        "critical_count": summary["no_match"],
-        "match_mode": job["match_mode"],
-        "match_summary": summary,
-    }
-
-    entries = _load_history()
-    entries.append(entry)
-    _save_history(entries)
-
-
-@app.get("/api/match/history")
-async def get_match_history():
-    """Get matching job history."""
-    entries = _load_history()
-    match_entries = [e for e in entries if e.get("analysis_mode", "").startswith("matching_")]
-    match_entries.reverse()
-    return {"entries": match_entries}
-
-
-# ── Job Management Endpoints ──
-
-
-@app.get("/api/jobs")
-async def list_all_jobs():
-    """List all persistent matching/anbud jobs."""
-    jobs = _list_persisted_jobs()
-    return {"jobs": jobs}
-
-
-@app.get("/api/jobs/{job_id}")
-async def get_job_detail(job_id: str):
-    """Get full job details including results."""
-    job = _get_job(job_id)
-    if not job:
-        raise HTTPException(404, "Jobb ikke funnet")
-
-    results = job.get("results", [])
-    serialized = []
-    for r in results:
-        if hasattr(r, "to_dict"):
-            serialized.append(r.to_dict())
-        elif isinstance(r, dict):
-            serialized.append(r)
-
-    return {
-        "job_id": job["job_id"],
-        "job_name": job.get("job_name", ""),
-        "created_by": job.get("created_by", ""),
-        "job_type": job.get("job_type", "standard"),
-        "status": job.get("status", "unknown"),
-        "match_mode": job.get("match_mode", "standard"),
-        "mode_label": _MODE_LABELS.get(job.get("match_mode", ""), "Standard"),
-        "total": job.get("total", 0),
-        "processed": job.get("processed", 0),
-        "created_at": job.get("created_at", 0),
-        "updated_at": job.get("updated_at", 0),
-        "last_activity_at": job.get("last_activity_at", 0),
-        "source_filename": job.get("source_filename", ""),
-        "detected_columns": job.get("detected_columns", {}),
-        "results": serialized,
-        "summary": job.get("summary") or (_compute_match_summary(job) if results else {}),
-        "row_approvals": job.get("row_approvals", {}),
-        "locked": job.get("locked", False),
-    }
-
-
-@app.post("/api/jobs/{job_id}/approve")
-async def approve_rows(job_id: str, data: dict = Body(...)):
-    """Approve or reject one or more rows.
-
-    Body: {"rows": [2, 3, 5], "action": "approved"|"rejected"|"pending", "password": "optional"}
-    Or for all: {"all": true, "action": "approved", "password": "optional"}
-    """
-    job = _match_jobs.get(job_id)
-    if not job:
-        # Try loading from disk into memory
-        job = _load_persisted_job(job_id)
-        if job:
-            _match_jobs[job_id] = job
-        else:
-            raise HTTPException(404, "Jobb ikke funnet")
-
-    if job.get("locked"):
-        can_edit, msg = _verify_job_access(job_id, data.get("password"))
-        if not can_edit:
-            raise HTTPException(403, msg)
-
-    action = data.get("action", "approved")
-    if action not in ("approved", "rejected", "pending"):
-        raise HTTPException(400, "Ugyldig handling. Bruk 'approved', 'rejected' eller 'pending'.")
-
-    approvals = job.setdefault("row_approvals", {})
-
-    if data.get("all"):
-        results = job.get("results", [])
-        for r in results:
-            row_num = r.input_row if hasattr(r, "input_row") else r.get("input_row")
-            if row_num is not None:
-                approvals[str(row_num)] = action
-        count = len(results)
-    else:
-        rows = data.get("rows", [])
-        if not rows:
-            raise HTTPException(400, "Ingen rader spesifisert")
-        for row_num in rows:
-            approvals[str(row_num)] = action
-        count = len(rows)
-
-    job["last_activity_at"] = time.time()
-    _persist_job(job)
-
-    # Feed approved rows into learning store
-    if action == "approved":
-        _feed_approved_rows_to_learning(job, approvals, job_id)
-
-    return {"message": f"{count} rader satt til '{action}'", "row_approvals": approvals}
-
-
-def _feed_approved_rows_to_learning(job: dict, approvals: dict, job_id: str) -> None:
-    """Feed approved rows with selected candidates into learning store."""
-    results = job.get("results", [])
-    for r in results:
-        row_num = str(r.input_row if hasattr(r, "input_row") else r.get("input_row", ""))
-        if approvals.get(row_num) != "approved":
-            continue
-        selected = r.selected_candidate if hasattr(r, "selected_candidate") else r.get("selected_candidate")
-        if not selected:
-            continue
-        input_name = r.input_product_name if hasattr(r, "input_product_name") else r.get("input_product_name", "")
-        input_spec = r.input_specification if hasattr(r, "input_specification") else r.get("input_specification", "")
-        _feed_learning_example(input_name, input_spec, selected, "ui_approval", job_id)
-
-
-@app.post("/api/jobs/{job_id}/lock")
-async def lock_job_endpoint(job_id: str, data: dict = Body(...)):
-    """Lock a job with a password.
-
-    Body: {"password": "mypassword"}
-    """
-    password = data.get("password", "")
-    if not password or len(password) < 4:
-        raise HTTPException(400, "Passord må være minst 4 tegn.")
-
-    job = _get_job(job_id)
-    if not job:
-        raise HTTPException(404, "Jobb ikke funnet")
-
-    if job.get("locked"):
-        raise HTTPException(400, "Jobben er allerede låst.")
-
-    success = _lock_persisted_job(job_id, password)
-    if not success:
-        raise HTTPException(500, "Kunne ikke låse jobben.")
-
-    # Update in-memory too
-    if job_id in _match_jobs:
-        _match_jobs[job_id]["locked"] = True
-
-    return {"message": "Jobben er nå låst", "locked": True}
-
-
-@app.post("/api/jobs/{job_id}/unlock")
-async def unlock_job_endpoint(job_id: str, data: dict = Body(...)):
-    """Unlock a job with password or admin password.
-
-    Body: {"password": "mypassword"}
-    """
-    password = data.get("password", "")
-    if not password:
-        raise HTTPException(400, "Passord er påkrevd.")
-
-    success, msg = _unlock_persisted_job(job_id, password)
-    if not success:
-        raise HTTPException(403, msg)
-
-    # Update in-memory too
-    if job_id in _match_jobs:
-        _match_jobs[job_id]["locked"] = False
-        _match_jobs[job_id].pop("lock_hash", None)
-
-    return {"message": msg, "locked": False}
-
-
-@app.get("/api/catalog/search")
-async def search_catalog(
-    q: str = Query("", description="Search query"),
-    article_number: str = Query("", description="Article number exact lookup"),
-):
-    """Search the Jeeves catalog for products. Used for manual product selection."""
-    if not _jeeves_index or not _jeeves_index.loaded:
-        raise HTTPException(400, "Katalog ikke lastet.")
-
-    results = []
-    query = q.strip().lower()
-    artnr_query = article_number.strip()
-
-    if not query and not artnr_query:
-        raise HTTPException(400, "Søkeord eller artikkelnummer er påkrevd.")
-
-    # Article number exact lookup
-    if artnr_query:
-        jd = _jeeves_index.get(artnr_query)
-        if jd:
-            results.append({
-                "article_number": jd.article_number,
-                "product_name": jd.item_description or "",
-                "specification": jd.specification or "",
-                "supplier": jd.supplier or "",
-                "product_brand": jd.product_brand or "",
-                "alc_price": None,
-            })
-        return {"results": results, "total": len(results)}
-
-    # Free-text search
-    all_artnrs = _jeeves_index.all_article_numbers()
-    scored = []
-    for artnr in all_artnrs:
-        jd = _jeeves_index.get(artnr)
-        if not jd:
-            continue
-        text = f"{jd.item_description or ''} {jd.specification or ''} {jd.supplier or ''} {artnr}".lower()
-        # Simple relevance: count query words that appear
-        words = query.split()
-        hits = sum(1 for w in words if w in text)
-        if hits > 0:
-            scored.append((hits, len(text), {
-                "article_number": jd.article_number,
-                "product_name": jd.item_description or "",
-                "specification": jd.specification or "",
-                "supplier": jd.supplier or "",
-                "product_brand": jd.product_brand or "",
-                "alc_price": None,
-            }))
-
-    # Sort by hits desc, then text length asc (prefer shorter/more specific)
-    scored.sort(key=lambda x: (-x[0], x[1]))
-    results = [s[2] for s in scored[:20]]
-
-    return {"results": results, "total": len(results)}
-
-
-@app.post("/api/match/select-manual/{job_id}")
-async def select_manual_product(job_id: str, data: dict = Body(...)):
-    """Select a product by article number from the catalog (not from candidates).
-
-    Body: {"input_row": 2, "article_number": "12345", "password": "optional"}
-    """
-    job = _match_jobs.get(job_id)
-    if not job:
-        job = _load_persisted_job(job_id)
-        if job:
-            _match_jobs[job_id] = job
-        else:
-            raise HTTPException(404, "Jobb ikke funnet")
-
-    if job.get("locked"):
-        can_edit, msg = _verify_job_access(job_id, data.get("password"))
-        if not can_edit:
-            raise HTTPException(403, msg)
-
-    input_row = data.get("input_row")
-    article_number = data.get("article_number", "").strip()
-    if input_row is None or not article_number:
-        raise HTTPException(400, "Mangler input_row eller article_number")
-
-    # Look up product in catalog
-    if not _jeeves_index or not _jeeves_index.loaded:
-        raise HTTPException(400, "Katalog ikke lastet.")
-    jd = _jeeves_index.get(article_number)
-    if not jd:
-        raise HTTPException(404, f"Artikkelnummer {article_number} finnes ikke i katalogen.")
-
-    # Update the result
-    for result in job["results"]:
-        row_num = result.input_row if hasattr(result, "input_row") else result.get("input_row")
-        if row_num == input_row:
-            # Create a manual candidate and add it
-            manual_cand = {
-                "article_number": jd.article_number,
-                "product_name": jd.item_description or "",
-                "specification": jd.specification or "",
-                "supplier": jd.supplier or "",
-                "product_brand": jd.product_brand or "",
-                "alc_price": None,
-                "relevance_score": 0,
-                "text_similarity": 0,
-                "category_match": True,
-                "hard_mismatch": False,
-                "mismatch_reason": "",
-                "ai_relevance_score": None,
-                "ai_explanation": "Manuelt valgt fra katalog",
-                "final_score": 0,
-                "is_sufficiently_relevant": True,
-                "rank": 0,
-                "tags": ["manuelt_valgt"],
-            }
-
-            if hasattr(result, "candidates"):
-                # Check if candidate already exists
-                existing = [c for c in result.candidates if c.article_number == article_number]
-                if not existing:
-                    from backend.matcher import MatchCandidate
-                    mc = MatchCandidate(**{k: v for k, v in manual_cand.items() if k != "alc_price_display" and k != "tags"})
-                    mc.tags = ["manuelt_valgt"]
-                    result.candidates.insert(0, mc)
-                result.selected_candidate = article_number
-                result.selected_by = "manual"
-                result.status = "matched"
-            else:
-                # Dict-based result from disk
-                candidates = result.get("candidates", [])
-                existing = [c for c in candidates if c.get("article_number") == article_number]
-                if not existing:
-                    candidates.insert(0, manual_cand)
-                    result["candidates"] = candidates
-                result["selected_candidate"] = article_number
-                result["selected_by"] = "manual"
-                result["status"] = "matched"
-
-            job["user_selections"][str(input_row)] = article_number
-            job["last_activity_at"] = time.time()
-            _persist_job(job)
-
-            return {
-                "message": "Produkt valgt manuelt",
-                "input_row": input_row,
-                "selected": article_number,
-                "product_name": jd.item_description or "",
-                "specification": jd.specification or "",
-                "supplier": jd.supplier or "",
-            }
-
-    raise HTTPException(404, f"Rad {input_row} ikke funnet i resultater")
-
-
-# ── Learning Module Endpoints ──
-
-@app.post("/api/learning/auth")
-async def learning_auth(data: dict = Body(...)):
-    """Verify admin password for learning module."""
-    password = data.get("password", "")
-    if _verify_learning_admin(password):
-        return {"authenticated": True}
-    raise HTTPException(403, "Feil admin-passord for læringsmodul.")
-
-
-@app.post("/api/learning/preview")
-async def learning_preview(
-    file: UploadFile = File(...),
-    password: str = Query("", description="Admin password"),
-):
-    """Preview Excel columns for mapping. Returns headers and sample rows."""
-    if not _verify_learning_admin(password):
-        raise HTTPException(403, "Feil admin-passord.")
-
+    return {"session_id": session_id, "total_products": len(selected),
+            "source_mode": source_mode, "batch_info": batch_info,
+            "message": f"Bildeanalyse startet: {batch_info}"}
+
+
+@app.post("/api/image-analysis/upload-start")
+async def start_image_analysis_from_excel(request: Request, file: UploadFile = File(...)):
+    """Start image analysis from an uploaded Excel file."""
+    client_ip = request.client.host if request.client else "unknown"
+    if not _check_rate_limit(client_ip):
+        raise HTTPException(429, "For mange forespørsler.")
+    if not file.filename or Path(file.filename).suffix.lower() != ".xlsx":
+        raise HTTPException(400, "Bruk .xlsx-format.")
     content = await file.read()
     if len(content) > MAX_FILE_SIZE:
         raise HTTPException(400, "Filen er for stor.")
-
     try:
-        from openpyxl import load_workbook
-        wb = load_workbook(BytesIO(content), read_only=True, data_only=True)
-        ws = wb.active
-
-        rows = list(ws.iter_rows(max_row=6))
-        if not rows:
-            raise HTTPException(400, "Tom fil")
-
-        headers = [str(cell.value or "").strip() for cell in rows[0]]
-        preview_rows = []
-        for row in rows[1:]:
-            preview_rows.append([str(cell.value or "").strip() for cell in row])
-
-        wb.close()
-
-        return {
-            "headers": headers,
-            "preview_rows": preview_rows,
-            "column_count": len(headers),
-            "filename": file.filename,
-        }
+        article_numbers, _ = read_article_numbers(content, file.filename)
     except Exception as e:
-        raise HTTPException(400, f"Kunne ikke lese filen: {e}")
+        raise HTTPException(400, f"Kunne ikke lese Excel: {e}")
+    if not article_numbers:
+        raise HTTPException(400, "Ingen artikkelnumre funnet")
+    seen = set()
+    unique = [a for a in article_numbers if a not in seen and not seen.add(a)]
+    if len(unique) > MAX_ARTICLES:
+        raise HTTPException(400, f"For mange artikler ({len(unique)}). Maks {MAX_ARTICLES}.")
+    session_id = _generate_session_id()
+    batch_info = f"Excel: {len(unique)} artikler fra {file.filename}"
+
+    async def _run():
+        try:
+            await run_image_analysis(unique, session_id, _jeeves_index)
+        except Exception as e:
+            logger.error(f"Image analysis {session_id} failed: {e}")
+
+    task = asyncio.create_task(_run())
+    _ia_tasks[session_id] = task
+    _background_tasks.add(task)
+    task.add_done_callback(_background_tasks.discard)
+    return {"session_id": session_id, "total_products": len(unique),
+            "source_mode": "upload_excel", "batch_info": batch_info}
 
 
-@app.post("/api/learning/import")
-async def learning_import(
-    file: UploadFile = File(...),
-    password: str = Query("", description="Admin password"),
-    batch_name: str = Query("", description="Import batch name"),
-    imported_by: str = Query("", description="Imported by"),
-    input_text_col: int = Query(..., description="Column index for input product text"),
-    input_spec_col: int = Query(-1, description="Column index for input specification (-1 = none)"),
-    output_artnr_col: int = Query(..., description="Column index for matched article number"),
-    output_name_col: int = Query(-1, description="Column index for matched product name (-1 = none)"),
-):
-    """Import historical anbud as learning examples."""
-    if not _verify_learning_admin(password):
-        raise HTTPException(403, "Feil admin-passord.")
-
-    if not batch_name.strip():
-        raise HTTPException(400, "Importnavn er påkrevd.")
-
-    content = await file.read()
+@app.get("/api/image-analysis/status/{session_id}")
+async def image_analysis_status(session_id: str):
     try:
-        from openpyxl import load_workbook
-        wb = load_workbook(BytesIO(content), read_only=True, data_only=True)
-        ws = wb.active
-
-        rows_iter = ws.iter_rows()
-        header_row = next(rows_iter)  # skip header
-        headers = [str(cell.value or "").strip() for cell in header_row]
-
-        items = []
-        total_rows = 0
-        rejected = 0
-
-        for row in rows_iter:
-            total_rows += 1
-            values = [cell.value for cell in row]
-
-            input_text = str(values[input_text_col] or "").strip() if input_text_col < len(values) else ""
-            input_spec = str(values[input_spec_col] or "").strip() if input_spec_col >= 0 and input_spec_col < len(values) else ""
-            matched_article = str(values[output_artnr_col] or "").strip() if output_artnr_col < len(values) else ""
-            matched_name = str(values[output_name_col] or "").strip() if output_name_col >= 0 and output_name_col < len(values) else ""
-
-            if not input_text or not matched_article:
-                rejected += 1
-                continue
-
-            # Skip if article number looks invalid
-            if len(matched_article) < 2 or matched_article.lower() in ("none", "nan", "-", ""):
-                rejected += 1
-                continue
-
-            items.append({
-                "input_text": input_text,
-                "input_spec": input_spec,
-                "matched_article": matched_article,
-                "matched_product_name": matched_name,
-            })
-
-        wb.close()
-    except Exception as e:
-        raise HTTPException(400, f"Kunne ikke lese filen: {e}")
-
-    if not items:
-        raise HTTPException(400, f"Ingen gyldige rader funnet. {rejected} rader ble forkastet (mangler input eller artikkelnummer).")
-
-    # Generate batch ID and import
-    batch_id = str(uuid.uuid4())[:8]
-    count = add_examples_batch(items, batch_id)
-
-    mapped_fields = {
-        "input_text": headers[input_text_col] if input_text_col < len(headers) else f"col_{input_text_col}",
-        "input_spec": headers[input_spec_col] if input_spec_col >= 0 and input_spec_col < len(headers) else None,
-        "output_artnr": headers[output_artnr_col] if output_artnr_col < len(headers) else f"col_{output_artnr_col}",
-        "output_name": headers[output_name_col] if output_name_col >= 0 and output_name_col < len(headers) else None,
-    }
-
-    batch = register_batch(
-        batch_id=batch_id,
-        name=batch_name.strip(),
-        source_filename=file.filename or "",
-        total_rows=total_rows,
-        valid_examples=count,
-        rejected_rows=rejected,
-        mapped_fields=mapped_fields,
-        imported_by=imported_by.strip(),
-    )
-
-    return {
-        "batch_id": batch_id,
-        "name": batch_name.strip(),
-        "total_rows": total_rows,
-        "valid_examples": count,
-        "rejected_rows": rejected,
-        "mapped_fields": mapped_fields,
-    }
+        return _get_ia_status(session_id)
+    except ValueError:
+        raise HTTPException(404, "Sesjon ikke funnet")
 
 
-@app.get("/api/learning/stats")
-async def learning_stats_endpoint():
-    """Get learning store statistics."""
-    return get_learning_stats()
+@app.get("/api/image-analysis/results/{session_id}")
+async def image_analysis_results(session_id: str,
+    filter: Optional[str] = Query(None), page: int = Query(1, ge=1),
+    page_size: int = Query(50, ge=1, le=200)):
+    try:
+        session = _load_ia_session(session_id)
+    except ValueError:
+        raise HTTPException(404, "Sesjon ikke funnet")
+    if session["status"] != ImageAnalysisStatus.COMPLETED.value:
+        return {"session_id": session_id, "status": session["status"],
+                "items": [], "total": 0, "summary": session.get("summary", {})}
+    items = session["items"]
+    if filter == "needs_review": items = [i for i in items if i["needs_review"]]
+    elif filter == "approved": items = [i for i in items if i["review_status"] == "approved"]
+    elif filter == "rejected": items = [i for i in items if i["review_status"] == "rejected"]
+    elif filter == "pending": items = [i for i in items if i["review_status"] == "pending"]
+    total = len(items)
+    start = (page - 1) * page_size
+    page_items = items[start:start + page_size]
+    all_items = session["items"]
+    counts = {"total": len(all_items),
+              "needs_review": sum(1 for i in all_items if i["needs_review"]),
+              "approved": sum(1 for i in all_items if i["review_status"] == "approved"),
+              "rejected": sum(1 for i in all_items if i["review_status"] == "rejected"),
+              "pending": sum(1 for i in all_items if i["review_status"] == "pending")}
+    return {"session_id": session_id, "status": session["status"], "items": page_items,
+            "total": total, "page": page, "page_size": page_size,
+            "total_pages": (total + page_size - 1) // page_size,
+            "summary": session.get("summary", {}), "status_counts": counts}
 
 
-@app.get("/api/learning/batches")
-async def learning_batches_endpoint():
-    """List all import batches."""
-    return {"batches": list_learning_batches()}
+@app.put("/api/image-analysis/{session_id}/review/{article_number}")
+async def review_image(session_id: str, article_number: str, data: dict = Body(...)):
+    status = data.get("review_status")
+    if not status:
+        raise HTTPException(400, "review_status er påkrevd")
+    try:
+        result = _update_ia_review(session_id, article_number, status, data.get("suggested_image_url"))
+        return {"status": "ok", **result}
+    except ValueError as e:
+        raise HTTPException(400 if "Invalid" in str(e) else 404, str(e))
 
 
-@app.delete("/api/learning/batches/{batch_id}")
-async def delete_learning_batch_endpoint(batch_id: str, password: str = Query("", description="Admin password")):
-    """Delete an import batch and its examples."""
-    if not _verify_learning_admin(password):
-        raise HTTPException(403, "Feil admin-passord.")
+@app.put("/api/image-analysis/{session_id}/bulk-review")
+async def bulk_review_images(session_id: str, data: dict = Body(...)):
+    articles = data.get("article_numbers", [])
+    status = data.get("review_status")
+    if not articles:
+        raise HTTPException(400, "Ingen artikkelnumre")
+    if not status:
+        raise HTTPException(400, "review_status er påkrevd")
+    try:
+        result = _bulk_ia_review(session_id, articles, status)
+        return {"status": "ok", **result}
+    except ValueError as e:
+        raise HTTPException(400 if "Invalid" in str(e) else 404, str(e))
 
-    removed = delete_learning_batch(batch_id)
-    if removed == 0:
-        raise HTTPException(404, "Batch ikke funnet eller allerede slettet.")
 
-    return {"message": f"{removed} læringseksempler slettet", "removed": removed}
+@app.get("/api/image-analysis/{session_id}/export-zip")
+async def export_images_zip(session_id: str):
+    try:
+        zip_buffer = await export_approved_images_zip(session_id)
+    except ValueError as e:
+        raise HTTPException(400, str(e))
+    from starlette.responses import StreamingResponse
+    return StreamingResponse(zip_buffer, media_type="application/zip",
+        headers={"Content-Disposition": f"attachment; filename=godkjente_bilder_{session_id}.zip"})
 
 
-@app.post("/api/learning/reindex")
-async def learning_reindex_endpoint(data: dict = Body(...)):
-    """Reindex all learning examples (regenerate tokens)."""
-    if not _verify_learning_admin(data.get("password", "")):
-        raise HTTPException(403, "Feil admin-passord.")
+@app.get("/api/image-analysis/sessions")
+async def list_image_analysis_sessions():
+    return {"sessions": _list_ia_sessions()}
 
-    count = reindex_learning()
-    return {"message": f"{count} eksempler reindeksert", "count": count}
+
+@app.get("/api/image-analysis/suppliers")
+async def list_suppliers():
+    if not _jeeves_index or not _jeeves_index.loaded:
+        return {"suppliers": [], "loaded": False}
+    return {"suppliers": get_suppliers_from_jeeves(_jeeves_index), "loaded": True}
 
 
 if __name__ == "__main__":
