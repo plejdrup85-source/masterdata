@@ -3155,7 +3155,11 @@ async def start_image_analysis(request: Request, data: dict = Body(...)):
         selected = all_catalog
         batch_info = f"Hele katalogen: {len(selected)} artikler"
     elif source_mode == "catalog_random":
-        sample_size = min(data.get("sample_size", 100), len(all_catalog))
+        try:
+            sample_size = int(data.get("sample_size", 100))
+        except (TypeError, ValueError):
+            raise HTTPException(400, "sample_size må være et heltall")
+        sample_size = min(sample_size, len(all_catalog))
         if sample_size < 1:
             raise HTTPException(400, "sample_size må være minst 1")
         rng = random.Random(int(time.time()))
@@ -3199,6 +3203,8 @@ async def start_image_analysis(request: Request, data: dict = Body(...)):
             await run_image_analysis(selected, session_id, _jeeves_index)
         except Exception as e:
             logger.error(f"Image analysis {session_id} failed: {e}")
+        finally:
+            _ia_tasks.pop(session_id, None)
 
     task = asyncio.create_task(_run())
     _ia_tasks[session_id] = task
@@ -3228,7 +3234,11 @@ async def start_image_analysis_from_excel(request: Request, file: UploadFile = F
     if not article_numbers:
         raise HTTPException(400, "Ingen artikkelnumre funnet")
     seen = set()
-    unique = [a for a in article_numbers if a not in seen and not seen.add(a)]
+    unique = []
+    for a in article_numbers:
+        if a not in seen:
+            seen.add(a)
+            unique.append(a)
     if len(unique) > MAX_ARTICLES:
         raise HTTPException(400, f"For mange artikler ({len(unique)}). Maks {MAX_ARTICLES}.")
     session_id = _generate_session_id()
@@ -3239,6 +3249,8 @@ async def start_image_analysis_from_excel(request: Request, file: UploadFile = F
             await run_image_analysis(unique, session_id, _jeeves_index)
         except Exception as e:
             logger.error(f"Image analysis {session_id} failed: {e}")
+        finally:
+            _ia_tasks.pop(session_id, None)
 
     task = asyncio.create_task(_run())
     _ia_tasks[session_id] = task

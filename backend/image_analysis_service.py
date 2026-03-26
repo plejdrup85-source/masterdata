@@ -204,12 +204,21 @@ async def run_image_analysis(
                 items.append(item)
             except Exception as e:
                 logger.error(f"Image analysis failed for {artnr}: {e}")
+                # Still try to get Jeeves data for error items
+                err_name = err_supplier = err_supplier_item = err_spec = ""
+                if jeeves_index and jeeves_index.loaded:
+                    j = jeeves_index.get(artnr)
+                    if j:
+                        err_name = j.item_description or j.web_title or ""
+                        err_supplier = j.supplier or ""
+                        err_supplier_item = j.supplier_item_no or ""
+                        err_spec = j.specification or ""
                 items.append({
                     "article_number": artnr,
-                    "product_name": "",
-                    "supplier": "",
-                    "supplier_item_no": "",
-                    "specification": "",
+                    "product_name": err_name,
+                    "supplier": err_supplier,
+                    "supplier_item_no": err_supplier_item,
+                    "specification": err_spec,
                     "current_image_url": None,
                     "current_image_exists": False,
                     "image_score": 0,

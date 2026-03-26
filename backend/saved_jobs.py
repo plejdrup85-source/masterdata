@@ -158,7 +158,11 @@ def unlock_job(job_id: str, password: str) -> dict:
 
 
 def list_saved_jobs() -> list[dict]:
-    """List all saved jobs (metadata only, no passwords or state)."""
+    """List all saved jobs (metadata only, no passwords or state).
+
+    Does NOT delete expired jobs as a side effect — that's cleanup_expired()'s job.
+    Expired jobs are simply excluded from the list.
+    """
     jobs = []
     for path in sorted(SAVED_JOBS_DIR.glob("*.json"), reverse=True):
         try:
@@ -166,9 +170,7 @@ def list_saved_jobs() -> list[dict]:
             last_activity = data.get("updated_at", data.get("created_at", 0))
             is_expired = time.time() - last_activity > JOB_EXPIRY_SECONDS
             if is_expired:
-                # Clean up expired on list
-                path.unlink(missing_ok=True)
-                continue
+                continue  # Skip expired, don't delete (cleanup runs at startup)
             jobs.append({
                 "job_id": data.get("job_id", path.stem),
                 "job_name": data.get("job_name", ""),
