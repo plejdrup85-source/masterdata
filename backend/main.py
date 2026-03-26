@@ -2527,31 +2527,9 @@ async def _run_analysis(
             f"({duplicate_count} duplicate fetches prevented)"
         )
 
-    # --- Batch product discovery ---
-    # Before analysis, find product page URLs for all products not yet in the
-    # SKU index. This scans sitemap pages looking specifically for the products
-    # in this batch. Stops as soon as all targets are found or sitemap is exhausted.
-    # Also builds the general index as a side effect for future runs.
-    try:
-        job.current_step = "finding_product_pages"
-        missing_from_index = {
-            a for a in unique_articles if a.strip() not in _sku_to_url
-        }
-        if missing_from_index:
-            logger.info(
-                f"[{job_id}] {len(missing_from_index)}/{len(unique_articles)} products "
-                f"not in SKU index — scanning sitemap to find their pages"
-            )
-            found_urls = await find_batch_products_in_sitemap(missing_from_index)
-            logger.info(
-                f"[{job_id}] Batch discovery found {len(found_urls)} product pages"
-            )
-        else:
-            logger.info(f"[{job_id}] All {len(unique_articles)} products already in SKU index")
-    except Exception as e:
-        logger.warning(f"[{job_id}] Batch product discovery failed (non-fatal): {e}")
-
-    # Scope logging — verify strict input processing
+    # --- Skip per-job sitemap scanning ---
+    # Index is built at startup and can be triggered manually via /api/build-index.
+    # Per-job scanning was removed because it added significant delay to every job.
     try:
         in_index = sum(1 for a in unique_articles if a.strip() in _sku_to_url)
     except Exception:
